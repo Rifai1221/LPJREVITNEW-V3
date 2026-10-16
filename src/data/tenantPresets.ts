@@ -12,6 +12,7 @@ export interface SchoolTenant {
   provinsi: string;
   email: string;
   isDemo?: boolean;
+  pin?: string;
   createdAt: string;
   lastLogin: string;
 }

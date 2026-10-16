@@ -17,6 +17,8 @@ export interface SchoolMasterData {
   termin2Persen: number;
   termin1Nilai: number;
   termin2Nilai: number;
+  // Keamanan & Dual Login
+  pinAkses?: string;
   // Kop Surat & Visual Identity Logos
   logoLeftUrl?: string;
   logoRightUrl?: string;

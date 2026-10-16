@@ -87,6 +87,12 @@ import {
   loadPersistentAuthSession,
 } from './services/googleAuthService';
 import { syncStateToSpreadsheet } from './services/googleSheetsService';
+import {
+  LocalUserSession,
+  getLocalUserSession,
+  clearLocalUserSession,
+  setLocalUserSession,
+} from './utils/authHelper';
 import { CheckCircle2, Database, ShieldAlert, Sparkles, X, Trash2, RefreshCw, AlertTriangle, FileSpreadsheet } from 'lucide-react';
 import { defaultRealSchoolData } from './data/realSchoolData';
 import { RealSchoolData, RpdKategori } from './types';
@@ -104,13 +110,14 @@ export default function App() {
   const [lastSyncedText, setLastSyncedText] = useState('Otomatis');
   const [switchNotification, setSwitchNotification] = useState<string | null>(null);
 
-  // Authentication & Login Mode States
+  // Authentication & Dual Login Mode States
+  const [localSession, setLocalSession] = useState<LocalUserSession | null>(() => getLocalUserSession());
   const [currentUser, setCurrentUser] = useState<GoogleUserProfile | null>(() => getCurrentUser() || loadPersistentAuthSession()?.user || null);
   const [isSigningInGoogle, setIsSigningInGoogle] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(() => {
     try {
       const active = localStorage.getItem('LPJ_USER_SESSION_ACTIVE');
-      return active === 'true' || !!loadPersistentAuthSession();
+      return active === 'true' || !!loadPersistentAuthSession() || !!getLocalUserSession();
     } catch {
       return false;
     }
@@ -1793,6 +1800,8 @@ Lanjutkan pengosongan data transaksi?`)
     } catch {}
     setIsLoggedIn(false);
     setCurrentUser(null);
+    setLocalSession(null);
+    clearLocalUserSession();
     setIsGoogleConnected(false);
     localStorage.removeItem('LPJ_USER_SESSION_ACTIVE');
     setSwitchNotification('Anda telah keluar dari ruang kerja sekolah. Silakan login kembali.');
@@ -1833,6 +1842,17 @@ Lanjutkan pengosongan data transaksi?`)
                 setIsGoogleConnected(true);
                 setIsLoggedIn(true);
                 localStorage.setItem('LPJ_USER_SESSION_ACTIVE', 'true');
+                const googleSession: LocalUserSession = {
+                  authMode: 'google',
+                  role: 'BENDAHARA',
+                  roleLabel: 'Akun Google Terverifikasi',
+                  officerName: res.user.displayName || res.user.email || 'Pengguna Google',
+                  schoolId: currentTenant.id,
+                  schoolName: currentTenant.namaSekolah,
+                  loginAt: new Date().toISOString(),
+                };
+                setLocalSession(googleSession);
+                setLocalUserSession(googleSession);
                 setSwitchNotification(`Berhasil login dengan ${res.user.displayName || res.user.email} • Google Drive Terhubung Permanen!`);
                 setTimeout(() => setSwitchNotification(null), 6000);
               }
@@ -1844,7 +1864,13 @@ Lanjutkan pengosongan data transaksi?`)
           }}
           isSigningInGoogle={isSigningInGoogle}
           currentUser={currentUser}
-          onProceedToDashboard={() => {
+          onProceedToDashboard={(sessionData) => {
+            if (sessionData) {
+              setLocalSession(sessionData);
+              setLocalUserSession(sessionData);
+              setSwitchNotification(`Selamat datang di ${sessionData.schoolName}! Masuk sebagai ${sessionData.roleLabel} (${sessionData.officerName}).`);
+              setTimeout(() => setSwitchNotification(null), 5000);
+            }
             setIsLoggedIn(true);
             localStorage.setItem('LPJ_USER_SESSION_ACTIVE', 'true');
           }}
@@ -1867,7 +1893,7 @@ Lanjutkan pengosongan data transaksi?`)
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col font-sans text-slate-800">
-      {/* Top Header with Multi-Tenant School Switcher */}
+      {/* Top Header with Multi-Tenant School Switcher & Dual Login Session */}
       <Header
         school={appState.school}
         currentTenant={currentTenant}
@@ -1885,6 +1911,7 @@ Lanjutkan pengosongan data transaksi?`)
         isGoogleConnected={isGoogleConnected}
         googleSheetName={googleSheetName}
         currentUser={currentUser}
+        localSession={localSession}
         onLogout={handleLogout}
       />
 

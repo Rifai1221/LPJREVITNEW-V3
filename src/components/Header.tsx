@@ -17,10 +17,13 @@ import {
   FileSpreadsheet,
   LogOut,
   HardDrive,
+  KeyRound,
+  UserCheck,
 } from 'lucide-react';
 import { SchoolMasterData } from '../types';
 import { SchoolTenant } from '../data/tenantPresets';
 import { GoogleUserProfile } from '../services/googleAuthService';
+import { LocalUserSession } from '../utils/authHelper';
 
 interface HeaderProps {
   school: SchoolMasterData;
@@ -40,6 +43,7 @@ interface HeaderProps {
   isGoogleConnected?: boolean;
   googleSheetName?: string;
   currentUser?: GoogleUserProfile | null;
+  localSession?: LocalUserSession | null;
   onLogout?: () => void;
 }
 
@@ -61,6 +65,7 @@ export const Header: React.FC<HeaderProps> = ({
   isGoogleConnected = false,
   googleSheetName,
   currentUser,
+  localSession,
   onLogout,
 }) => {
   const tabs = [
@@ -223,7 +228,26 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           )}
 
-          {/* User Account Chip (Google Drive) */}
+          {/* User Account Chip - Dual Login Indicator */}
+          {localSession && localSession.authMode === 'mandiri' && (
+            <div
+              className="flex items-center gap-2 bg-indigo-950/80 border border-indigo-500/40 px-2.5 py-1 rounded-lg"
+              title={`Mode Masuk Mandiri PIN: ${localSession.roleLabel} (${localSession.officerName})`}
+            >
+              <div className="w-5 h-5 rounded-full bg-indigo-600 text-[10px] font-bold flex items-center justify-center text-white shrink-0 shadow-xs">
+                <KeyRound className="w-3 h-3 text-amber-300" />
+              </div>
+              <div className="text-left hidden lg:block leading-tight">
+                <p className="text-[11px] font-bold text-indigo-200 truncate max-w-[130px]">
+                  {localSession.roleLabel}
+                </p>
+                <p className="text-[9px] text-slate-400 font-medium truncate max-w-[130px]">
+                  {localSession.officerName}
+                </p>
+              </div>
+            </div>
+          )}
+
           {currentUser && (
             <div
               className="flex items-center gap-2 bg-slate-800/90 border border-slate-700/80 px-2.5 py-1.5 rounded-lg"

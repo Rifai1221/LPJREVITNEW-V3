@@ -30,12 +30,14 @@ import {
   Sliders,
   X,
   Zap,
+  Lock,
 } from 'lucide-react';
 import { SchoolMasterData } from '../types';
 import { formatRupiah } from '../utils/formatters';
 import { P2spOrgChart, P2spSkDocument } from './P2spBaganAndSk';
 import { SkTimTeknisDocument } from './SkTimTeknisDocument';
 import { compressImageFile, TUT_WURI_HANDAYANI_LOGO } from '../utils/imageHelper';
+import { getSchoolPin, setSchoolPin } from '../utils/authHelper';
 
 interface MasterDataFormProps {
   school: SchoolMasterData;
@@ -1870,6 +1872,44 @@ export const MasterDataForm: React.FC<MasterDataFormProps> = ({ school, onSave, 
                   className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 bg-slate-50"
                 />
               </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Keamanan Ruang Kerja & PIN Akses (Dual Login) */}
+        <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-xs space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+            <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
+              <Lock className="w-4 h-4 text-amber-600" />
+              <h4>Keamanan Ruang Kerja & PIN Sekolah</h4>
+            </div>
+            <span className="text-[10px] bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded font-mono font-medium">
+              Dual Login PIN
+            </span>
+          </div>
+
+          <div className="space-y-3">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-semibold text-slate-700">
+                  PIN Akses Ruang Kerja Sekolah (4–6 Angka)
+                </label>
+                <span className="text-[10px] text-slate-400">Default: 123456</span>
+              </div>
+              <input
+                type="text"
+                value={formData.pinAkses !== undefined ? formData.pinAkses : getSchoolPin(school.npsn || 'current', '123456')}
+                onChange={(e) => {
+                  const val = e.target.value.replace(/\s+/g, '');
+                  handleChange('pinAkses', val);
+                  if (val) setSchoolPin(school.npsn || 'current', val);
+                }}
+                placeholder="123456"
+                className="w-full px-3 py-2 text-xs font-mono font-bold tracking-wider text-slate-800 border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-amber-500 bg-slate-50 focus:bg-white"
+              />
+              <p className="text-[11px] text-slate-500 mt-1">
+                PIN ini digunakan untuk masuk melalui opsi <strong>Login Mandiri / PIN</strong> tanpa memerlukan otorisasi Google OAuth, sehingga terhindar dari kendala <em>origin_mismatch</em>.
+              </p>
             </div>
           </div>
         </div>
