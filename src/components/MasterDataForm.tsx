@@ -38,22 +38,34 @@ import { P2spOrgChart, P2spSkDocument } from './P2spBaganAndSk';
 import { SkTimTeknisDocument } from './SkTimTeknisDocument';
 import { compressImageFile, TUT_WURI_HANDAYANI_LOGO } from '../utils/imageHelper';
 import { getSchoolPin, setSchoolPin } from '../utils/authHelper';
+import { SchoolTenant } from '../data/tenantPresets';
 
 interface MasterDataFormProps {
   school: SchoolMasterData;
+  currentTenant?: SchoolTenant;
   onSave: (updated: SchoolMasterData) => void;
   onOpenPrintModal?: (doc: 'BAGAN_STRUKTUR' | 'SK_P2SP' | string) => void;
   onDeleteSchool?: () => void;
 }
 
-export const MasterDataForm: React.FC<MasterDataFormProps> = ({ school, onSave, onOpenPrintModal, onDeleteSchool }) => {
+export const MasterDataForm: React.FC<MasterDataFormProps> = ({ school, currentTenant, onSave, onOpenPrintModal, onDeleteSchool }) => {
   const [formData, setFormData] = useState<SchoolMasterData>({ ...school });
   const [isSaved, setIsSaved] = useState(false);
   const [p2spActiveView, setP2spActiveView] = useState<'form' | 'bagan' | 'sk' | 'sk_tim_teknis'>('form');
 
+  // PIN Management State
+  const [currentPinValue, setCurrentPinValue] = useState<string>(() => {
+    return formData.pinAkses || getSchoolPin(currentTenant?.id || school.npsn || 'current', school.npsn, '123456');
+  });
+  const [pinSuccessMsg, setPinSuccessMsg] = useState<string | null>(null);
+  const [showPinVisible, setShowPinVisible] = useState(false);
+
   // Synchronize internal formData whenever external school prop changes
   useEffect(() => {
     setFormData(school);
+    if (school.pinAkses) {
+      setCurrentPinValue(school.pinAkses);
+    }
   }, [school]);
 
   // Logo Kop Surat Management State
@@ -1894,22 +1906,88 @@ export const MasterDataForm: React.FC<MasterDataFormProps> = ({ school, onSave, 
                 <label className="block text-xs font-semibold text-slate-700">
                   PIN Akses Ruang Kerja Sekolah (4–6 Angka)
                 </label>
-                <span className="text-[10px] text-slate-400">Default: 123456</span>
+                <span className="text-[10px] text-slate-400">PIN Bawaan Awal: 123456</span>
               </div>
-              <input
-                type="text"
-                value={formData.pinAkses !== undefined ? formData.pinAkses : getSchoolPin(school.npsn || 'current', '123456')}
-                onChange={(e) => {
-                  const val = e.target.value.replace(/\s+/g, '');
-                  handleChange('pinAkses', val);
-                  if (val) setSchoolPin(school.npsn || 'current', val);
-                }}
-                placeholder="123456"
-                className="w-full px-3 py-2 text-xs font-mono font-bold tracking-wider text-slate-800 border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-amber-500 bg-slate-50 focus:bg-white"
-              />
-              <p className="text-[11px] text-slate-500 mt-1">
-                PIN ini digunakan untuk masuk melalui opsi <strong>Login Mandiri / PIN</strong> tanpa memerlukan otorisasi Google OAuth, sehingga terhindar dari kendala <em>origin_mismatch</em>.
-              </p>
+
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <input
+                    type={showPinVisible ? 'text' : 'password'}
+                    value={currentPinValue}
+                    onChange={(e) => {
+                      const val = e.target.value.replace(/\s+/g, '');
+                      setCurrentPinValue(val);
+                      handleChange('pinAkses', val);
+                      setPinSuccessMsg(null);
+                    }}
+                    placeholder="123456"
+                    className="w-full pl-3.5 pr-10 py-2.5 text-xs font-mono font-bold tracking-widest text-slate-900 border border-slate-300 focus:border-amber-500 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-amber-400/40 bg-slate-50 focus:bg-white transition"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPinVisible(!showPinVisible)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    title={showPinVisible ? 'Sembunyikan PIN' : 'Lihat PIN'}
+                  >
+                    <Eye className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const cleanPin = (currentPinValue || '').trim();
+                    if (!cleanPin) {
+                      alert('PIN tidak boleh kosong. Masukkan minimal 4-6 angka.');
+                      return;
+                    }
+                    const tenantId = currentTenant?.id || `sch_${school.npsn || 'school'}`;
+                    setSchoolPin(tenantId, cleanPin, school.npsn);
+                    handleChange('pinAkses', cleanPin);
+                    onSave({
+                      ...formData,
+                      pinAkses: cleanPin,
+                    });
+                    setPinSuccessMsg(`PIN baru "${cleanPin}" berhasil disimpan & langsung aktif! Gunakan PIN ini saat masuk ulang.`);
+                    setTimeout(() => setPinSuccessMsg(null), 7000);
+                  }}
+                  className="px-4 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white text-xs font-bold rounded-lg shadow-sm transition flex items-center gap-1.5 cursor-pointer shrink-0"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>Simpan PIN Baru</span>
+                </button>
+              </div>
+
+              {pinSuccessMsg ? (
+                <div className="flex items-center gap-2 text-emerald-800 text-[11px] mt-2 bg-emerald-50 border border-emerald-300 p-2.5 rounded-lg animate-in fade-in duration-200">
+                  <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span className="font-semibold">{pinSuccessMsg}</span>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between flex-wrap gap-2 text-[11px] text-slate-500 mt-2">
+                  <span>
+                    PIN ini digunakan untuk masuk melalui opsi <strong>Login Mandiri / PIN</strong> tanpa memerlukan Google OAuth (bebas error <em>origin_mismatch</em>).
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const tenantId = currentTenant?.id || `sch_${school.npsn || 'school'}`;
+                      setSchoolPin(tenantId, '123456', school.npsn);
+                      setCurrentPinValue('123456');
+                      handleChange('pinAkses', '123456');
+                      onSave({
+                        ...formData,
+                        pinAkses: '123456',
+                      });
+                      setPinSuccessMsg('PIN berhasil dikembalikan ke standar awal: 123456.');
+                      setTimeout(() => setPinSuccessMsg(null), 5000);
+                    }}
+                    className="text-amber-700 hover:text-amber-900 font-semibold underline cursor-pointer"
+                  >
+                    Reset ke Default (123456)
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>

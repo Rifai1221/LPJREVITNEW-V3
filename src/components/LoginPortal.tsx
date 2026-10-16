@@ -402,19 +402,29 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
                       <Lock className="w-3.5 h-3.5 text-amber-400" />
                       <span>PIN Keamanan Sekolah:</span>
                     </label>
-                    <button
-                      type="button"
-                      onClick={handleUseDefaultPin}
-                      className="text-[11px] text-amber-400 hover:text-amber-300 underline font-medium cursor-pointer"
-                    >
-                      Pakai PIN Bawaan (123456)
-                    </button>
+                    {getSchoolPin(selectedTenant.id, selectedTenant.npsn, selectedTenant.pin) === '123456' ? (
+                      <button
+                        type="button"
+                        onClick={handleUseDefaultPin}
+                        className="text-[11px] text-amber-400 hover:text-amber-300 underline font-medium cursor-pointer"
+                      >
+                        Pakai PIN Bawaan (123456)
+                      </button>
+                    ) : (
+                      <span className="text-[10px] bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 px-2 py-0.5 rounded font-mono">
+                        PIN Kustom Aktif
+                      </span>
+                    )}
                   </div>
 
                   <div className="relative">
                     <input
                       type={showPin ? 'text' : 'password'}
-                      placeholder="Masukkan 4-6 digit PIN (Standar: 123456)"
+                      placeholder={
+                        getSchoolPin(selectedTenant.id, selectedTenant.npsn, selectedTenant.pin) !== '123456'
+                          ? 'Masukkan PIN baru yang telah disimpan...'
+                          : 'Masukkan PIN (Default: 123456)'
+                      }
                       value={pinInput}
                       onChange={(e) => {
                         setPinInput(e.target.value);
@@ -443,7 +453,11 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
                   <div className="flex items-start gap-2 bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/80 text-[11px] text-slate-400">
                     <Info className="w-3.5 h-3.5 text-blue-400 shrink-0 mt-0.5" />
                     <span>
-                      Untuk kemudahan awal, Anda dapat langsung menggunakan PIN default <strong>123456</strong> atau 4 digit terakhir NPSN sekolah (<strong>{selectedTenant.npsn ? selectedTenant.npsn.slice(-4) : '...'}</strong>). PIN dapat diubah di menu Pengaturan Data Master Sekolah.
+                      {getSchoolPin(selectedTenant.id, selectedTenant.npsn, selectedTenant.pin) !== '123456' ? (
+                        <>Sekolah ini menggunakan PIN kustom yang telah Anda ubah di menu <strong>Data Master Sekolah</strong>. Masukkan PIN baru Anda untuk membuka ruang kerja.</>
+                      ) : (
+                        <>Untuk awal, Anda dapat langsung menggunakan PIN bawaan <strong>123456</strong> atau 4 digit terakhir NPSN (<strong>{selectedTenant.npsn ? selectedTenant.npsn.slice(-4) : '...'}</strong>). Anda dapat mengubah PIN di Data Master Sekolah.</>
+                      )}
                     </span>
                   </div>
                 </div>

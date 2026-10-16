@@ -92,6 +92,7 @@ import {
   getLocalUserSession,
   clearLocalUserSession,
   setLocalUserSession,
+  setSchoolPin,
 } from './utils/authHelper';
 import { CheckCircle2, Database, ShieldAlert, Sparkles, X, Trash2, RefreshCw, AlertTriangle, FileSpreadsheet } from 'lucide-react';
 import { defaultRealSchoolData } from './data/realSchoolData';
@@ -942,6 +943,10 @@ export default function App() {
     isDirtyRef.current = true;
     const newYear = updated.tahunAnggaran?.trim() || '2026';
 
+    if (updated.pinAkses) {
+      setSchoolPin(currentTenant.id, updated.pinAkses, updated.npsn);
+    }
+
     // Synchronize tenant metadata immediately
     setCurrentTenant((prev) => ({
       ...prev,
@@ -949,6 +954,7 @@ export default function App() {
       npsn: updated.npsn || prev.npsn,
       kabKota: updated.kabKota || prev.kabKota,
       provinsi: updated.provinsi || prev.provinsi,
+      pin: updated.pinAkses || prev.pin,
     }));
     setTenants((prev) =>
       prev.map((t) =>
@@ -959,6 +965,7 @@ export default function App() {
               npsn: updated.npsn || t.npsn,
               kabKota: updated.kabKota || t.kabKota,
               provinsi: updated.provinsi || t.provinsi,
+              pin: updated.pinAkses || t.pin,
             }
           : t
       )
@@ -1970,6 +1977,7 @@ Lanjutkan pengosongan data transaksi?`)
         {activeTab === 'master' && (
           <MasterDataForm
             school={appState.school}
+            currentTenant={currentTenant}
             onSave={handleUpdateSchool}
             onOpenPrintModal={(doc) => handleOpenPrint(doc)}
             onDeleteSchool={() => handleDeleteTenant(currentTenant)}
