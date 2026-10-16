@@ -2977,36 +2977,88 @@ export function calculateBkuFromTransactions(
   return finalUniqueResult;
 }
 
-export function calculateBktFromBku(bkuList: BkuTransaction[]): BktTransaction[] {
-  let saldo = 0;
-  return bkuList.map((item) => {
-    if (item.jenis === 'PENERIMAAN') {
-      saldo += item.penerimaan;
-      return {
-        id: `bkt-${item.id}`,
-        tanggal: item.tanggal,
-        tanggalObj: item.tanggalObj,
-        bulan: item.bulan,
-        uraian: item.uraian,
-        noBukti: item.noBukti,
-        pemasukan: item.penerimaan,
-        pengeluaran: 0,
-        saldo: saldo,
-      };
-    } else {
-      saldo -= item.pengeluaran;
-      return {
-        id: `bkt-${item.id}`,
-        tanggal: item.tanggal,
-        tanggalObj: item.tanggalObj,
-        bulan: item.bulan,
-        uraian: item.uraian,
-        noBukti: item.noBukti,
-        pemasukan: 0,
-        pengeluaran: item.pengeluaran,
-        saldo: saldo,
-      };
-    }
+export function calculateBktFromBku(
+  bkuList: BkuTransaction[],
+  bkbList: BkbTransaction[] = []
+): BktTransaction[] {
+  const bktItems: BktTransaction[] = [];
+  const hasBkbWithdrawals = bkbList.some((b) => (b.pengeluaran || 0) > 0);
+
+  if (hasBkbWithdrawals) {
+    bkbList.forEach((bkbTx, idx) => {
+      if ((bkbTx.pengeluaran || 0) > 0) {
+        if (bkbTx.kategori === 'BIAYA_ADMIN') return;
+        bktItems.push({
+          id: `bkt-inflow-${bkbTx.id || idx}`,
+          tanggal: bkbTx.tanggal,
+          tanggalObj: bkbTx.tanggalObj || parseTxDateToIso(bkbTx.tanggal),
+          bulan: bkbTx.bulan,
+          uraian: bkbTx.uraian.toLowerCase().includes('penarikan') || bkbTx.uraian.toLowerCase().includes('tarik')
+            ? bkbTx.uraian
+            : `Penarikan Tunai dari Rekening Bank (${bkbTx.uraian})`,
+          noBukti: bkbTx.noBukti || `BKT-${String(idx + 1).padStart(2, '0')}`,
+          pemasukan: bkbTx.pengeluaran,
+          pengeluaran: 0,
+          saldo: 0,
+          kategoriBiaya: 'Penerimaan',
+          metodeBayar: 'TUNAI',
+        });
+      }
+    });
+  } else {
+    bkuList.forEach((item, idx) => {
+      if (item.jenis === 'PENERIMAAN') {
+        bktItems.push({
+          id: `bkt-inflow-${item.id || idx}`,
+          tanggal: item.tanggal,
+          tanggalObj: item.tanggalObj || parseTxDateToIso(item.tanggal),
+          bulan: item.bulan,
+          uraian: `Penarikan Tunai dari Bank untuk Kas Operasional (${item.uraian})`,
+          noBukti: item.noBukti ? `BKT-${item.noBukti}` : 'BKT-01',
+          pemasukan: item.penerimaan,
+          pengeluaran: 0,
+          saldo: 0,
+          kategoriBiaya: 'Penerimaan',
+          metodeBayar: 'TUNAI',
+        });
+      }
+    });
+  }
+
+  bkuList.forEach((item) => {
+    if (item.jenis === 'PENERIMAAN' || item.metodeBayar === 'BANK') return;
+    bktItems.push({
+      id: `bkt-${item.id}`,
+      tanggal: item.tanggal,
+      tanggalObj: item.tanggalObj || parseTxDateToIso(item.tanggal),
+      bulan: item.bulan,
+      uraian: item.uraian,
+      noBukti: item.noBukti,
+      pemasukan: 0,
+      pengeluaran: item.pengeluaran,
+      saldo: 0,
+      kategoriBiaya: item.kategoriBiaya,
+      kwitansiIdRef: item.kwitansiIdRef,
+      metodeBayar: 'TUNAI',
+    });
+  });
+
+  bktItems.sort((a, b) => {
+    const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
+    const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
+    if (isoA !== isoB) return isoA.localeCompare(isoB);
+    if (a.pemasukan > 0 && b.pemasukan === 0) return -1;
+    if (b.pemasukan > 0 && a.pemasukan === 0) return 1;
+    return 0;
+  });
+
+  let running = 0;
+  return bktItems.map((item) => {
+    running = running + (item.pemasukan || 0) - (item.pengeluaran || 0);
+    return {
+      ...item,
+      saldo: running,
+    };
   });
 }
 

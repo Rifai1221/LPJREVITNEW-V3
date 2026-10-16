@@ -1296,7 +1296,8 @@ export const PrintDocumentViewer: React.FC<PrintDocumentViewerProps> = ({
                       });
                       bankBal = Math.max(0, r);
                     }
-                    const tunaiBal = Math.max(0, saldoPeriode - bankBal);
+                    const lastBkt = bktList && bktList.length > 0 ? bktList[bktList.length - 1] : null;
+                    const tunaiBal = lastBkt ? (lastBkt.saldo || 0) : Math.max(0, saldoPeriode - bankBal);
                     return (
                       <div className="border border-black p-3 text-[9px] space-y-1 print-avoid-break print-closing-box">
                         <p>Pada hari ini Buku Kas Umum ditutup dengan keadaan/posisi buku sebagai berikut :</p>
@@ -1441,8 +1442,9 @@ export const PrintDocumentViewer: React.FC<PrintDocumentViewerProps> = ({
 
                   {/* Closing Box & Signatures */}
                   {(() => {
-                    const saldoBankBulan = Math.max(0, getBkbSaldoAtMonth(bkbList, monthName));
-                    const saldoTunaiBulan = Math.max(0, saldoBulan - saldoBankBulan);
+                    const saldoBankBulan = getBkbSaldoAtMonth(bkbList, monthName);
+                    const bktBulan = getBktSaldoAtMonth(bktList, monthName);
+                    const saldoTunaiBulan = bktBulan !== undefined ? bktBulan : Math.max(0, saldoBulan - saldoBankBulan);
                     return (
                       <div className="border border-black p-3 text-[9px] space-y-1 print-avoid-break print-closing-box">
                         <p>Pada hari ini Buku Kas Umum ditutup dengan keadaan/posisi buku sebagai berikut :</p>

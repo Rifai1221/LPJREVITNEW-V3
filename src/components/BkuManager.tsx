@@ -42,7 +42,12 @@ import { getAvailableMonthsForSchool, resolveWeekDates, parseTxDateToIso } from 
 import { isRegisteredVendor, isSiplahVendor, findMasterStore, isInternalNonVendorTransaction } from '../utils/vendorValidation';
 import { VendorQuickRegisterModal } from './VendorQuickRegisterModal';
 import { BkuDocumentPreviewModal } from './BkuDocumentPreviewModal';
-import { findMatchedKwitansiForTransaction, synthesizeKwitansiFromTransaction } from '../services/cashLedgerIntegrationService';
+import {
+  findMatchedKwitansiForTransaction,
+  synthesizeKwitansiFromTransaction,
+  getBkbSaldoAtMonth,
+  getBktSaldoAtMonth,
+} from '../services/cashLedgerIntegrationService';
 import { calculateCumulativeRealizedProgress } from '../services/autoGeneratorService';
 
 interface BkuManagerProps {
@@ -231,7 +236,7 @@ export const BkuManager: React.FC<BkuManagerProps> = ({
   const lastItem = filteredBku[filteredBku.length - 1];
   const saldoAkhir = lastItem ? lastItem.saldo || (totalPenerimaan - totalPengeluaran) : 0;
 
-  // Integrasi Penuh: Breakdown Kas di Bank vs Kas Tunai
+  // Integrasi Penuh: Breakdown Kas di Bank vs Kas Tunai Keseluruhan
   const bankBalance = useMemo(() => {
     if (!bkbList || bkbList.length === 0) return 0;
     let r = 0;
@@ -242,8 +247,89 @@ export const BkuManager: React.FC<BkuManagerProps> = ({
   }, [bkbList]);
 
   const tunaiBalance = useMemo(() => {
-    return Math.max(0, saldoAkhir - bankBalance);
-  }, [saldoAkhir, bankBalance]);
+    if (!bktList || bktList.length === 0) return 0;
+    const lastBkt = bktList[bktList.length - 1];
+    return lastBkt?.saldo || 0;
+  }, [bktList]);
+
+  // Posisi Penutupan Kas Terfilter (Mengambil Saldo BKB & BKT sesuai filter aktif: All, Bulan, Minggu, Custom)
+  const { closingBankSaldo, closingTunaiSaldo, closingSelisih } = useMemo(() => {
+    if (filterMode === 'ALL') {
+      const bBal = bankBalance;
+      const tBal = tunaiBalance;
+      return {
+        closingBankSaldo: bBal,
+        closingTunaiSaldo: tBal,
+        closingSelisih: saldoAkhir - (bBal + tBal),
+      };
+    }
+
+    if (filterMode === 'MONTH') {
+      if (selectedMonth === 'ALL') {
+        return {
+          closingBankSaldo: bankBalance,
+          closingTunaiSaldo: tunaiBalance,
+          closingSelisih: saldoAkhir - (bankBalance + tunaiBalance),
+        };
+      }
+      const bBal = getBkbSaldoAtMonth(bkbList, selectedMonth);
+      const tBal = getBktSaldoAtMonth(bktList, selectedMonth);
+      return {
+        closingBankSaldo: bBal,
+        closingTunaiSaldo: tBal,
+        closingSelisih: saldoAkhir - (bBal + tBal),
+      };
+    }
+
+    let cutoffIso = '';
+    if (filterMode === 'WEEK' && activeWeekInfo) {
+      cutoffIso = activeWeekInfo.endDate;
+    } else if (filterMode === 'CUSTOM' && customEndDate) {
+      cutoffIso = customEndDate;
+    }
+
+    if (cutoffIso) {
+      let rBank = 0;
+      let lastBankAtCutoff = 0;
+      const sortedBkb = [...bkbList].sort((a, b) => {
+        const da = a.tanggalObj || parseTxDateToIso(a.tanggal, parseInt(schoolYear, 10));
+        const db = b.tanggalObj || parseTxDateToIso(b.tanggal, parseInt(schoolYear, 10));
+        return da.localeCompare(db);
+      });
+      sortedBkb.forEach((b) => {
+        const dIso = b.tanggalObj || parseTxDateToIso(b.tanggal, parseInt(schoolYear, 10));
+        rBank = rBank + (b.penerimaan || 0) - (b.pengeluaran || 0);
+        if (dIso <= cutoffIso) {
+          lastBankAtCutoff = rBank;
+        }
+      });
+
+      let lastTunaiAtCutoff = 0;
+      const sortedBkt = [...bktList].sort((a, b) => {
+        const da = a.tanggalObj || parseTxDateToIso(a.tanggal, parseInt(schoolYear, 10));
+        const db = b.tanggalObj || parseTxDateToIso(b.tanggal, parseInt(schoolYear, 10));
+        return da.localeCompare(db);
+      });
+      sortedBkt.forEach((t) => {
+        const dIso = t.tanggalObj || parseTxDateToIso(t.tanggal, parseInt(schoolYear, 10));
+        if (dIso <= cutoffIso) {
+          lastTunaiAtCutoff = t.saldo || 0;
+        }
+      });
+
+      return {
+        closingBankSaldo: lastBankAtCutoff,
+        closingTunaiSaldo: lastTunaiAtCutoff,
+        closingSelisih: saldoAkhir - (lastBankAtCutoff + lastTunaiAtCutoff),
+      };
+    }
+
+    return {
+      closingBankSaldo: bankBalance,
+      closingTunaiSaldo: tunaiBalance,
+      closingSelisih: saldoAkhir - (bankBalance + tunaiBalance),
+    };
+  }, [filterMode, selectedMonth, activeWeekInfo, customEndDate, bankBalance, tunaiBalance, bkbList, bktList, saldoAkhir, schoolYear]);
 
   // Active filter readable description label
   const activeFilterLabel = useMemo(() => {
@@ -1271,25 +1357,33 @@ export const BkuManager: React.FC<BkuManagerProps> = ({
           <div className="max-w-md bg-white p-4 rounded-xl border border-slate-200 shadow-xs space-y-2 text-xs">
             <h4 className="font-bold text-slate-800 border-b border-slate-100 pb-1 flex items-center justify-between">
               <span>Posisi Penutupan Kas ({activeFilterLabel})</span>
-              <span className="text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                Sesuai Filter
+              <span className="text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 font-semibold">
+                Sesuai Filter BKU • BKB • BKT
               </span>
             </h4>
             <div className="flex justify-between text-slate-600">
               <span>Saldo Buku Kas Umum:</span>
-              <strong className="text-slate-900 font-mono">{formatRupiah(saldoAkhir)}</strong>
+              <strong className="text-slate-900 font-mono font-bold">{formatRupiah(saldoAkhir)}</strong>
             </div>
             <div className="flex justify-between text-slate-600">
-              <span>- Saldo Rekening Bank:</span>
-              <span className="font-mono">{formatRupiah(0)}</span>
+              <span>- Saldo Rekening Bank (BKB):</span>
+              <span className="font-mono text-cyan-700 font-semibold">{formatRupiah(closingBankSaldo)}</span>
             </div>
             <div className="flex justify-between text-slate-600">
-              <span>- Saldo Kas Tunai:</span>
-              <span className="font-mono">{formatRupiah(saldoAkhir)}</span>
+              <span>- Saldo Kas Tunai (BKT):</span>
+              <span className="font-mono text-amber-700 font-semibold">{formatRupiah(closingTunaiSaldo)}</span>
             </div>
-            <div className="flex justify-between border-t border-slate-100 pt-1 font-bold text-slate-900">
+            <div className="flex justify-between border-t border-slate-100 pt-1.5 font-bold text-slate-900">
               <span>Perbedaan / Selisih:</span>
-              <span className="text-emerald-600 font-mono">Rp 0,00 (Cocok)</span>
+              <span className={`font-mono ${Math.abs(closingSelisih) === 0 ? 'text-emerald-600' : 'text-rose-600 font-black'}`}>
+                {Math.abs(closingSelisih) === 0
+                  ? 'Rp 0,00 (Cocok / Seimbang)'
+                  : `${formatRupiah(Math.abs(closingSelisih))} (${closingSelisih > 0 ? 'Kurang Catat' : 'Lebih Catat'})`}
+              </span>
+            </div>
+            <div className="text-[10px] text-slate-400 mt-1 italic border-t border-slate-100 pt-1 flex items-center justify-between">
+              <span>* Data Bank diambil dari Buku Bank (BKB)</span>
+              <span>* Data Tunai diambil dari Buku Tunai (BKT)</span>
             </div>
           </div>
         </div>

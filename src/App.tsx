@@ -536,7 +536,7 @@ export default function App() {
   ]);
 
   const effectiveBkbList = useMemo(() => {
-    if (appState.bkbRecords !== undefined) {
+    if (appState.bkbRecords && appState.bkbRecords.length > 0) {
       return calculateRunningBkb(appState.bkbRecords);
     }
     const standard = generateStandardBkbRecords(appState.school, appState.progressWeeks, bkuWeekLimit);
@@ -544,8 +544,8 @@ export default function App() {
   }, [appState.bkbRecords, appState.school, appState.progressWeeks, bkuWeekLimit]);
 
   const bktList = useMemo(() => {
-    return calculateIntegratedBkt(bkuList);
-  }, [bkuList]);
+    return calculateIntegratedBkt(bkuList, effectiveBkbList);
+  }, [bkuList, effectiveBkbList]);
 
   const cashReconciliation = useMemo(() => {
     const lastBku = bkuList[bkuList.length - 1];
