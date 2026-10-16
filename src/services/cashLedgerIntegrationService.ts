@@ -619,3 +619,47 @@ export function synthesizeKwitansiFromTransaction(
   return equivKw as KwitansiDocument;
 }
 
+/**
+ * Auto-Transformer & Migration service for backup restoration.
+ * Automatically upgrades older backup JSON states to adopt the new BKT/BKB calculation structure
+ * and ensures all necessary lists (bkbRecords, kwitansiList, taxRecords, etc.) are present and valid.
+ */
+export function migrateAndTransformAppState(restored: any): any {
+  if (!restored || typeof restored !== 'object') return restored;
+
+  const school = restored.school || {};
+  const progressWeeks = restored.progressWeeks || [];
+  const bkuWeekLimit = restored.bkuWeekLimit || 14;
+
+  // 1. Ensure bkbRecords exist and are up to date
+  let bkbRecords = restored.bkbRecords || [];
+  if (!bkbRecords || bkbRecords.length === 0) {
+    bkbRecords = generateStandardBkbRecords(school, progressWeeks, bkuWeekLimit);
+  }
+
+  // 2. Ensure other key arrays exist
+  const bkuTransactions = restored.bkuTransactions || [];
+  const kwitansiList = restored.kwitansiList || [];
+  const taxRecords = restored.taxRecords || [];
+  const rpdItems = restored.rpdItems || [];
+  const stores = restored.stores || [];
+  const workers = restored.workers || [];
+  const wageReports = restored.wageReports || [];
+
+  return {
+    ...restored,
+    school,
+    progressWeeks,
+    bkuWeekLimit,
+    bkbRecords,
+    bkuTransactions,
+    kwitansiList,
+    taxRecords,
+    rpdItems,
+    stores,
+    workers,
+    wageReports,
+  };
+}
+
+

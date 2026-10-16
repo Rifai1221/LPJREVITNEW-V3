@@ -35,6 +35,7 @@ import {
   calculateRunningBkb,
   calculateIntegratedBkt,
   reconcileCashBalances,
+  migrateAndTransformAppState,
 } from './services/cashLedgerIntegrationService';
 import {
   SchoolTenant,
@@ -506,8 +507,9 @@ export default function App() {
   // Restore state from Google Sheets callback
   const handleStateRestoredFromGoogleSheets = async (newState: AppStateData) => {
     isDirtyRef.current = false;
-    setAppState(newState);
-    await saveSchoolTenantAppState(currentTenant.id, newState);
+    const migrated = migrateAndTransformAppState(newState);
+    setAppState(migrated);
+    await saveSchoolTenantAppState(currentTenant.id, migrated);
     setSwitchNotification(`Data LPJ Revit berhasil dipulihkan dari Google Sheets (${currentTenant.namaSekolah})!`);
     setTimeout(() => setSwitchNotification(null), 5000);
   };
@@ -1771,8 +1773,9 @@ Lanjutkan pengosongan data transaksi?`)
             const parsed = JSON.parse(event.target?.result as string);
             if (parsed.school && parsed.rpdItems) {
               isDirtyRef.current = true;
-              setAppState(parsed);
-              alert(`Data LPJ untuk ${parsed.school.namaSekolah || currentTenant.namaSekolah} berhasil dipulihkan!`);
+              const migrated = migrateAndTransformAppState(parsed);
+              setAppState(migrated);
+              alert(`Data LPJ untuk ${migrated.school.namaSekolah || currentTenant.namaSekolah} berhasil dipulihkan!`);
             } else {
               alert('Format file JSON tidak sesuai dengan skema LPJ Revitalisasi.');
             }
@@ -2250,7 +2253,8 @@ Lanjutkan pengosongan data transaksi?`)
         appState={appState}
         onRestoreData={(restored) => {
           isDirtyRef.current = true;
-          setAppState(restored);
+          const migrated = migrateAndTransformAppState(restored);
+          setAppState(migrated);
         }}
         currentTenantName={currentTenant.namaSekolah}
       />
