@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Tag, Plus, X, ShieldCheck, Check, Sparkles, HelpCircle, Store } from 'lucide-react';
+import { Tag, Plus, X, ShieldCheck, Check, Sparkles, HelpCircle, Store, Calculator } from 'lucide-react';
 import {
   STANDARD_KWITANSI_TAGS,
   getTagDefinition,
@@ -8,36 +8,41 @@ import {
   removeTagFromItem,
   isAhspLaborComponent,
 } from '../utils/kwitansiTagHelper';
-import { RabSubItem, StoreVendor } from '../types';
+import { RabSubItem, StoreVendor, AhspItem } from '../types';
 import { AllocationSplitModal } from './AllocationSplitModal';
+import { calculateAhspSplit } from '../utils/ahspHelper';
 
 interface KwitansiTagManagerProps {
   tags?: string[];
   onChangeTags: (newTags: string[]) => void;
-  onUpdateItem?: (updatedFields: Partial<RabSubItem>) => void; // Added for Split update
+  onUpdateItem?: (updatedFields: Partial<RabSubItem>) => void;
   size?: 'sm' | 'xs';
   readOnly?: boolean;
   className?: string;
   itemHint?: Partial<RabSubItem>;
   stores?: StoreVendor[];
+  ahspList?: AhspItem[];
 }
 
 export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
   tags = [],
   onChangeTags,
-  onUpdateItem, // Added
+  onUpdateItem,
   size = 'xs',
   readOnly = false,
   className = '',
   itemHint,
   stores = [],
+  ahspList = [],
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
   const [customTagInput, setCustomTagInput] = useState('');
   const popoverRef = useRef<HTMLDivElement>(null);
+  
+  const [initialSplit, setInitialSplit] = useState<{ mat: number; lab: number } | null>(null);
 
-  // ... (existing useEffect)
+  // Close popover on click outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) {
@@ -51,6 +56,16 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [isOpen]);
+
+  const triggerSplit = () => {
+    if (itemHint) {
+      const split = calculateAhspSplit(itemHint as RabSubItem, ahspList);
+      
+      // Update: Directly use values, ensure they match AHSP logic
+      setInitialSplit({ mat: split.materialValue, lab: split.laborValue });
+      setIsSplitModalOpen(true);
+    }
+  };
 
   // If labor component, strictly display paid to workers badge
   const isLabor = itemHint && isAhspLaborComponent(itemHint.uraian || '', itemHint.kategoriBiaya);
@@ -87,7 +102,7 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
 
     // Virtual Split Check
     if (itemHint?.kategoriBiaya === 'UPAH_BAHAN' && nextTags.includes('MAT') && nextTags.includes('UPAH') && !itemHint.allocationSplit) {
-      setIsSplitModalOpen(true);
+      triggerSplit();
     }
 
     onChangeTags(nextTags);
@@ -98,6 +113,8 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
         onUpdateItem({ allocationSplit: split });
     }
   };
+
+  // ... (existing helper functions)
 // ... (rest of the component)
 
   const handleAddCustomTag = (e: React.FormEvent) => {
@@ -171,7 +188,21 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
           isOpen={isSplitModalOpen}
           onClose={() => setIsSplitModalOpen(false)}
           onConfirm={handleConfirmSplit}
+          initialMaterial={initialSplit?.mat}
+          initialLabor={initialSplit?.lab}
         />
+      )}
+
+      {/* Edit Split Button */}
+      {itemHint?.allocationSplit && itemHint.allocationSplit.isConfirmed && (
+        <button
+          type="button"
+          onClick={triggerSplit}
+          className="p-1 rounded-md bg-amber-100 text-amber-800 hover:bg-amber-200"
+          title="Edit Alokasi Terkonfirmasi"
+        >
+          <Calculator className="w-3 h-3" />
+        </button>
       )}
 
       {/* Dropdown / Popover Selector */}

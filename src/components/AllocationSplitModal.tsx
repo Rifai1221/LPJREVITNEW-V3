@@ -7,6 +7,8 @@ interface AllocationSplitModalProps {
   isOpen: boolean;
   onClose: () => void;
   onConfirm: (split: AllocationSplit) => void;
+  initialMaterial?: number;
+  initialLabor?: number;
 }
 
 export const AllocationSplitModal: React.FC<AllocationSplitModalProps> = ({
@@ -14,11 +16,13 @@ export const AllocationSplitModal: React.FC<AllocationSplitModalProps> = ({
   isOpen,
   onClose,
   onConfirm,
+  initialMaterial,
+  initialLabor,
 }) => {
   const totalValue = item.jumlah || 0;
-  // Default split based on a hypothetical 60/40 ratio, or we could fetch AHSP data here
-  const [materialValue, setMaterialValue] = useState(totalValue * 0.6);
-  const [laborValue, setLaborValue] = useState(totalValue * 0.4);
+  // Use passed initial values or default
+  const [materialValue, setMaterialValue] = useState(initialMaterial ?? (totalValue * 0.6));
+  const [laborValue, setLaborValue] = useState(initialLabor ?? (totalValue * 0.4));
 
   if (!isOpen) return null;
 

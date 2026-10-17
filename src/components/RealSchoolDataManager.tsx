@@ -2293,6 +2293,7 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
                                     tags={it.tags}
                                     itemHint={it}
                                     stores={stores}
+                                    ahspList={realData.ahspList}
                                     onUpdateItem={(updatedFields) => handleItemBatchChange(div.id, it.id, updatedFields)}
                                     onChangeTags={(newTags) => {
                                       const isFur = newTags.some((t) => t.toUpperCase() === 'FUR');
