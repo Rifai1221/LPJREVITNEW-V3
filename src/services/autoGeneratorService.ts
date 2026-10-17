@@ -1770,20 +1770,24 @@ export function healKwitansiList<
         updatedKw.noBukti = `SipLah/${seqNum}/${effYear}`;
         updatedKw.noSpb = `SPB-SipLah/${seqNum}/${effYear}`;
       }
-      if (!updatedKw.namaToko || /tb\.|toko.*material|jaya sempurna/i.test(updatedKw.namaToko)) {
+      if (!updatedKw.namaToko) {
         updatedKw.namaToko = 'Toko Mitra SipLah Online';
         updatedKw.penerimaNama = 'Mitra Penyedia SipLah';
         updatedKw.penerimaPekerjaan = 'Mitra Penyedia Toko Mitra SipLah Online';
+      } else {
+        if (!updatedKw.penerimaPekerjaan) {
+          updatedKw.penerimaPekerjaan = `Mitra Penyedia ${updatedKw.namaToko}`;
+        }
       }
       const isMebeler = updatedKw.items.some((i: any) => /kursi|meja|rak|loker|karpet|papan kreasi/i.test(i.namaBarang || '')) || /mebel|meubilair|meubeler|perabot/i.test(updatedKw.uraian || '');
       if (isMebeler) {
         updatedKw.items = EXACT_MEBELER_RAB_ITEMS as any;
         updatedKw.nominal = EXACT_MEBELER_RAB_TOTAL;
-        updatedKw.uraian = `Pembayaran Lunas Belanja Barang via Mitra SipLah (Kursi Siswa, Meja Setengah Lingkaran, Rak Mainan, Loker, Rak Buku, Karpet, Papan Kreasi, Rak Sepatu), Tahap Pengadaan Meubilair / Perabot Revitalisasi Sekolah, Tahun ${effYear}.`;
+        updatedKw.uraian = `Pembayaran Lunas Belanja Barang via ${updatedKw.namaToko || 'Mitra SipLah'} (Kursi Siswa, Meja Setengah Lingkaran, Rak Mainan, Loker, Rak Buku, Karpet, Papan Kreasi, Rak Sepatu), Tahap Pengadaan Meubilair / Perabot Revitalisasi Sekolah, Tahun ${effYear}.`;
       } else {
         const topNames = updatedKw.items.map((i: any) => i.namaBarang).slice(0, 3).join(', ');
-        if (!/siplah/i.test(updatedKw.uraian || '')) {
-          updatedKw.uraian = `Pembayaran Lunas Belanja Barang via Mitra SipLah (${topNames}), Revitalisasi Sekolah, Tahun ${effYear}.`;
+        if (!/pembayaran lunas belanja/i.test(updatedKw.uraian || '')) {
+          updatedKw.uraian = `Pembayaran Lunas Belanja Barang via ${updatedKw.namaToko || 'Mitra SipLah'} (${topNames}), Revitalisasi Sekolah, Tahun ${effYear}.`;
         }
       }
     }
@@ -2420,6 +2424,119 @@ export function resolveManagementRecipient(
   }
   const schoolName = school?.namaBendahara?.trim() || school?.namaKetuaP2SP?.trim();
   return schoolName || 'Pengelola SPJ';
+}
+
+/**
+ * Universal Store Resolver from Item Tags:
+ * Intelligently prioritizes actual partner store/vendor tags (e.g. "N&N STATIONARY", "TB. JAYA SEMPURNA")
+ * over platform tags ("SipLah") or generic action tags ("BAYAR BAHAN DARI").
+ */
+export function resolveStoreFromItemTags(
+  item: { tags?: string[]; namaBarang?: string; uraian?: string; kategoriBiaya?: string } | null | undefined,
+  stores: StoreVendor[] = [],
+  fallbackStore?: Partial<StoreVendor>,
+  kabKota: string = ''
+): {
+  id: string;
+  namaToko: string;
+  pemilikNama: string;
+  pekerjaan: string;
+  alamat: string;
+  telepon: string;
+  npwp: string;
+  kategori: any;
+} {
+  const itemTags: string[] = Array.isArray(item?.tags) ? item.tags : [];
+
+  const isGenericPlatformOrAction = (t: string) =>
+    /^(siplah|kemdikbud|mitra|bayar\s+bahan.*|belanja.*|pembelian.*|material|bahan)$/i.test((t || '').trim());
+
+  // 1. First Priority: Exact or clean match with Master Toko on non-generic tags
+  for (const rawTag of itemTags) {
+    const cleanTag = (rawTag || '').trim();
+    if (!cleanTag || isGenericPlatformOrAction(cleanTag)) continue;
+
+    const tagLower = cleanTag.toLowerCase();
+    const matched = (stores || []).find((s) => {
+      const sNama = (s.namaToko || '').trim().toLowerCase();
+      const sId = (s.id || '').trim().toLowerCase();
+      const sPemilik = (s.pemilikNama || '').trim().toLowerCase();
+
+      return (
+        sNama === tagLower ||
+        sId === tagLower ||
+        sPemilik === tagLower ||
+        sNama.includes(tagLower) ||
+        tagLower.includes(sNama) ||
+        (sPemilik && (sPemilik.includes(tagLower) || tagLower.includes(sPemilik)))
+      );
+    });
+
+    if (matched) {
+      return {
+        id: matched.id,
+        namaToko: matched.namaToko,
+        pemilikNama: matched.pemilikNama || 'Pemilik Toko',
+        pekerjaan: matched.pekerjaan || `Penyedia ${matched.namaToko}`,
+        alamat: matched.alamat || kabKota || '',
+        telepon: matched.telepon || '',
+        npwp: matched.npwp || '',
+        kategori: matched.kategori || 'SIPLAH',
+      };
+    }
+  }
+
+  // 2. Second Priority: Match category from non-generic tags
+  for (const rawTag of itemTags) {
+    const cleanTag = (rawTag || '').trim();
+    if (!cleanTag || isGenericPlatformOrAction(cleanTag)) continue;
+
+    const tagLower = cleanTag.toLowerCase();
+    const matchedCat = (stores || []).find(
+      (s) => s.kategori && s.kategori.toLowerCase() === tagLower
+    );
+    if (matchedCat) {
+      return {
+        id: matchedCat.id,
+        namaToko: matchedCat.namaToko,
+        pemilikNama: matchedCat.pemilikNama || 'Pemilik Toko',
+        pekerjaan: matchedCat.pekerjaan || `Penyedia ${matchedCat.namaToko}`,
+        alamat: matchedCat.alamat || kabKota || '',
+        telepon: matchedCat.telepon || '',
+        npwp: matchedCat.npwp || '',
+        kategori: matchedCat.kategori || 'SIPLAH',
+      };
+    }
+  }
+
+  // 3. Third Priority: If custom store tag provided (e.g. "N&N STATIONARY"), use it directly
+  for (const rawTag of itemTags) {
+    const cleanTag = (rawTag || '').trim();
+    if (!cleanTag || isGenericPlatformOrAction(cleanTag)) continue;
+    return {
+      id: `custom-store-${cleanTag.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+      namaToko: cleanTag,
+      pemilikNama: `Penyedia ${cleanTag}`,
+      pekerjaan: `Penyedia ${cleanTag}`,
+      alamat: kabKota || 'Kota/Kabupaten Setempat',
+      telepon: '',
+      npwp: '',
+      kategori: 'SIPLAH',
+    };
+  }
+
+  // 4. Default Fallback
+  const def = fallbackStore || {};
+  return {
+    id: def.id || 's-default',
+    namaToko: def.namaToko || 'Toko Rekanan',
+    pemilikNama: def.pemilikNama || 'Pemilik Toko',
+    pekerjaan: def.pekerjaan || `Penyedia ${def.namaToko || 'Toko Rekanan'}`,
+    alamat: def.alamat || kabKota || '',
+    telepon: def.telepon || '',
+    npwp: def.npwp || '',
+    kategori: def.kategori || 'SIPLAH',
+  };
 }
 
 export function deduplicateBkuTransactions(transactions: BkuTransaction[]): BkuTransaction[] {
@@ -3893,32 +4010,9 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
       kategori: 'SIPLAH' as const,
     };
 
-    const resolveItemStore = (item: any) => {
-      if (!item.tags || item.tags.length === 0) return defaultSiplahStore;
-      for (const tag of item.tags) {
-        const matched = stores.find(
-          (s) =>
-            s.namaToko.toLowerCase() === tag.toLowerCase() ||
-            s.id === tag ||
-            (s.kategori && s.kategori.toLowerCase() === tag.toLowerCase())
-        );
-        if (matched) return {
-          id: matched.id,
-          namaToko: matched.namaToko,
-          pemilikNama: matched.pemilikNama || 'Pemilik Toko',
-          pekerjaan: matched.pekerjaan || `Penyedia ${matched.namaToko}`,
-          alamat: matched.alamat || school.kabKota || '',
-          telepon: matched.telepon || '',
-          npwp: matched.npwp || '',
-          kategori: matched.kategori || 'SIPLAH'
-        };
-      }
-      return defaultSiplahStore;
-    };
-
-    const storeGroups = new Map<string, { store: ReturnType<typeof resolveItemStore>; items: any[] }>();
+    const storeGroups = new Map<string, { store: ReturnType<typeof resolveStoreFromItemTags>; items: any[] }>();
     for (const item of siplahMaterials) {
-      const store = resolveItemStore(item);
+      const store = resolveStoreFromItemTags(item, stores, defaultSiplahStore, school.kabKota);
       const key = store.namaToko;
       if (!storeGroups.has(key)) {
         storeGroups.set(key, { store, items: [] });
@@ -4073,6 +4167,10 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
         const pph22 = isTaxable ? Math.round((chunkNominal / 1.11) * 0.015 * 100) / 100 : 0;
 
         const topMatNames = chunkItems.map((i) => i.namaBarang).slice(0, 3).join(', ');
+        const matStore = (chunkItems.length > 0
+          ? resolveStoreFromItemTags(chunkItems[0], stores, defaultMaterialStore, school.kabKota)
+          : defaultMaterialStore) || defaultMaterialStore;
+
         const matKwDoc: KwitansiDocument = {
           id: `kw-mat-m${targetWeek}-${cIdx}-${Date.now()}`,
           noBukti: kwMatBukti,
@@ -4082,10 +4180,10 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
           tanggalFormatted: matDateInfo.dateFormatted,
           bulan: matDateInfo.bulan,
           uraian: `Pembayaran Lunas Biaya Pembelian Material/Bahan Awal Minggu Ke-${targetWeek} (${topMatNames}), Mengacu Bobot Fisik Bangunan Revitalisasi ${school.namaSekolah}, Tahun ${yearStr}, Daftar Terlampir.`,
-          penerimaNama: defaultMaterialStore.pemilikNama || 'Pemilik Toko Rekanan',
-          penerimaPekerjaan: `Pemilik ${defaultMaterialStore.namaToko}`,
-          penerimaAlamat: defaultMaterialStore.alamat || school.kabKota,
-          namaToko: defaultMaterialStore.namaToko,
+          penerimaNama: matStore.pemilikNama || 'Pemilik Toko Rekanan',
+          penerimaPekerjaan: `Pemilik ${matStore.namaToko}`,
+          penerimaAlamat: matStore.alamat || school.kabKota,
+          namaToko: matStore.namaToko,
           items: consolidateAndStandardizeReceiptItems(chunkItems, chunkNominal),
           nominal: chunkNominal,
           isPpn: isTaxable,
@@ -5216,32 +5314,9 @@ export function generateRealisticMultiWeekTransactions({
           kategori: 'SIPLAH' as const,
         };
 
-        const resolveItemStore = (item: any) => {
-          if (!item.tags || item.tags.length === 0) return defaultSiplahStore;
-          for (const tag of item.tags) {
-            const matched = stores.find(
-              (s) =>
-                s.namaToko.toLowerCase() === tag.toLowerCase() ||
-                s.id === tag ||
-                (s.kategori && s.kategori.toLowerCase() === tag.toLowerCase())
-            );
-            if (matched) return {
-              id: matched.id,
-              namaToko: matched.namaToko,
-              pemilikNama: matched.pemilikNama || 'Pemilik Toko',
-              pekerjaan: matched.pekerjaan || `Penyedia ${matched.namaToko}`,
-              alamat: matched.alamat || school?.kabKota || '',
-              telepon: matched.telepon || '',
-              npwp: matched.npwp || '',
-              kategori: matched.kategori || 'SIPLAH'
-            };
-          }
-          return defaultSiplahStore;
-        };
-
-        const storeGroups = new Map<string, { store: ReturnType<typeof resolveItemStore>; items: any[] }>();
+        const storeGroups = new Map<string, { store: ReturnType<typeof resolveStoreFromItemTags>; items: any[] }>();
         for (const item of siplahBatchItems) {
-          const store = resolveItemStore(item);
+          const store = resolveStoreFromItemTags(item, stores, defaultSiplahStore, school?.kabKota);
           const key = store.namaToko;
           if (!storeGroups.has(key)) {
             storeGroups.set(key, { store, items: [] });
@@ -5331,6 +5406,13 @@ export function generateRealisticMultiWeekTransactions({
             const pph22 = isTaxable ? Math.round((chunkNominal / 1.11) * 0.015 * 100) / 100 : 0;
 
             const topNames = chunkItems.map((i) => i.namaBarang).slice(0, 3).join(', ');
+            const resolvedChunkStore = chunkItems.length > 0
+              ? resolveStoreFromItemTags(chunkItems[0], stores, targetStore, school?.kabKota)
+              : targetStore;
+            const finalStore = (resolvedChunkStore && resolvedChunkStore.namaToko)
+              ? resolvedChunkStore
+              : targetStore;
+
             newKwitansiList.push({
               id: `kw-batch-m${earliestActiveWeek}-${bIdx}-${cIdx}-${Date.now()}`,
               noBukti: kwBukti,
@@ -5342,10 +5424,10 @@ export function generateRealisticMultiWeekTransactions({
               uraian: isKusen
                 ? `Pembayaran Lunas Pengadaan & Fabrikasi Kusen, Pintu & Jendela (${topNames}), Tahap Awal Pekan Revitalisasi ${school?.namaSekolah || 'Sekolah'}, Tahun ${yearStr}, Rincian Terlampir.`
                 : `Pembayaran Lunas Biaya Pembelian Material/Bahan Awal Pekan (${topNames}), Tahap ${batch.title} Mengacu Bobot Fisik Bangunan Revitalisasi ${school?.namaSekolah || 'Sekolah'}, Tahun ${yearStr}, Daftar Terlampir.`,
-              penerimaNama: targetStore.pemilikNama || 'Pemilik Toko Rekanan',
-              penerimaPekerjaan: isKusen ? (targetStore.pekerjaan || 'Pengrajin Kusen & Pintu Aluminium') : `Pemilik ${targetStore.namaToko}`,
-              penerimaAlamat: targetStore.alamat || school?.kabKota || '',
-              namaToko: targetStore.namaToko,
+              penerimaNama: finalStore.pemilikNama || 'Pemilik Toko Rekanan',
+              penerimaPekerjaan: isKusen ? (finalStore.pekerjaan || 'Pengrajin Kusen & Pintu Aluminium') : `Pemilik ${finalStore.namaToko}`,
+              penerimaAlamat: finalStore.alamat || school?.kabKota || '',
+              namaToko: finalStore.namaToko,
               items: consolidateAndStandardizeReceiptItems(chunkItems, chunkNominal),
               nominal: chunkNominal,
               isPpn: isTaxable,

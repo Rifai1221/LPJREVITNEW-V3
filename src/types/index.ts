@@ -276,6 +276,7 @@ export interface BkbTransaction {
   pengeluaran: number; // Kredit
   saldo?: number;
   kategoriBiaya?: string;
+  kategori?: string;
   kwitansiIdRef?: string;
   metodeBayar?: 'TUNAI' | 'BANK' | 'MUTASI_KAS';
 }

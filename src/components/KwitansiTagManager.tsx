@@ -49,7 +49,7 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
   }, [isOpen]);
 
   // If labor component, strictly display paid to workers badge
-  const isLabor = itemHint && isAhspLaborComponent(itemHint.uraian, itemHint.kategoriBiaya);
+  const isLabor = itemHint && isAhspLaborComponent(itemHint.uraian || '', itemHint.kategoriBiaya);
   if (isLabor) {
     return (
       <span
