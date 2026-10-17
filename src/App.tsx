@@ -29,6 +29,7 @@ import {
   deduplicateKwitansiList,
   renumberKwitansiChronologically,
   consolidateAndStandardizeReceiptItems,
+  isReceiptLocked,
 } from './services/autoGeneratorService';
 import {
   generateStandardBkbRecords,
@@ -1147,35 +1148,24 @@ export default function App() {
       new Set([1, ...existingTargetWeeks, ...progressActiveWeeks])
     ).sort((a, b) => a - b);
 
-    let updatedKwitansi = [...appState.kwitansiList];
-    let updatedWageReports = [...appState.wageReports];
-    let updatedBkb = [...appState.bkbRecords];
+    const res = generateRealisticMultiWeekTransactions({
+      selectedWeekNums: targetWeeksToRegen,
+      weeksToUse: progressWeeksToUse,
+      school: updatedSchool,
+      workers: appState.workers,
+      stores: appState.stores || [],
+      rpdItems: newRpdItems.length > 0 ? newRpdItems : appState.rpdItems,
+      realSchoolData: real,
+      existingKwitansi: appState.kwitansiList.filter((k) => !isReceiptLocked(k)),
+      existingWageReports: appState.wageReports.filter((w) => !targetWeeksToRegen.includes(w.mingguKe)),
+      existingBkb: appState.bkbRecords,
+      splitDays: true,
+      procurementMode: 'BATCH_CONSTRUCTION',
+    });
 
-    if (targetWeeksToRegen.length > 0) {
-      targetWeeksToRegen.forEach((targetWeek) => {
-        const weekObj = progressWeeksToUse.find((w) => w.mingguKe === targetWeek);
-        if (!weekObj) return;
-
-        const res = generateWeeklyTransactionsFromProgressAndRealData({
-          targetWeek,
-          weekObj,
-          weeksToUse: progressWeeksToUse,
-          school: updatedSchool,
-          workers: appState.workers,
-          stores: appState.stores || [],
-          rpdItems: newRpdItems.length > 0 ? newRpdItems : appState.rpdItems,
-          realSchoolData: real,
-          existingKwitansi: updatedKwitansi,
-          existingWageReports: updatedWageReports,
-          existingBkb: updatedBkb,
-          splitDays: true,
-        });
-
-        updatedKwitansi = res.updatedKwitansi;
-        updatedWageReports = res.updatedWageReports;
-        updatedBkb = res.updatedBkb;
-      });
-    }
+    let updatedKwitansi = deduplicateKwitansiList(res.updatedKwitansi);
+    let updatedWageReports = res.updatedWageReports;
+    let updatedBkb = res.updatedBkb;
 
     // Universal Full Regeneration of ALL existing Kwitansi & Bon Toko across all weeks
     updatedKwitansi = updatedKwitansi.map((kw) => {

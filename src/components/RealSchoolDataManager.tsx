@@ -80,14 +80,13 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
       const subTotal = updatedItems.reduce((acc, it) => acc + (it.jumlah || 0), 0);
       return { ...d, items: updatedItems, subTotal };
     });
-    const totalNilaiRab = updatedDivs.reduce((acc, d) => acc + d.subTotal, 0);
-    const divsWithBobot = updatedDivs.map((d) => ({
-      ...d,
-      bobotPersen: totalNilaiRab > 0 ? (d.subTotal / totalNilaiRab) * 100 : 0,
-    }));
+    const totalNilaiRab = updatedDivs.reduce((acc, d) => {
+      const sub = (d.items && d.items.length > 0) ? d.items.reduce((a, it) => a + (it.jumlah || 0), 0) : (d.subTotal || 0);
+      return acc + sub;
+    }, 0);
     onUpdateRealData({
       ...realData,
-      divisions: divsWithBobot,
+      divisions: updatedDivs,
       totalNilaiRab,
     });
     if (selectedPreviewItem && selectedPreviewItem.id === itemId) {
@@ -234,7 +233,10 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
   };
 
   // Recalculate totals & Pagu reference
-  const currentTotalRab = realData.divisions.reduce((sum, d) => sum + (d.subTotal || 0), 0);
+  const currentTotalRab = realData.divisions.reduce((sum, d) => {
+    const sub = (d.items && d.items.length > 0) ? d.items.reduce((acc, it) => acc + (it.jumlah || 0), 0) : (d.subTotal || 0);
+    return sum + sub;
+  }, 0);
   const activePagu = realData.paguAnggaran !== undefined && realData.paguAnggaran > 0 
     ? realData.paguAnggaran 
     : school?.totalAnggaran && school.totalAnggaran > 0
@@ -624,15 +626,14 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
       return d;
     });
 
-    const newTotal = updatedDivs.reduce((sum, d) => sum + d.subTotal, 0);
-    const rebalancedDivs = updatedDivs.map((d) => ({
-      ...d,
-      bobotPersen: newTotal > 0 ? parseFloat(((d.subTotal / newTotal) * 100).toFixed(2)) : 0,
-    }));
+    const newTotal = updatedDivs.reduce((sum, d) => {
+      const sub = (d.items && d.items.length > 0) ? d.items.reduce((acc, it) => acc + (it.jumlah || 0), 0) : (d.subTotal || 0);
+      return sum + sub;
+    }, 0);
 
     onUpdateRealData({
       ...realData,
-      divisions: rebalancedDivs,
+      divisions: updatedDivs,
       totalNilaiRab: newTotal,
       biayaPerM2: realData.luasBangunanM2 > 0 ? newTotal / realData.luasBangunanM2 : 0,
     });
@@ -663,15 +664,14 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
       return d;
     });
 
-    const newTotal = updatedDivs.reduce((sum, d) => sum + d.subTotal, 0);
-    const rebalancedDivs = updatedDivs.map((d) => ({
-      ...d,
-      bobotPersen: newTotal > 0 ? parseFloat(((d.subTotal / newTotal) * 100).toFixed(2)) : 0,
-    }));
+    const newTotal = updatedDivs.reduce((sum, d) => {
+      const sub = (d.items && d.items.length > 0) ? d.items.reduce((acc, it) => acc + (it.jumlah || 0), 0) : (d.subTotal || 0);
+      return sum + sub;
+    }, 0);
 
     onUpdateRealData({
       ...realData,
-      divisions: rebalancedDivs,
+      divisions: updatedDivs,
       totalNilaiRab: newTotal,
       biayaPerM2: realData.luasBangunanM2 > 0 ? newTotal / realData.luasBangunanM2 : 0,
     });
@@ -698,15 +698,14 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
       return d;
     });
 
-    const newTotal = updatedDivs.reduce((sum, d) => sum + d.subTotal, 0);
-    const rebalancedDivs = updatedDivs.map((d) => ({
-      ...d,
-      bobotPersen: newTotal > 0 ? parseFloat(((d.subTotal / newTotal) * 100).toFixed(2)) : 0,
-    }));
+    const newTotal = updatedDivs.reduce((sum, d) => {
+      const sub = (d.items && d.items.length > 0) ? d.items.reduce((acc, it) => acc + (it.jumlah || 0), 0) : (d.subTotal || 0);
+      return sum + sub;
+    }, 0);
 
     onUpdateRealData({
       ...realData,
-      divisions: rebalancedDivs,
+      divisions: updatedDivs,
       totalNilaiRab: newTotal,
       biayaPerM2: realData.luasBangunanM2 > 0 ? newTotal / realData.luasBangunanM2 : 0,
     });
@@ -722,15 +721,14 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
       }
       return d;
     });
-    const newTotal = updatedDivs.reduce((sum, d) => sum + d.subTotal, 0);
-    const rebalancedDivs = updatedDivs.map((d) => ({
-      ...d,
-      bobotPersen: newTotal > 0 ? parseFloat(((d.subTotal / newTotal) * 100).toFixed(2)) : 0,
-    }));
+    const newTotal = updatedDivs.reduce((sum, d) => {
+      const sub = (d.items && d.items.length > 0) ? d.items.reduce((acc, it) => acc + (it.jumlah || 0), 0) : (d.subTotal || 0);
+      return sum + sub;
+    }, 0);
 
     onUpdateRealData({
       ...realData,
-      divisions: rebalancedDivs,
+      divisions: updatedDivs,
       totalNilaiRab: newTotal,
       biayaPerM2: realData.luasBangunanM2 > 0 ? newTotal / realData.luasBangunanM2 : 0,
     });
@@ -1738,25 +1736,28 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
                       {div.uraian}
                     </td>
                     <td className="border border-slate-300 py-2 px-3 text-right font-mono font-medium">
-                      {isEditingRekapTable ? (
-                        <div className="flex items-center justify-end gap-1">
-                          <span className="text-[10px] text-slate-500 font-bold">Rp</span>
-                          <input
-                            type="number"
-                            min="0"
-                            step="any"
-                            value={div.subTotal || ''}
-                            onChange={(e) => handleDivisionSubTotalChange(div.id, e.target.value)}
-                            placeholder="0"
-                            className="w-36 text-right font-mono font-bold text-slate-900 px-2 py-1 bg-amber-50/60 border border-amber-400 rounded focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-hidden text-xs"
-                          />
-                        </div>
-                      ) : (
-                        <div className="flex items-center justify-end group cursor-pointer" onClick={() => setEditingDivision(div)}>
-                          <span className="font-semibold">{formatRupiah(div.subTotal)}</span>
-                          <Edit3 className="w-3 h-3 ml-1 text-slate-400 opacity-0 group-hover:opacity-100 transition" />
-                        </div>
-                      )}
+                      {(() => {
+                        const effectiveSub = (div.items && div.items.length > 0) ? div.items.reduce((acc, it) => acc + (it.jumlah || 0), 0) : (div.subTotal || 0);
+                        return isEditingRekapTable ? (
+                          <div className="flex items-center justify-end gap-1">
+                            <span className="text-[10px] text-slate-500 font-bold">Rp</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              value={effectiveSub || ''}
+                              onChange={(e) => handleDivisionSubTotalChange(div.id, e.target.value)}
+                              placeholder="0"
+                              className="w-36 text-right font-mono font-bold text-slate-900 px-2 py-1 bg-amber-50/60 border border-amber-400 rounded focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-hidden text-xs"
+                            />
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-end group cursor-pointer" onClick={() => setEditingDivision(div)}>
+                            <span className="font-semibold">{formatRupiah(effectiveSub)}</span>
+                            <Edit3 className="w-3 h-3 ml-1 text-slate-400 opacity-0 group-hover:opacity-100 transition" />
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td className="border border-slate-300 py-2 px-3 text-center font-mono font-bold text-blue-700">
                       {isEditingRekapTable ? (

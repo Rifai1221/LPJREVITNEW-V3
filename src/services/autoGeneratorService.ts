@@ -1059,10 +1059,7 @@ export function getAutoHealedKwitansiItems<
     (kw.items && kw.items.some((i: any) => (i.tags && i.tags.some((t: string) => /siplah/i.test(t))) || i.kategoriBiaya === 'SIPLAH' || i.tag === 'SIPLAH' || /kursi siswa|meja setengah|rak mainan|loker|rak buku|papan kreasi|rak sepatu/i.test(i.namaBarang || '')));
 
   if (isSiplah && kw.items && kw.items.length > 0) {
-    const isMebelerKw = kw.items.some((i: any) => /kursi|meja|rak|loker|karpet|papan kreasi/i.test(i.namaBarang || '')) || /mebel|meubilair|meubeler|perabot/i.test(uraianStr);
-    if (isMebelerKw) {
-      return EXACT_MEBELER_RAB_ITEMS as unknown as T[];
-    }
+    // Preserve items (supporting items split across multiple partner stores)
     return consolidateAndStandardizeReceiptItems(kw.items, nom) as unknown as T[];
   }
 
@@ -1576,7 +1573,7 @@ export function deduplicateKwitansiList<
 
     const isManualOrLocked = isReceiptLocked(item as any);
 
-    const keyUraianNom = `UR:${normUraian}|NOM:${normNominal}|W:${normWeek}`;
+    const keyUraianNom = `UR:${normUraian}|NOM:${normNominal}|W:${normWeek}|STORE:${normStore}`;
     const keyStoreDateNom = `STORE:${normStore}|TGL:${normTanggal}|NOM:${normNominal}`;
 
     let isDuplicate = false;
@@ -1781,9 +1778,17 @@ export function healKwitansiList<
       }
       const isMebeler = updatedKw.items.some((i: any) => /kursi|meja|rak|loker|karpet|papan kreasi/i.test(i.namaBarang || '')) || /mebel|meubilair|meubeler|perabot/i.test(updatedKw.uraian || '');
       if (isMebeler) {
-        updatedKw.items = EXACT_MEBELER_RAB_ITEMS as any;
-        updatedKw.nominal = EXACT_MEBELER_RAB_TOTAL;
-        updatedKw.uraian = `Pembayaran Lunas Belanja Barang via ${updatedKw.namaToko || 'Mitra SipLah'} (Kursi Siswa, Meja Setengah Lingkaran, Rak Mainan, Loker, Rak Buku, Karpet, Papan Kreasi, Rak Sepatu), Tahap Pengadaan Meubilair / Perabot Revitalisasi Sekolah, Tahun ${effYear}.`;
+        if (!updatedKw.items || updatedKw.items.length === 0) {
+          updatedKw.items = EXACT_MEBELER_RAB_ITEMS as any;
+          updatedKw.nominal = EXACT_MEBELER_RAB_TOTAL;
+        } else {
+          const itemSum = updatedKw.items.reduce((s: number, it: any) => s + (it.jumlah || 0), 0);
+          if (itemSum > 0 && (!updatedKw.nominal || updatedKw.nominal === EXACT_MEBELER_RAB_TOTAL)) {
+            updatedKw.nominal = itemSum;
+          }
+        }
+        const topNames = (updatedKw.items || []).map((i: any) => i.namaBarang).slice(0, 3).join(', ');
+        updatedKw.uraian = `Pembayaran Lunas Belanja Barang via ${updatedKw.namaToko || 'Mitra SipLah'} (${topNames || 'Meubilair / Perabot'}), Tahap Pengadaan Meubilair / Perabot Revitalisasi Sekolah, Tahun ${effYear}.`;
       } else {
         const topNames = updatedKw.items.map((i: any) => i.namaBarang).slice(0, 3).join(', ');
         if (!/pembayaran lunas belanja/i.test(updatedKw.uraian || '')) {
@@ -4257,48 +4262,63 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
 
   // Perabot
   if (perabotMaterials.length > 0) {
-    const normalizedPerabot = normalizeMaterialItems(perabotMaterials);
-    const totalPerabotNominal = normalizedPerabot.reduce((s, it) => s + it.jumlah, 0);
-    if (totalPerabotNominal > 0) {
-      const perabotDateInfo = getDateInWeek(weekDates.startDate, 1); // Selasa (Awal Pekan)
-      const seqNo = targetWeek * 10 + 5;
-      const kwPerabotBukti = `${String(seqNo).padStart(2, '0')}/KW-MAT/${yearStr}`;
-      const spbBukti = `SPB-${String(seqNo).padStart(2, '0')}/MAT/${yearStr}`;
-      const isTaxable = totalPerabotNominal >= 2000000;
-
-      const perabotDoc: KwitansiDocument = {
-        id: `kw-perabot-m${targetWeek}-${Date.now()}`,
-        noBukti: kwPerabotBukti,
-        noSpb: spbBukti,
-        tipe: 'PERABOT',
-        tanggal: perabotDateInfo.dateSlash,
-        tanggalFormatted: perabotDateInfo.dateFormatted,
-        bulan: perabotDateInfo.bulan,
-        uraian: `Pembayaran Lunas Pengadaan Perabot / Meubilair Awal Minggu Ke-${targetWeek} (${normalizedPerabot.map((i) => i.namaBarang).slice(0, 3).join(', ')}), Revitalisasi ${school.namaSekolah}, Tahun ${yearStr}.`,
-        penerimaNama: defaultPerabotStore.pemilikNama || 'Pemilik Toko Mebel',
-        penerimaPekerjaan: `Pemilik ${defaultPerabotStore.namaToko}`,
-        penerimaAlamat: defaultPerabotStore.alamat || school.kabKota,
-        namaToko: defaultPerabotStore.namaToko,
-        items: consolidateAndStandardizeReceiptItems(normalizedPerabot, totalPerabotNominal),
-        nominal: totalPerabotNominal,
-        isPpn: isTaxable,
-        isPph22: isTaxable,
-        isPph23: false,
-        ppnAmount: isTaxable ? Math.round((totalPerabotNominal / 1.11) * 0.11 * 100) / 100 : 0,
-        pph22Amount: isTaxable ? Math.round((totalPerabotNominal / 1.11) * 0.015 * 100) / 100 : 0,
-        pph23Amount: 0,
-        kategoriBiayaPajak: 'Perabot',
-        keteranganSpb: `Surat Perintah Bayar Pengadaan Perabot Awal Minggu Ke-${targetWeek} (${perabotDateInfo.dateFormatted})`,
-        mingguKeRef: targetWeek,
-      };
-
-      const existingIdx = newKwitansiList.findIndex((k) => k.noBukti === kwPerabotBukti);
-      if (existingIdx >= 0) {
-        newKwitansiList[existingIdx] = perabotDoc;
-      } else {
-        newKwitansiList.push(perabotDoc);
+    const pStoreGroups = new Map<string, { store: ReturnType<typeof resolveStoreFromItemTags>; items: any[] }>();
+    for (const item of perabotMaterials) {
+      const store = resolveStoreFromItemTags(item, stores, defaultPerabotStore, school.kabKota);
+      const key = store.namaToko;
+      if (!pStoreGroups.has(key)) {
+        pStoreGroups.set(key, { store, items: [] });
       }
-      generatedCount.bahan++;
+      pStoreGroups.get(key)!.items.push(item);
+    }
+
+    let pStoreIdx = 0;
+    for (const [pStoreName, pGroup] of pStoreGroups.entries()) {
+      const normalizedPerabot = normalizeMaterialItems(pGroup.items);
+      const totalPerabotNominal = normalizedPerabot.reduce((s, it) => s + it.jumlah, 0);
+      if (totalPerabotNominal > 0) {
+        const perabotDateInfo = getDateInWeek(weekDates.startDate, 1); // Selasa (Awal Pekan)
+        const seqNo = targetWeek * 10 + 5 + pStoreIdx;
+        const seqSuffix = pStoreGroups.size > 1 ? `-${pStoreIdx + 1}` : '';
+        const kwPerabotBukti = `${String(seqNo).padStart(2, '0')}${seqSuffix}/KW-MAT/${yearStr}`;
+        const spbBukti = `SPB-${String(seqNo).padStart(2, '0')}${seqSuffix}/MAT/${yearStr}`;
+        const isTaxable = totalPerabotNominal >= 2000000;
+
+        const perabotDoc: KwitansiDocument = {
+          id: `kw-perabot-m${targetWeek}-${pStoreIdx}-${Date.now()}`,
+          noBukti: kwPerabotBukti,
+          noSpb: spbBukti,
+          tipe: 'PERABOT',
+          tanggal: perabotDateInfo.dateSlash,
+          tanggalFormatted: perabotDateInfo.dateFormatted,
+          bulan: perabotDateInfo.bulan,
+          uraian: `Pembayaran Lunas Pengadaan Perabot / Meubilair via ${pGroup.store.namaToko} Awal Minggu Ke-${targetWeek} (${normalizedPerabot.map((i) => i.namaBarang).slice(0, 3).join(', ')}), Revitalisasi ${school.namaSekolah}, Tahun ${yearStr}.`,
+          penerimaNama: pGroup.store.pemilikNama || 'Pemilik Toko Mebel',
+          penerimaPekerjaan: pGroup.store.pekerjaan || `Pemilik ${pGroup.store.namaToko}`,
+          penerimaAlamat: pGroup.store.alamat || school.kabKota,
+          namaToko: pGroup.store.namaToko,
+          items: consolidateAndStandardizeReceiptItems(normalizedPerabot, totalPerabotNominal),
+          nominal: totalPerabotNominal,
+          isPpn: isTaxable,
+          isPph22: isTaxable,
+          isPph23: false,
+          ppnAmount: isTaxable ? Math.round((totalPerabotNominal / 1.11) * 0.11 * 100) / 100 : 0,
+          pph22Amount: isTaxable ? Math.round((totalPerabotNominal / 1.11) * 0.015 * 100) / 100 : 0,
+          pph23Amount: 0,
+          kategoriBiayaPajak: 'Perabot',
+          keteranganSpb: `Surat Perintah Bayar Pengadaan Perabot Awal Minggu Ke-${targetWeek} (${perabotDateInfo.dateFormatted})`,
+          mingguKeRef: targetWeek,
+        };
+
+        const existingIdx = newKwitansiList.findIndex((k) => k.noBukti === kwPerabotBukti);
+        if (existingIdx >= 0) {
+          newKwitansiList[existingIdx] = perabotDoc;
+        } else {
+          newKwitansiList.push(perabotDoc);
+        }
+        generatedCount.bahan++;
+        pStoreIdx++;
+      }
     }
   }
 
@@ -5709,12 +5729,22 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
           items: pItems,
         });
       } else if (isSiplahOrMeub) {
+        const hasExistingItems = k.items && k.items.length > 0;
+        const finalItems = hasExistingItems ? k.items : (EXACT_MEBELER_RAB_ITEMS as any);
+        const itemSum = finalItems.reduce((s: number, it: any) => s + (it.jumlah || 0), 0);
+        const finalNominal = (hasExistingItems && itemSum > 0)
+          ? itemSum
+          : (k.nominal && k.nominal > 0 ? k.nominal : EXACT_MEBELER_RAB_TOTAL);
+        const topNames = finalItems.map((i: any) => i.namaBarang).slice(0, 3).join(', ');
+        const storeName = k.namaToko || 'Toko Mitra SipLah Online';
         fixedPreparationKw.push({
           ...k,
           tipe: 'OPERASIONAL',
-          nominal: EXACT_MEBELER_RAB_TOTAL,
-          items: EXACT_MEBELER_RAB_ITEMS as any,
-          uraian: `Pembayaran Lunas Belanja Barang via Mitra SipLah (Kursi Siswa, Meja Setengah Lingkaran, Rak Mainan, Loker, Rak Buku, Karpet, Papan Kreasi, Rak Sepatu), Tahap Pengadaan Meubilair / Perabot Revitalisasi ${school.namaSekolah}, Tahun ${targetYear}.`,
+          nominal: finalNominal,
+          items: finalItems,
+          namaToko: storeName,
+          penerimaPekerjaan: k.penerimaPekerjaan || `Mitra Penyedia ${storeName}`,
+          uraian: `Pembayaran Lunas Belanja Barang via ${storeName} (${topNames || 'Meubilair / Perabot'}), Tahap Pengadaan Meubilair / Perabot Revitalisasi ${school.namaSekolah}, Tahun ${targetYear}.`,
         });
       } else {
         // SMKK
