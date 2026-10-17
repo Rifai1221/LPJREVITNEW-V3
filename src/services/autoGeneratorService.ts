@@ -3880,63 +3880,101 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
 
   // Mitra SipLah Complete Goods Receipt (Code: SipLah/xx/xx)
   if (siplahMaterials.length > 0) {
-    const normalizedSiplah = consolidateAndStandardizeReceiptItems(siplahMaterials);
-    const totalSiplahNominal = normalizedSiplah.reduce((s, it) => s + it.jumlah, 0);
+    const defaultSiplahStore = stores.find(
+      (s) => s.kategori === 'SIPLAH' || /siplah/i.test(`${s.namaToko} ${s.pekerjaan || ''}`)
+    ) || {
+      id: 's-def-siplah',
+      namaToko: 'Toko Mitra SipLah Online',
+      pemilikNama: 'Mitra Penyedia SipLah',
+      pekerjaan: 'Penyedia Barang/Jasa Mitra SipLah',
+      alamat: 'Platform Mitra SipLah / ' + (school.kabKota || 'Kota/Kabupaten Setempat'),
+      telepon: '0812-9900-1122',
+      npwp: '01.234.567.8-901.000',
+      kategori: 'SIPLAH' as const,
+    };
 
-    if (totalSiplahNominal > 0) {
-      // Pembelian/Pemesanan material SipLah dilakukan di awal minggu (Selasa)
-      const dateInfo = getDateInWeek(weekDates.startDate, 1);
-      const padW = String(targetWeek).padStart(2, '0');
-      const kwBukti = `SipLah/${padW}/${yearStr}`;
-      const spbBukti = `SPB-SipLah/${padW}/${yearStr}`;
-      const isTaxable = totalSiplahNominal >= 2000000;
-
-      const defaultSiplahStore = stores.find(
-        (s) => s.kategori === 'SIPLAH' || /siplah/i.test(`${s.namaToko} ${s.pekerjaan || ''}`)
-      ) || {
-        id: 's-def-siplah',
-        namaToko: 'Toko Mitra SipLah Online',
-        pemilikNama: 'Mitra Penyedia SipLah',
-        pekerjaan: 'Penyedia Barang/Jasa Mitra SipLah',
-        alamat: 'Platform Mitra SipLah / ' + (school.kabKota || 'Kota/Kabupaten Setempat'),
-        telepon: '0812-9900-1122',
-        npwp: '01.234.567.8-901.000',
-        kategori: 'SIPLAH' as const,
-      };
-
-      const siplahDoc: KwitansiDocument = {
-        id: `kw-siplah-m${targetWeek}-${Date.now()}`,
-        noBukti: kwBukti,
-        noSpb: spbBukti,
-        tipe: 'OPERASIONAL',
-        tanggal: dateInfo.dateSlash,
-        tanggalFormatted: dateInfo.dateFormatted,
-        bulan: dateInfo.bulan,
-        uraian: `Pembayaran Lunas Belanja Barang via Mitra SipLah Awal Minggu Ke-${targetWeek} (${normalizedSiplah.map((i) => i.namaBarang).slice(0, 3).join(', ')}), Mengacu Bobot Fisik Bangunan Revitalisasi ${school.namaSekolah}, Tahun ${yearStr}.`,
-        penerimaNama: defaultSiplahStore.pemilikNama || 'Mitra SipLah',
-        penerimaPekerjaan: `Mitra Penyedia ${defaultSiplahStore.namaToko}`,
-        penerimaAlamat: defaultSiplahStore.alamat || school.kabKota,
-        namaToko: defaultSiplahStore.namaToko,
-        items: normalizedSiplah,
-        nominal: totalSiplahNominal,
-        isPpn: isTaxable,
-        isPph22: isTaxable,
-        isPph23: false,
-        ppnAmount: isTaxable ? Math.round((totalSiplahNominal / 1.11) * 0.11 * 100) / 100 : 0,
-        pph22Amount: isTaxable ? Math.round((totalSiplahNominal / 1.11) * 0.015 * 100) / 100 : 0,
-        pph23Amount: 0,
-        kategoriBiayaPajak: 'Siplah',
-        keteranganSpb: `Surat Perintah Bayar Belanja Mitra SipLah Awal Minggu Ke-${targetWeek} (${dateInfo.dateFormatted})`,
-        mingguKeRef: targetWeek,
-      };
-
-      const existingIdx = newKwitansiList.findIndex((k) => k.noBukti === kwBukti);
-      if (existingIdx >= 0) {
-        newKwitansiList[existingIdx] = siplahDoc;
-      } else {
-        newKwitansiList.push(siplahDoc);
+    const resolveItemStore = (item: any) => {
+      if (!item.tags || item.tags.length === 0) return defaultSiplahStore;
+      for (const tag of item.tags) {
+        const matched = stores.find(
+          (s) =>
+            s.namaToko.toLowerCase() === tag.toLowerCase() ||
+            s.id === tag ||
+            (s.kategori && s.kategori.toLowerCase() === tag.toLowerCase())
+        );
+        if (matched) return {
+          id: matched.id,
+          namaToko: matched.namaToko,
+          pemilikNama: matched.pemilikNama || 'Pemilik Toko',
+          pekerjaan: matched.pekerjaan || `Penyedia ${matched.namaToko}`,
+          alamat: matched.alamat || school.kabKota || '',
+          telepon: matched.telepon || '',
+          npwp: matched.npwp || '',
+          kategori: matched.kategori || 'SIPLAH'
+        };
       }
-      generatedCount.bahan++;
+      return defaultSiplahStore;
+    };
+
+    const storeGroups = new Map<string, { store: ReturnType<typeof resolveItemStore>; items: any[] }>();
+    for (const item of siplahMaterials) {
+      const store = resolveItemStore(item);
+      const key = store.namaToko;
+      if (!storeGroups.has(key)) {
+        storeGroups.set(key, { store, items: [] });
+      }
+      storeGroups.get(key)!.items.push(item);
+    }
+
+    let storeIdx = 0;
+    for (const [storeName, group] of storeGroups.entries()) {
+      const normalizedSiplah = consolidateAndStandardizeReceiptItems(group.items);
+      const totalSiplahNominal = normalizedSiplah.reduce((s, it) => s + it.jumlah, 0);
+
+      if (totalSiplahNominal > 0) {
+        // Pembelian/Pemesanan material SipLah dilakukan di awal minggu (Selasa)
+        const dateInfo = getDateInWeek(weekDates.startDate, 1);
+        const padW = String(targetWeek).padStart(2, '0');
+        const seqSuffix = storeGroups.size > 1 ? `-${storeIdx + 1}` : '';
+        const kwBukti = `SipLah/${padW}${seqSuffix}/${yearStr}`;
+        const spbBukti = `SPB-SipLah/${padW}${seqSuffix}/${yearStr}`;
+        const isTaxable = totalSiplahNominal >= 2000000;
+
+        const siplahDoc: KwitansiDocument = {
+          id: `kw-siplah-m${targetWeek}-${storeIdx}-${Date.now()}`,
+          noBukti: kwBukti,
+          noSpb: spbBukti,
+          tipe: 'OPERASIONAL',
+          tanggal: dateInfo.dateSlash,
+          tanggalFormatted: dateInfo.dateFormatted,
+          bulan: dateInfo.bulan,
+          uraian: `Pembayaran Lunas Belanja Barang via ${group.store.namaToko} Awal Minggu Ke-${targetWeek} (${normalizedSiplah.map((i) => i.namaBarang).slice(0, 3).join(', ')}), Mengacu Bobot Fisik Bangunan Revitalisasi ${school.namaSekolah}, Tahun ${yearStr}.`,
+          penerimaNama: group.store.pemilikNama || 'Mitra SipLah',
+          penerimaPekerjaan: `Mitra Penyedia ${group.store.namaToko}`,
+          penerimaAlamat: group.store.alamat || school.kabKota,
+          namaToko: group.store.namaToko,
+          items: normalizedSiplah,
+          nominal: totalSiplahNominal,
+          isPpn: isTaxable,
+          isPph22: isTaxable,
+          isPph23: false,
+          ppnAmount: isTaxable ? Math.round((totalSiplahNominal / 1.11) * 0.11 * 100) / 100 : 0,
+          pph22Amount: isTaxable ? Math.round((totalSiplahNominal / 1.11) * 0.015 * 100) / 100 : 0,
+          pph23Amount: 0,
+          kategoriBiayaPajak: 'Siplah',
+          keteranganSpb: `Surat Perintah Bayar Belanja ${group.store.namaToko} Awal Minggu Ke-${targetWeek} (${dateInfo.dateFormatted})`,
+          mingguKeRef: targetWeek,
+        };
+
+        const existingIdx = newKwitansiList.findIndex((k) => k.noBukti === kwBukti);
+        if (existingIdx >= 0) {
+          newKwitansiList[existingIdx] = siplahDoc;
+        } else {
+          newKwitansiList.push(siplahDoc);
+        }
+        generatedCount.bahan++;
+        storeIdx++;
+      }
     }
   }
 
@@ -5165,58 +5203,96 @@ export function generateRealisticMultiWeekTransactions({
 
       // Handle SipLah Tagged Items in Batch Mode
       if (siplahBatchItems.length > 0) {
-        const normalizedSiplah = normalizeMaterialItems(siplahBatchItems);
-        const totalSiplahNominal = normalizedSiplah.reduce((s, it) => s + it.jumlah, 0);
+        const defaultSiplahStore = stores.find(
+          (s) => s.kategori === 'SIPLAH' || /siplah/i.test(`${s.namaToko} ${s.pekerjaan || ''}`)
+        ) || {
+          id: 's-def-siplah',
+          namaToko: 'Toko Mitra SipLah Online',
+          pemilikNama: 'Mitra Penyedia SipLah',
+          pekerjaan: 'Penyedia Barang/Jasa Mitra SipLah',
+          alamat: 'Platform Mitra SipLah / ' + (school?.kabKota || 'Kota/Kabupaten Setempat'),
+          telepon: '0812-9900-1122',
+          npwp: '01.234.567.8-901.000',
+          kategori: 'SIPLAH' as const,
+        };
 
-        if (totalSiplahNominal > 0) {
-          const dateInfo = getDateInWeek(dropDates.startDate, 1); // Selasa (Awal Pekan)
-          const seqNo = (earliestActiveWeek || 1) * 10 + bIdx * 2 + 1;
-          const kwBukti = `SipLah/${String(seqNo).padStart(2, '0')}/${yearStr}`;
-          const spbBukti = `SPB-SipLah/${String(seqNo).padStart(2, '0')}/${yearStr}`;
-          const isTaxable = totalSiplahNominal >= 2000000;
-          const ppn = isTaxable ? Math.round((totalSiplahNominal / 1.11) * 0.11 * 100) / 100 : 0;
-          const pph22 = isTaxable ? Math.round((totalSiplahNominal / 1.11) * 0.015 * 100) / 100 : 0;
+        const resolveItemStore = (item: any) => {
+          if (!item.tags || item.tags.length === 0) return defaultSiplahStore;
+          for (const tag of item.tags) {
+            const matched = stores.find(
+              (s) =>
+                s.namaToko.toLowerCase() === tag.toLowerCase() ||
+                s.id === tag ||
+                (s.kategori && s.kategori.toLowerCase() === tag.toLowerCase())
+            );
+            if (matched) return {
+              id: matched.id,
+              namaToko: matched.namaToko,
+              pemilikNama: matched.pemilikNama || 'Pemilik Toko',
+              pekerjaan: matched.pekerjaan || `Penyedia ${matched.namaToko}`,
+              alamat: matched.alamat || school?.kabKota || '',
+              telepon: matched.telepon || '',
+              npwp: matched.npwp || '',
+              kategori: matched.kategori || 'SIPLAH'
+            };
+          }
+          return defaultSiplahStore;
+        };
 
-          const defaultSiplahStore = stores.find(
-            (s) => s.kategori === 'SIPLAH' || /siplah/i.test(`${s.namaToko} ${s.pekerjaan || ''}`)
-          ) || {
-            id: 's-def-siplah',
-            namaToko: 'Toko Mitra SipLah Online',
-            pemilikNama: 'Mitra Penyedia SipLah',
-            pekerjaan: 'Penyedia Barang/Jasa Mitra SipLah',
-            alamat: 'Platform Mitra SipLah / ' + (school?.kabKota || 'Kota/Kabupaten Setempat'),
-            telepon: '0812-9900-1122',
-            npwp: '01.234.567.8-901.000',
-            kategori: 'SIPLAH' as const,
-          };
+        const storeGroups = new Map<string, { store: ReturnType<typeof resolveItemStore>; items: any[] }>();
+        for (const item of siplahBatchItems) {
+          const store = resolveItemStore(item);
+          const key = store.namaToko;
+          if (!storeGroups.has(key)) {
+            storeGroups.set(key, { store, items: [] });
+          }
+          storeGroups.get(key)!.items.push(item);
+        }
 
-          const topNames = normalizedSiplah.map((i) => i.namaBarang).slice(0, 3).join(', ');
-          newKwitansiList.push({
-            id: `kw-batch-siplah-m${earliestActiveWeek}-${bIdx}-${Date.now()}`,
-            noBukti: kwBukti,
-            noSpb: spbBukti,
-            tipe: 'OPERASIONAL',
-            tanggal: dateInfo.dateSlash,
-            tanggalFormatted: dateInfo.dateFormatted,
-            bulan: dateInfo.bulan,
-            uraian: `Pembayaran Lunas Belanja Barang via Mitra SipLah Awal Pekan (${topNames}), Tahap ${batch.title} Revitalisasi ${school?.namaSekolah || 'Sekolah'}, Tahun ${yearStr}.`,
-            penerimaNama: defaultSiplahStore.pemilikNama || 'Mitra SipLah',
-            penerimaPekerjaan: `Mitra Penyedia ${defaultSiplahStore.namaToko}`,
-            penerimaAlamat: defaultSiplahStore.alamat || school?.kabKota || '',
-            namaToko: defaultSiplahStore.namaToko,
-            items: consolidateAndStandardizeReceiptItems(normalizedSiplah, totalSiplahNominal),
-            nominal: totalSiplahNominal,
-            isPpn: isTaxable,
-            isPph22: isTaxable,
-            isPph23: false,
-            ppnAmount: ppn,
-            pph22Amount: pph22,
-            pph23Amount: 0,
-            kategoriBiayaPajak: 'Siplah',
-            keteranganSpb: `Surat Perintah Bayar Belanja Mitra SipLah Awal Pekan Tahap ${batch.title} (${dateInfo.dateFormatted})`,
-            mingguKeRef: earliestActiveWeek || 1,
-          });
-          generatedCount.bahan++;
+        let storeIdx = 0;
+        for (const [storeName, group] of storeGroups.entries()) {
+          const normalizedSiplah = normalizeMaterialItems(group.items);
+          const totalSiplahNominal = normalizedSiplah.reduce((s, it) => s + it.jumlah, 0);
+
+          if (totalSiplahNominal > 0) {
+            const dateInfo = getDateInWeek(dropDates.startDate, 1); // Selasa (Awal Pekan)
+            const seqNo = (earliestActiveWeek || 1) * 10 + bIdx * 2 + storeIdx + 1;
+            const seqSuffix = storeGroups.size > 1 ? `-${storeIdx + 1}` : '';
+            const kwBukti = `SipLah/${String(seqNo).padStart(2, '0')}${seqSuffix}/${yearStr}`;
+            const spbBukti = `SPB-SipLah/${String(seqNo).padStart(2, '0')}${seqSuffix}/${yearStr}`;
+            const isTaxable = totalSiplahNominal >= 2000000;
+            const ppn = isTaxable ? Math.round((totalSiplahNominal / 1.11) * 0.11 * 100) / 100 : 0;
+            const pph22 = isTaxable ? Math.round((totalSiplahNominal / 1.11) * 0.015 * 100) / 100 : 0;
+
+            const topNames = normalizedSiplah.map((i) => i.namaBarang).slice(0, 3).join(', ');
+            newKwitansiList.push({
+              id: `kw-batch-siplah-m${earliestActiveWeek}-${bIdx}-${storeIdx}-${Date.now()}`,
+              noBukti: kwBukti,
+              noSpb: spbBukti,
+              tipe: 'OPERASIONAL',
+              tanggal: dateInfo.dateSlash,
+              tanggalFormatted: dateInfo.dateFormatted,
+              bulan: dateInfo.bulan,
+              uraian: `Pembayaran Lunas Belanja Barang via ${group.store.namaToko} Awal Pekan (${topNames}), Tahap ${batch.title} Revitalisasi ${school?.namaSekolah || 'Sekolah'}, Tahun ${yearStr}.`,
+              penerimaNama: group.store.pemilikNama || 'Mitra SipLah',
+              penerimaPekerjaan: `Mitra Penyedia ${group.store.namaToko}`,
+              penerimaAlamat: group.store.alamat || school?.kabKota || '',
+              namaToko: group.store.namaToko,
+              items: consolidateAndStandardizeReceiptItems(normalizedSiplah, totalSiplahNominal),
+              nominal: totalSiplahNominal,
+              isPpn: isTaxable,
+              isPph22: isTaxable,
+              isPph23: false,
+              ppnAmount: ppn,
+              pph22Amount: pph22,
+              pph23Amount: 0,
+              kategoriBiayaPajak: 'Siplah',
+              keteranganSpb: `Surat Perintah Bayar Belanja ${group.store.namaToko} Awal Pekan Tahap ${batch.title} (${dateInfo.dateFormatted})`,
+              mingguKeRef: earliestActiveWeek || 1,
+            });
+            generatedCount.bahan++;
+            storeIdx++;
+          }
         }
       }
 
