@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { X, Calculator, Save } from 'lucide-react';
+import { X, Calculator, Save, RefreshCw } from 'lucide-react';
 import { RabSubItem, AllocationSplit } from '../types';
+import { formatRupiah } from '../utils/formatters';
 
 interface AllocationSplitModalProps {
   item: RabSubItem;
@@ -25,6 +26,13 @@ export const AllocationSplitModal: React.FC<AllocationSplitModalProps> = ({
   const [laborValue, setLaborValue] = useState(initialLabor ?? (totalValue * 0.4));
 
   if (!isOpen) return null;
+
+  const handleApplyRatio = () => {
+    if (initialMaterial !== undefined && initialLabor !== undefined) {
+      setMaterialValue(initialMaterial);
+      setLaborValue(initialLabor);
+    }
+  };
 
   const handleConfirm = () => {
     onConfirm({
@@ -56,12 +64,19 @@ export const AllocationSplitModal: React.FC<AllocationSplitModalProps> = ({
                 setMaterialValue(val);
                 setLaborValue(totalValue - val);
               }}
-              className="w-full px-3 py-2 rounded-lg border border-emerald-200 text-sm"
+              className="w-full px-3 py-2 rounded-lg border border-emerald-200 text-sm font-mono font-bold"
             />
           </div>
           
           <div className="p-4 bg-purple-50 rounded-lg">
-            <label className="block text-xs font-bold text-purple-800 uppercase mb-1">Nilai Upah (Ke Pekerja)</label>
+            <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-bold text-purple-800 uppercase">Nilai Upah (Ke Pekerja)</label>
+                {initialLabor !== undefined && (
+                    <span className="text-[10px] text-purple-600 font-bold bg-purple-100 px-1.5 py-0.5 rounded">
+                        Referensi AHSP: {formatRupiah(initialLabor)}
+                    </span>
+                )}
+            </div>
             <input
               type="number"
               value={laborValue}
@@ -70,13 +85,16 @@ export const AllocationSplitModal: React.FC<AllocationSplitModalProps> = ({
                 setLaborValue(val);
                 setMaterialValue(totalValue - val);
               }}
-              className="w-full px-3 py-2 rounded-lg border border-purple-200 text-sm"
+              className="w-full px-3 py-2 rounded-lg border border-purple-200 text-sm font-mono font-bold"
             />
           </div>
         </div>
 
         <div className="mt-6 flex justify-end gap-3">
-          <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Batal</button>
+          <button onClick={handleApplyRatio} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold bg-amber-100 text-amber-800 hover:bg-amber-200">
+            <RefreshCw className="w-4 h-4" />
+            Terapkan Rasio AHSP
+          </button>
           <button onClick={handleConfirm} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold bg-indigo-600 text-white hover:bg-indigo-700">
             <Save className="w-4 h-4" />
             Konfirmasi Alokasi
