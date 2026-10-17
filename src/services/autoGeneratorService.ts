@@ -1065,10 +1065,10 @@ export function getAutoHealedKwitansiItems<
 
   // 4. PENGELOLA SPJ & ADMINISTRASI LPJ (ADM / SPJ)
   const isPengelolaAdm =
+    kw.tipe === 'OPERASIONAL' ||
     /\badm\b|kw[\/\-_]?adm|kw[\/\-_]?spj/i.test(noBuktiStr) ||
     /pengelola.*(spj|administrasi|lpj)|administrasi lpj|biaya pengelolaan/i.test(uraianStr) ||
-    /pengelola spj/i.test(combined) ||
-    (kw.tipe === 'OPERASIONAL' && /adm|spj|administrasi|pengelolaan/i.test(combined));
+    /pengelola spj/i.test(combined);
 
   if (isPengelolaAdm) {
     return [
@@ -1105,9 +1105,11 @@ export function getAutoHealedKwitansiItems<
 
   // 6. SMKK / K3 LAPANGAN
   const isSmkk =
-    /smkk/i.test(noBuktiStr) ||
+    (/smkk/i.test(noBuktiStr) ||
     /smkk|k3|keselamatan kerja|apd/i.test(uraianStr) ||
-    kw.tipe === 'SMKK';
+    kw.tipe === 'SMKK') &&
+    !/pengelola|administrasi|spj/i.test(uraianStr) && 
+    kw.kategoriBiayaPajak !== 'Perencanaan_Pengelolaan';
 
   if (isSmkk) {
     const isCorrupted =
