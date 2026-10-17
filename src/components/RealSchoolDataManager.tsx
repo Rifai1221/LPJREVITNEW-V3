@@ -2108,6 +2108,7 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
                                   <KwitansiTagManager
                                     tags={it.tags}
                                     itemHint={it}
+                                    stores={stores}
                                     onChangeTags={(newTags) => {
                                       const isFur = newTags.some((t) => t.toUpperCase() === 'FUR');
                                       const isSmkk = newTags.some((t) => t.toUpperCase() === 'SMKK');

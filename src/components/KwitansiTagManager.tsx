@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Tag, Plus, X, ShieldCheck, Check, Sparkles, HelpCircle } from 'lucide-react';
+import { Tag, Plus, X, ShieldCheck, Check, Sparkles, HelpCircle, Store } from 'lucide-react';
 import {
   STANDARD_KWITANSI_TAGS,
   getTagDefinition,
@@ -8,7 +8,7 @@ import {
   removeTagFromItem,
   isAhspLaborComponent,
 } from '../utils/kwitansiTagHelper';
-import { RabSubItem } from '../types';
+import { RabSubItem, StoreVendor } from '../types';
 
 interface KwitansiTagManagerProps {
   tags?: string[];
@@ -17,6 +17,7 @@ interface KwitansiTagManagerProps {
   readOnly?: boolean;
   className?: string;
   itemHint?: Partial<RabSubItem>;
+  stores?: StoreVendor[];
 }
 
 export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
@@ -26,6 +27,7 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
   readOnly = false,
   className = '',
   itemHint,
+  stores = [],
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [customTagInput, setCustomTagInput] = useState('');
@@ -45,6 +47,22 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [isOpen]);
+
+  // If labor component, strictly display paid to workers badge
+  const isLabor = itemHint && isAhspLaborComponent(itemHint.uraian, itemHint.kategoriBiaya);
+  if (isLabor) {
+    return (
+      <span
+        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold border bg-purple-50 text-purple-800 border-purple-300 ${
+          size === 'xs' ? 'text-[9.5px]' : 'text-xs'
+        } ${className}`}
+        title="Komponen upah tenaga kerja dibayarkan langsung kepada pekerja melalui Daftar Upah Mingguan"
+      >
+        <span>👷</span>
+        <span>Upah (Ke Pekerja)</span>
+      </span>
+    );
+  }
 
   const activeTags =
     tags && tags.length > 0
@@ -80,22 +98,27 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
       {/* Active Tag Badges with Direct Delete Button */}
       {activeTags.map((tagCode) => {
         const def = getTagDefinition(tagCode);
+        const matchingStore = stores.find((s) => s.namaToko.toLowerCase() === tagCode.toLowerCase());
+        const badgeLabel = matchingStore ? matchingStore.namaToko : def.shortLabel;
+        const badgeIcon = matchingStore ? '🛒' : def.icon;
+        const badgeTitle = matchingStore ? `Toko Tujuan: ${matchingStore.namaToko} (${matchingStore.pemilikNama})` : `${def.label}: ${def.description}`;
+
         return (
           <span
             key={tagCode}
             className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold border transition shadow-2xs select-none ${
-              def.badgeBg
-            } ${def.badgeText} ${def.badgeBorder} ${size === 'xs' ? 'text-[9.5px]' : 'text-xs'}`}
-            title={`${def.label}: ${def.description} (Kwitansi: ${def.noBuktiPrefix})`}
+              matchingStore ? 'bg-indigo-50 text-indigo-900 border-indigo-300' : `${def.badgeBg} ${def.badgeText} ${def.badgeBorder}`
+            } ${size === 'xs' ? 'text-[9.5px]' : 'text-xs'}`}
+            title={badgeTitle}
           >
-            <span>{def.icon}</span>
-            <span>{def.shortLabel}</span>
+            <span>{badgeIcon}</span>
+            <span className="max-w-[110px] truncate">{badgeLabel}</span>
             {!readOnly && (
               <button
                 type="button"
                 onClick={(e) => handleRemoveTag(e, tagCode)}
                 className="hover:bg-black/10 rounded-full p-0.5 ml-0.5 transition cursor-pointer text-slate-500 hover:text-rose-700"
-                title={`Hapus tag ${def.label}`}
+                title={`Hapus tag`}
               >
                 <X className="w-2.5 h-2.5" />
               </button>
@@ -114,20 +137,20 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
               ? 'bg-slate-50 hover:bg-slate-100 text-slate-600 border-slate-300 border-dashed'
               : 'bg-white hover:bg-slate-50 text-slate-500 border-slate-200'
           } ${size === 'xs' ? 'text-[9.5px]' : 'text-xs'}`}
-          title="Tambah / Atur Tag Kwitansi untuk item ini"
+          title="Tambah / Atur Tag Kwitansi / Toko Tujuan"
         >
           <Plus className="w-2.5 h-2.5" />
-          <span>{activeTags.length === 0 ? 'Tag Kwitansi' : 'Tag'}</span>
+          <span>{activeTags.length === 0 ? 'Tag Toko' : 'Tag'}</span>
         </button>
       )}
 
       {/* Dropdown / Popover Selector */}
       {isOpen && !readOnly && (
-        <div className="absolute left-0 top-full mt-1 z-50 w-72 bg-white rounded-xl shadow-xl border border-slate-200 p-3 text-slate-800 text-xs animate-in fade-in zoom-in-95 duration-100">
+        <div className="absolute left-0 top-full mt-1 z-50 w-80 bg-white rounded-xl shadow-xl border border-slate-200 p-3 text-slate-800 text-xs animate-in fade-in zoom-in-95 duration-100">
           <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100">
             <div className="flex items-center gap-1.5 font-bold text-slate-800 text-xs">
               <Tag className="w-3.5 h-3.5 text-indigo-600" />
-              <span>Pilih Tag Kwitansi</span>
+              <span>Pilih Toko Tujuan & Tag Kwitansi</span>
             </div>
             <button
               type="button"
@@ -138,11 +161,48 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
             </button>
           </div>
 
-          <p className="text-[10px] text-slate-500 mb-2 leading-tight">
-            Tag ini mengintegrasikan item langsung ke jenis kwitansi, bon toko, dan penomoran resmi yang tepat:
-          </p>
+          {/* Dynamic Store Vendors Section */}
+          {stores && stores.length > 0 && (
+            <div className="mb-3">
+              <div className="flex items-center gap-1 text-[10px] font-bold text-indigo-700 uppercase tracking-wide mb-1.5">
+                <Store className="w-3 h-3" />
+                <span>Toko Rekanan & Penyedia (Master):</span>
+              </div>
+              <div className="max-h-36 overflow-y-auto space-y-1 pr-1">
+                {stores.map((store) => {
+                  const isSelected = activeTags.some((t) => t.toLowerCase() === store.namaToko.toLowerCase());
+                  return (
+                    <button
+                      key={store.id}
+                      type="button"
+                      onClick={() => handleToggleTag(store.namaToko)}
+                      className={`w-full flex items-center justify-between px-2 py-1.5 rounded-lg border text-left transition cursor-pointer text-[11px] ${
+                        isSelected
+                          ? 'bg-indigo-50 border-indigo-300 text-indigo-900 font-bold ring-1 ring-indigo-400/30'
+                          : 'bg-slate-50/80 hover:bg-slate-100 border-slate-200 text-slate-700'
+                      }`}
+                      title={`${store.namaToko} - ${store.pemilikNama} (${store.kategori})`}
+                    >
+                      <div className="flex items-center gap-1.5 truncate">
+                        <span>🛒</span>
+                        <div className="truncate">
+                          <span className="font-semibold">{store.namaToko}</span>
+                          <span className="text-[10px] text-slate-500 block truncate">{store.pekerjaan || store.kategori} • {store.alamat}</span>
+                        </div>
+                      </div>
+                      {isSelected && <Check className="w-3.5 h-3.5 shrink-0 ml-1 text-indigo-600" />}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
-          {/* List of 8 Standard Preset Tags */}
+          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-1.5 pt-2 border-t border-slate-100">
+            Kategori Standar Kwitansi:
+          </div>
+
+          {/* List of Standard Preset Tags */}
           <div className="grid grid-cols-2 gap-1.5 mb-3">
             {STANDARD_KWITANSI_TAGS.map((def) => {
               const isSelected = activeTags.some((t) => t.toLowerCase() === def.code.toLowerCase());
@@ -160,7 +220,7 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
                 >
                   <span className="flex items-center gap-1 truncate">
                     <span>{def.icon}</span>
-                    <span className="font-semibold truncate">{def.label}</span>
+                    <span className="font-semibold truncate">{def.shortLabel}</span>
                   </span>
                   {isSelected && <Check className="w-3 h-3 shrink-0 ml-1 text-indigo-600" />}
                 </button>
@@ -171,12 +231,12 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
           {/* Custom Tag Input */}
           <form onSubmit={handleAddCustomTag} className="pt-2 border-t border-slate-100">
             <label className="block text-[10px] font-medium text-slate-600 mb-1">
-              Tambah Tag Kustom (opsional):
+              Tambah Tag / Toko Kustom:
             </label>
             <div className="flex items-center gap-1">
               <input
                 type="text"
-                placeholder="cth: TOKO-A, BANNER"
+                placeholder="cth: TOKO ABC"
                 value={customTagInput}
                 onChange={(e) => setCustomTagInput(e.target.value)}
                 className="flex-1 px-2 py-1 text-xs border border-slate-300 rounded-lg focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 uppercase"

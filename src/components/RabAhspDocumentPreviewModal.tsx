@@ -529,6 +529,7 @@ export const RabAhspDocumentPreviewModal: React.FC<RabAhspDocumentPreviewModalPr
               <KwitansiTagManager
                 tags={rabItem.tags}
                 itemHint={rabItem}
+                stores={stores}
                 onChangeTags={(newTags) => {
                   if (onUpdateRabItem) {
                     const isFur = newTags.some((t) => t.toUpperCase() === 'FUR');
