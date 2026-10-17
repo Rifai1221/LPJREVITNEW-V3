@@ -9,10 +9,12 @@ import {
   isAhspLaborComponent,
 } from '../utils/kwitansiTagHelper';
 import { RabSubItem, StoreVendor } from '../types';
+import { AllocationSplitModal } from './AllocationSplitModal';
 
 interface KwitansiTagManagerProps {
   tags?: string[];
   onChangeTags: (newTags: string[]) => void;
+  onUpdateItem?: (updatedFields: Partial<RabSubItem>) => void; // Added for Split update
   size?: 'sm' | 'xs';
   readOnly?: boolean;
   className?: string;
@@ -23,6 +25,7 @@ interface KwitansiTagManagerProps {
 export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
   tags = [],
   onChangeTags,
+  onUpdateItem, // Added
   size = 'xs',
   readOnly = false,
   className = '',
@@ -30,10 +33,11 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
   stores = [],
 }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
   const [customTagInput, setCustomTagInput] = useState('');
   const popoverRef = useRef<HTMLDivElement>(null);
 
-  // Close popover on click outside
+  // ... (existing useEffect)
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) {
@@ -73,12 +77,28 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
 
   const handleToggleTag = (tagCode: string) => {
     const isPresent = activeTags.some((t) => t.toLowerCase() === tagCode.toLowerCase());
+    let nextTags: string[];
+    
     if (isPresent) {
-      onChangeTags(removeTagFromItem(activeTags, tagCode));
+      nextTags = removeTagFromItem(activeTags, tagCode);
     } else {
-      onChangeTags(addTagToItem(activeTags, tagCode));
+      nextTags = addTagToItem(activeTags, tagCode);
+    }
+
+    // Virtual Split Check
+    if (itemHint?.kategoriBiaya === 'UPAH_BAHAN' && nextTags.includes('MAT') && nextTags.includes('UPAH') && !itemHint.allocationSplit) {
+      setIsSplitModalOpen(true);
+    }
+
+    onChangeTags(nextTags);
+  };
+
+  const handleConfirmSplit = (split: any) => {
+    if (onUpdateItem) {
+        onUpdateItem({ allocationSplit: split });
     }
   };
+// ... (rest of the component)
 
   const handleAddCustomTag = (e: React.FormEvent) => {
     e.preventDefault();
@@ -142,6 +162,16 @@ export const KwitansiTagManager: React.FC<KwitansiTagManagerProps> = ({
           <Plus className="w-2.5 h-2.5" />
           <span>{activeTags.length === 0 ? 'Tag Toko' : 'Tag'}</span>
         </button>
+      )}
+
+      {/* Allocation Split Modal */}
+      {itemHint && (
+        <AllocationSplitModal
+          item={itemHint as RabSubItem}
+          isOpen={isSplitModalOpen}
+          onClose={() => setIsSplitModalOpen(false)}
+          onConfirm={handleConfirmSplit}
+        />
       )}
 
       {/* Dropdown / Popover Selector */}

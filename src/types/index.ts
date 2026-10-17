@@ -366,6 +366,13 @@ export interface RabSubItem {
   alasanPengalihan?: string;
   isBarangPabrikasi?: boolean;
   tags?: string[];
+  allocationSplit?: AllocationSplit;
+}
+
+export interface AllocationSplit {
+  materialValue: number;
+  laborValue: number;
+  isConfirmed: boolean;
 }
 
 export interface RabDivision {

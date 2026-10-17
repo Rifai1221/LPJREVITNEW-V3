@@ -8,7 +8,8 @@ export type StandardTagCode =
   | 'CTK'
   | 'KONS-P'
   | 'KONS-W'
-  | 'SPJ';
+  | 'SPJ'
+  | 'UPAH';
 
 export interface KwitansiTagDef {
   code: string;
@@ -41,6 +42,21 @@ export const STANDARD_KWITANSI_TAGS: KwitansiTagDef[] = [
     noBuktiPrefix: 'KW-MAT',
     targetStoreCategory: 'MATERIAL',
     defaultStoreHint: 'TB. Sumber Bangunan / Toko Rekanan Material',
+  },
+  {
+    code: 'UPAH',
+    label: 'Upah (UPAH)',
+    shortLabel: 'UPAH',
+    categoryLabel: 'Upah Pekerja',
+    icon: '👷',
+    description: 'Pembayaran Upah Pekerja / Tukang',
+    badgeBg: 'bg-purple-50 hover:bg-purple-100',
+    badgeText: 'text-purple-800',
+    badgeBorder: 'border-purple-300',
+    targetKwitansiTipe: 'UPAH',
+    noBuktiPrefix: 'KW-UPAH',
+    targetStoreCategory: 'UPAH',
+    defaultStoreHint: 'Daftar Upah Pekerja',
   },
   {
     code: 'SMKK',
@@ -241,6 +257,7 @@ export function removeTagFromItem(currentTags: string[] | undefined, tagToRemove
  */
 export function isAhspLaborComponent(uraian: string, kategori?: string): boolean {
   if (kategori === 'UPAH') return true;
+  if (kategori === 'UPAH_BAHAN') return false;
   const n = (uraian || '').toLowerCase();
   return /pekerja|tukang|kepala tukang|mandor|operator alat|sopir|kenek/i.test(n) &&
     !/sewa|perancah|scaffolding|alat bantu/i.test(n);

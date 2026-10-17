@@ -114,6 +114,86 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
   // Rekap Table Quick Edit mode (Edit Jumlah Harga RP & Bobot % langsung di tabel)
   const [isEditingRekapTable, setIsEditingRekapTable] = useState(false);
 
+  // Batch Item Selection & Tagging State
+  const [selectedItemIds, setSelectedItemIds] = useState<Record<string, boolean>>({});
+  const [batchTagVal, setBatchTagVal] = useState('MAT');
+  const [batchKategoriVal, setBatchKategoriVal] = useState<string>('');
+
+  const handleApplyBatchTagAndKategori = () => {
+    const selectedIds = Object.keys(selectedItemIds).filter(id => selectedItemIds[id]);
+    if (selectedIds.length === 0) {
+      alert('Pilih minimal 1 item pekerjaan terlebih dahulu dengan mencentang checkbox pada tabel.');
+      return;
+    }
+
+    const updatedDivs = realData.divisions.map((d) => {
+      let divisionChanged = false;
+      const newItems = d.items.map((it) => {
+        if (selectedIds.includes(it.id)) {
+          divisionChanged = true;
+          const currentTags = it.tags || [];
+          const newTags = batchTagVal && !currentTags.includes(batchTagVal) 
+            ? [...currentTags, batchTagVal] 
+            : currentTags;
+          
+          let updatedKat = it.kategoriBiaya;
+          if (batchKategoriVal) {
+            updatedKat = batchKategoriVal as any;
+          } else if (batchTagVal === 'FUR') {
+            updatedKat = 'PINTU_JENDELA';
+          } else if (batchTagVal === 'SMKK') {
+            updatedKat = 'SMKK';
+          } else if (batchTagVal === 'UPAH') {
+            updatedKat = 'UPAH';
+          } else if (batchTagVal === 'MAT') {
+            updatedKat = 'BAHAN';
+          }
+
+          return {
+            ...it,
+            tags: newTags,
+            kategoriBiaya: updatedKat || it.kategoriBiaya,
+            isBarangPabrikasi: batchTagVal === 'FUR' ? true : it.isBarangPabrikasi,
+          };
+        }
+        return it;
+      });
+
+      const subTotal = divisionChanged ? newItems.reduce((acc, it) => acc + (it.jumlah || 0), 0) : d.subTotal;
+      return {
+        ...d,
+        items: newItems,
+        subTotal,
+      };
+    });
+
+    const totalNilaiRab = updatedDivs.reduce((acc, d) => {
+      const sub = (d.items && d.items.length > 0) ? d.items.reduce((a, it) => a + (it.jumlah || 0), 0) : (d.subTotal || 0);
+      return acc + sub;
+    }, 0);
+
+    onUpdateRealData({
+      ...realData,
+      divisions: updatedDivs,
+      totalNilaiRab,
+    });
+
+    setSelectedItemIds({});
+    alert(`Berhasil memperbarui tag & kategori untuk ${selectedIds.length} item pekerjaan terpilih secara batch!`);
+  };
+
+  const handleSelectAllItems = (checked: boolean) => {
+    const newSelected: Record<string, boolean> = {};
+    if (checked) {
+      realData.divisions.forEach((d) => {
+        d.items.forEach((it) => {
+          newSelected[it.id] = true;
+        });
+      });
+    }
+    setSelectedItemIds(newSelected);
+  };
+
   // AHSP Modal / Form state
   const [editingAhsp, setEditingAhsp] = useState<AhspItem | null>(null);
   const [isAddingAhsp, setIsAddingAhsp] = useState(false);
@@ -1949,6 +2029,81 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
             </div>
           )}
 
+          {/* Batch Tagging & Selection Toolbar */}
+          <div className="bg-white p-4 rounded-xl border border-indigo-200 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 cursor-pointer font-bold text-xs text-slate-800">
+                <input
+                  type="checkbox"
+                  checked={
+                    Object.keys(selectedItemIds).length > 0 &&
+                    realData.divisions.every((d) => d.items.every((it) => selectedItemIds[it.id]))
+                  }
+                  onChange={(e) => handleSelectAllItems(e.target.checked)}
+                  className="rounded text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
+                />
+                <span>Pilih Semua Item Pekerjaan (Batch Select All)</span>
+              </label>
+              <span className="text-xs bg-indigo-50 text-indigo-800 font-bold px-2.5 py-1 rounded-lg border border-indigo-200">
+                {Object.values(selectedItemIds).filter(Boolean).length} item dipilih
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+              <div className="flex items-center gap-1">
+                <span className="text-[11px] font-bold text-slate-600">Tag:</span>
+                <select
+                  value={batchTagVal}
+                  onChange={(e) => setBatchTagVal(e.target.value)}
+                  className="bg-slate-50 border border-slate-300 rounded px-2 py-1 text-xs font-semibold text-slate-800 cursor-pointer"
+                >
+                  <option value="MAT">📦 MAT (Bahan Material)</option>
+                  <option value="FUR">🚪 FUR (Pintu/Jendela/Mebeler)</option>
+                  <option value="UPAH">👷 UPAH (Tenaga Kerja)</option>
+                  <option value="SMKK">🛡️ SMKK (K3 & Keselamatan)</option>
+                  <option value="CTK">🖨️ CTK (Percetakan)</option>
+                  <option value="SIPLAH">🛒 SIPLAH (Online)</option>
+                  {stores.map((s) => (
+                    <option key={s.id} value={s.namaToko}>🛒 Toko: {s.namaToko}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1">
+                <span className="text-[11px] font-bold text-slate-600">Kategori:</span>
+                <select
+                  value={batchKategoriVal}
+                  onChange={(e) => setBatchKategoriVal(e.target.value)}
+                  className="bg-slate-50 border border-slate-300 rounded px-2 py-1 text-xs font-semibold text-slate-800 cursor-pointer"
+                >
+                  <option value="">-- Pertahankan Kategori --</option>
+                  <option value="BAHAN">BAHAN</option>
+                  <option value="UPAH">UPAH</option>
+                  <option value="ALAT">ALAT</option>
+                  <option value="PINTU_JENDELA">🚪 PINTU & JENDELA</option>
+                  <option value="SMKK">SMKK</option>
+                  <option value="UPAH_BAHAN">UPAH & BAHAN</option>
+                  <option value="CETAK">CETAK</option>
+                  <option value="SIPLAH">SIPLAH</option>
+                </select>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleApplyBatchTagAndKategori}
+                disabled={Object.values(selectedItemIds).filter(Boolean).length === 0}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
+                  Object.values(selectedItemIds).filter(Boolean).length > 0
+                    ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm cursor-pointer'
+                    : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                }`}
+              >
+                <Tag className="w-3.5 h-3.5" />
+                <span>Ubah Tag Terpilih (Batch)</span>
+              </button>
+            </div>
+          </div>
+
           {realData.divisions.map((div, divIdx) => {
             const isExpanded = !!expandedDivisions[div.id];
             return (
@@ -2020,6 +2175,24 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
                     <table className="w-full border-collapse text-xs text-slate-800">
                       <thead>
                         <tr className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200 text-center text-[11px]">
+                          <th className="py-2 px-1 w-8 border-r border-slate-200">
+                            <input
+                              type="checkbox"
+                              checked={div.items.length > 0 && div.items.every((it) => selectedItemIds[it.id])}
+                              onChange={(e) => {
+                                const checked = e.target.checked;
+                                setSelectedItemIds((prev) => {
+                                  const next = { ...prev };
+                                  div.items.forEach((it) => {
+                                    next[it.id] = checked;
+                                  });
+                                  return next;
+                                });
+                              }}
+                              className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                              title="Pilih semua item di divisi ini"
+                            />
+                          </th>
                           <th className="py-2 px-2 w-10 border-r border-slate-200">NO</th>
                           <th className="py-2 px-3 text-left border-r border-slate-200">URAIAN PEKERJAAN</th>
                           <th className="py-2 px-2 w-24 border-r border-slate-200">KATEGORI</th>
@@ -2037,6 +2210,16 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
                           const isDialihkan = it.statusBelanja === 'DIALIHKAN';
                           return (
                             <tr key={it.id} className={`hover:bg-slate-50/80 ${isDialihkan ? 'bg-amber-50/40' : ''}`}>
+                              <td className="py-2 px-1 text-center border-r border-slate-200">
+                                <input
+                                  type="checkbox"
+                                  checked={!!selectedItemIds[it.id]}
+                                  onChange={(e) =>
+                                    setSelectedItemIds((prev) => ({ ...prev, [it.id]: e.target.checked }))
+                                  }
+                                  className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                                />
+                              </td>
                               <td className="py-2 px-2 text-center text-slate-500 font-mono text-[11px] border-r border-slate-200">
                                 {it.kode || idx + 1}
                               </td>
@@ -2110,6 +2293,7 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
                                     tags={it.tags}
                                     itemHint={it}
                                     stores={stores}
+                                    onUpdateItem={(updatedFields) => handleItemBatchChange(div.id, it.id, updatedFields)}
                                     onChangeTags={(newTags) => {
                                       const isFur = newTags.some((t) => t.toUpperCase() === 'FUR');
                                       const isSmkk = newTags.some((t) => t.toUpperCase() === 'SMKK');
