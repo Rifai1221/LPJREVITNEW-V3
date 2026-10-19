@@ -548,12 +548,12 @@ export default function App() {
   ]);
 
   const bktList = useMemo(() => {
-    return calculateIntegratedBkt(rawBkuList, effectiveBkbList);
-  }, [rawBkuList, effectiveBkbList]);
+    return calculateIntegratedBkt(rawBkuList, effectiveBkbList, appState.manualBkuTransactions);
+  }, [rawBkuList, effectiveBkbList, appState.manualBkuTransactions]);
 
   const bkuList = useMemo(() => {
-    return calculateSynchronizedBkuList(rawBkuList, bktList);
-  }, [rawBkuList, bktList]);
+    return calculateSynchronizedBkuList(rawBkuList, bktList, appState.manualBkuTransactions);
+  }, [rawBkuList, bktList, appState.manualBkuTransactions]);
 
   const synchronizedKwitansiList = useMemo(() => {
     return calculateSynchronizedKwitansiList(appState.kwitansiList, bktList);
@@ -758,30 +758,52 @@ export default function App() {
   const handleUpdateBku = (updatedTx: BkuTransaction) => {
     isDirtyRef.current = true;
     setAppState((prev) => {
-      // 1. If linked to kwitansi, sync kwitansi
-      let updatedKwitansi = prev.kwitansiList;
-      if (updatedTx.kwitansiIdRef) {
-        updatedKwitansi = prev.kwitansiList.map((kw) => {
-          if (kw.id === updatedTx.kwitansiIdRef) {
-            return {
-              ...kw,
-              tanggal: updatedTx.tanggal,
-              tanggalFormatted: updatedTx.tanggal,
-              bulan: updatedTx.bulan,
-              uraian: updatedTx.uraian,
-              noBukti: updatedTx.noBukti,
-              nominal: updatedTx.pengeluaran || updatedTx.penerimaan,
-            };
-          }
-          return kw;
-        });
-      }
+      const cleanId = updatedTx.id.replace(/^bkt-inflow-|^bkt-|^bku-/, '');
+      const txNoBukti = updatedTx.noBukti ? updatedTx.noBukti.trim() : '';
+      const hasValidNoBukti = txNoBukti && txNoBukti !== '-' && txNoBukti.toLowerCase() !== 'manual';
 
-      // 2. Update or upsert into manualBkuTransactions
-      const exists = (prev.manualBkuTransactions || []).some((m) => m.id === updatedTx.id);
-      const updatedManual = exists
-        ? (prev.manualBkuTransactions || []).map((m) => (m.id === updatedTx.id ? updatedTx : m))
-        : [...(prev.manualBkuTransactions || []), updatedTx];
+      // 1. Sync Kwitansi list by kwitansiIdRef, cleanId, or matching noBukti
+      let updatedKwitansi = prev.kwitansiList.map((kw) => {
+        const matchesRef = (updatedTx.kwitansiIdRef && kw.id === updatedTx.kwitansiIdRef) || kw.id === cleanId;
+        const matchesNoBukti = hasValidNoBukti && kw.noBukti && kw.noBukti.trim().toLowerCase() === txNoBukti.toLowerCase();
+
+        if (matchesRef || matchesNoBukti) {
+          return {
+            ...kw,
+            tanggal: updatedTx.tanggal,
+            tanggalFormatted: updatedTx.tanggal,
+            bulan: updatedTx.bulan,
+            uraian: updatedTx.uraian,
+            noBukti: updatedTx.noBukti,
+            nominal: updatedTx.pengeluaran || updatedTx.penerimaan,
+          };
+        }
+        return kw;
+      });
+
+      // 2. Update or upsert into manualBkuTransactions, syncing all records with same id or same noBukti
+      const manualList = prev.manualBkuTransactions || [];
+      const exists = manualList.some((m) => m.id === cleanId || m.id === updatedTx.id);
+
+      const normalizedUpdatedTx = { ...updatedTx, id: cleanId };
+
+      let updatedManual = manualList.map((m) => {
+        const matchesId = m.id === cleanId || m.id === updatedTx.id || (updatedTx.kwitansiIdRef && m.kwitansiIdRef === updatedTx.kwitansiIdRef);
+        const matchesNoBukti = hasValidNoBukti && m.noBukti && m.noBukti.trim().toLowerCase() === txNoBukti.toLowerCase();
+
+        if (matchesId || matchesNoBukti) {
+          return {
+            ...m,
+            ...normalizedUpdatedTx,
+            id: m.id,
+          };
+        }
+        return m;
+      });
+
+      if (!exists) {
+        updatedManual.push(normalizedUpdatedTx);
+      }
 
       return {
         ...prev,

@@ -186,8 +186,20 @@ export function calculateRunningBkb(bkbList: BkbTransaction[]): BkbTransaction[]
  */
 export function calculateIntegratedBkt(
   bkuList: BkuTransaction[],
-  bkbList: BkbTransaction[] = []
+  bkbList: BkbTransaction[] = [],
+  manualBkuTransactions: BkuTransaction[] = []
 ): BktTransaction[] {
+  const manualIds = new Set((manualBkuTransactions || []).map((m) => m.id));
+  const manualNoBuktis = new Set((manualBkuTransactions || []).map((m) => m.noBukti?.trim().toLowerCase()).filter(Boolean));
+  
+  const manualMap = new Map<string, BkuTransaction>();
+  (manualBkuTransactions || []).forEach((m) => {
+    manualMap.set(m.id, m);
+    if (m.noBukti) {
+      manualMap.set(m.noBukti.trim().toLowerCase(), m);
+    }
+  });
+
   const bktItems: BktTransaction[] = [];
 
   // 1. Ambil seluruh transaksi Penarikan Tunai dari BKB (Kredit / Pengeluaran di Bank)
@@ -250,18 +262,32 @@ export function calculateIntegratedBkt(
       return;
     }
 
+    const cleanId = item.id.replace(/^bku-|^bkt-/, '');
+    const itemNoBukti = item.noBukti?.trim().toLowerCase();
+    const manualMatch = manualMap.get(cleanId) || manualMap.get(item.id) || (itemNoBukti && itemNoBukti !== '-' ? manualMap.get(itemNoBukti) : undefined);
+
+    const effectiveItem = manualMatch ? {
+      ...item,
+      tanggal: manualMatch.tanggal,
+      tanggalObj: manualMatch.tanggalObj,
+      bulan: manualMatch.bulan,
+      uraian: manualMatch.uraian,
+      noBukti: manualMatch.noBukti,
+      pengeluaran: manualMatch.pengeluaran || item.pengeluaran,
+    } : item;
+
     bktItems.push({
       id: `bkt-${item.id}`,
-      tanggal: item.tanggal,
-      tanggalObj: item.tanggalObj || parseTxDateToIso(item.tanggal),
-      bulan: item.bulan,
-      uraian: item.uraian,
-      noBukti: item.noBukti,
+      tanggal: effectiveItem.tanggal,
+      tanggalObj: effectiveItem.tanggalObj || parseTxDateToIso(effectiveItem.tanggal),
+      bulan: effectiveItem.bulan,
+      uraian: effectiveItem.uraian,
+      noBukti: effectiveItem.noBukti,
       pemasukan: 0,
-      pengeluaran: item.pengeluaran,
+      pengeluaran: effectiveItem.pengeluaran,
       saldo: 0,
-      kategoriBiaya: item.kategoriBiaya,
-      kwitansiIdRef: item.kwitansiIdRef,
+      kategoriBiaya: effectiveItem.kategoriBiaya,
+      kwitansiIdRef: effectiveItem.kwitansiIdRef,
       metodeBayar: 'TUNAI',
     });
   });
@@ -302,6 +328,13 @@ export function calculateIntegratedBkt(
   // Front-load and align SMKK, Papan Nama, and Material purchases to happen right after bank withdrawals
   if (sortedInflows.length > 0) {
     rawOutflowItems.forEach((item) => {
+      const cleanItemId = item.id.replace(/^bku-|^bkt-/, '');
+      const itemNoBukti = item.noBukti?.trim().toLowerCase();
+      const isManual = manualIds.has(cleanItemId) || manualIds.has(item.id) || (itemNoBukti && itemNoBukti !== '-' && manualNoBuktis.has(itemNoBukti));
+      if (isManual) {
+        return;
+      }
+
       const desc = `${item.noBukti || ''} ${item.uraian}`.toLowerCase();
       const isFrontLoaded =
         /smkk|keselamatan|k3|papan nama|papan proyek/i.test(desc) ||
@@ -442,8 +475,12 @@ export function calculateIntegratedBkt(
  */
 export function calculateSynchronizedBkuList(
   bkuList: BkuTransaction[],
-  bktList: BktTransaction[]
+  bktList: BktTransaction[],
+  manualBkuTransactions: BkuTransaction[] = []
 ): BkuTransaction[] {
+  const manualIds = new Set((manualBkuTransactions || []).map((m) => m.id));
+  const manualNoBuktis = new Set((manualBkuTransactions || []).map((m) => m.noBukti?.trim().toLowerCase()).filter(Boolean));
+
   const bktMap = new Map<string, BktTransaction>();
   bktList.forEach((bkt) => {
     const cleanId = bkt.id.replace(/^bkt-/, '').replace(/-p[12]$/, '');
@@ -451,6 +488,14 @@ export function calculateSynchronizedBkuList(
   });
 
   return bkuList.map((bku) => {
+    const cleanBkuId = bku.id.replace(/^bku-/, '');
+    const bkuNoBukti = bku.noBukti?.trim().toLowerCase();
+    const isManual = manualIds.has(cleanBkuId) || manualIds.has(bku.id) || (bkuNoBukti && bkuNoBukti !== '-' && manualNoBuktis.has(bkuNoBukti));
+
+    if (isManual) {
+      return bku;
+    }
+
     const bktMatch = bktMap.get(bku.id);
     if (bktMatch && (bktMatch.pengeluaran || 0) > 0) {
       return {
