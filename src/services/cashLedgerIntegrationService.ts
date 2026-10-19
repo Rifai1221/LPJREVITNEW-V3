@@ -437,6 +437,34 @@ export function calculateIntegratedBkt(
 }
 
 /**
+ * Menyinkronkan tanggal transaksi BKU dengan tanggal yang telah disesuaikan/digeser di BKT
+ * (misalnya penyesuaian front-loading atau pencegahan minus), memastikan tanggal BKU dan BKT identik 100%.
+ */
+export function calculateSynchronizedBkuList(
+  bkuList: BkuTransaction[],
+  bktList: BktTransaction[]
+): BkuTransaction[] {
+  const bktMap = new Map<string, BktTransaction>();
+  bktList.forEach((bkt) => {
+    const cleanId = bkt.id.replace(/^bkt-/, '').replace(/-p[12]$/, '');
+    bktMap.set(cleanId, bkt);
+  });
+
+  return bkuList.map((bku) => {
+    const bktMatch = bktMap.get(bku.id);
+    if (bktMatch && (bktMatch.pengeluaran || 0) > 0) {
+      return {
+        ...bku,
+        tanggal: bktMatch.tanggal,
+        tanggalObj: bktMatch.tanggalObj,
+        bulan: bktMatch.bulan,
+      };
+    }
+    return bku;
+  });
+}
+
+/**
  * Mendapatkan posisi saldo akhir BKB pada suatu bulan tertentu
  */
 export function getBkbSaldoAtMonth(bkbList: BkbTransaction[], monthName: string): number {

@@ -35,6 +35,7 @@ import {
   generateStandardBkbRecords,
   calculateRunningBkb,
   calculateIntegratedBkt,
+  calculateSynchronizedBkuList,
   reconcileCashBalances,
   migrateAndTransformAppState,
 } from './services/cashLedgerIntegrationService';
@@ -515,8 +516,15 @@ export default function App() {
     setTimeout(() => setSwitchNotification(null), 5000);
   };
 
-  // Derived calculations
-  const bkuList = useMemo(() => {
+  const effectiveBkbList = useMemo(() => {
+    if (appState.bkbRecords && appState.bkbRecords.length > 0) {
+      return calculateRunningBkb(appState.bkbRecords);
+    }
+    const standard = generateStandardBkbRecords(appState.school, appState.progressWeeks, bkuWeekLimit);
+    return calculateRunningBkb(standard);
+  }, [appState.bkbRecords, appState.school, appState.progressWeeks, bkuWeekLimit]);
+
+  const rawBkuList = useMemo(() => {
     return calculateBkuFromTransactions(
       appState.kwitansiList,
       appState.school,
@@ -538,17 +546,13 @@ export default function App() {
     appState.stores,
   ]);
 
-  const effectiveBkbList = useMemo(() => {
-    if (appState.bkbRecords && appState.bkbRecords.length > 0) {
-      return calculateRunningBkb(appState.bkbRecords);
-    }
-    const standard = generateStandardBkbRecords(appState.school, appState.progressWeeks, bkuWeekLimit);
-    return calculateRunningBkb(standard);
-  }, [appState.bkbRecords, appState.school, appState.progressWeeks, bkuWeekLimit]);
-
   const bktList = useMemo(() => {
-    return calculateIntegratedBkt(bkuList, effectiveBkbList);
-  }, [bkuList, effectiveBkbList]);
+    return calculateIntegratedBkt(rawBkuList, effectiveBkbList);
+  }, [rawBkuList, effectiveBkbList]);
+
+  const bkuList = useMemo(() => {
+    return calculateSynchronizedBkuList(rawBkuList, bktList);
+  }, [rawBkuList, bktList]);
 
   const cashReconciliation = useMemo(() => {
     const lastBku = bkuList[bkuList.length - 1];
