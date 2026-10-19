@@ -227,9 +227,9 @@ export interface KwitansiDocument {
   noSpb?: string;
   keteranganSpb?: string;
   mingguKeRef?: number;
-  // Solusi 3 & Solusi 1: Status Kwitansi Manual & Proteksi Kunci
   isManual?: boolean;
   isLocked?: boolean;
+  isManualDate?: boolean;
   linkedRabDivisions?: string[];
   linkedRabItemIds?: string[];
 }
@@ -248,6 +248,9 @@ export interface BkuTransaction {
   kategoriBiaya?: string;
   kwitansiIdRef?: string;
   metodeBayar?: 'TUNAI' | 'BANK' | 'MUTASI_KAS';
+  isManual?: boolean;
+  isLocked?: boolean;
+  isManualDate?: boolean;
 }
 
 export interface BktTransaction {
@@ -263,6 +266,9 @@ export interface BktTransaction {
   kategoriBiaya?: string;
   kwitansiIdRef?: string;
   metodeBayar?: 'TUNAI' | 'BANK' | 'MUTASI_KAS';
+  isManual?: boolean;
+  isLocked?: boolean;
+  isManualDate?: boolean;
 }
 
 export interface BkbTransaction {

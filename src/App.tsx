@@ -748,15 +748,26 @@ export default function App() {
 
   const handleUpdateBku = (updatedTx: BkuTransaction) => {
     isDirtyRef.current = true;
-    setAppState((prev) => {
-      // 1. Normalize ID to ensure we find the source BKU transaction regardless of prefix
-      const baseId = updatedTx.id.replace(/^(bkt-|bku-|kw-|bku-kw-)+/g, '');
-      const sourceBkuId = `bku-${baseId}`;
+    
+    // Define Immutable Anchor ID: Strip prefixes and ensure uniform bku- format
+    const baseId = updatedTx.id.replace(/^(bkt-|bku-|kw-|bku-kw-)+/g, '');
+    const anchorId = `bku-${baseId}`;
+    const cleanBukti = (updatedTx.noBukti || '').trim().toUpperCase();
 
-      // 2. Update KwitansiList if linked
+    setAppState((prev) => {
+      let matchedKwId = updatedTx.kwitansiIdRef;
+
+      // 1. Update KwitansiList linked by ID, kwitansiIdRef, or noBukti
       const updatedKwitansi = prev.kwitansiList.map((kw) => {
-        // Match by ID, ref, or Bukti
-        if (kw.id === updatedTx.kwitansiIdRef || kw.id === baseId || kw.noBukti === updatedTx.noBukti) {
+        const kwBukti = (kw.noBukti || '').trim().toUpperCase();
+        const isMatch =
+          (matchedKwId && kw.id === matchedKwId) ||
+          kw.id === baseId ||
+          kw.id === `kw-${baseId}` ||
+          (cleanBukti && cleanBukti !== '-' && kwBukti === cleanBukti);
+
+        if (isMatch) {
+          if (!matchedKwId) matchedKwId = kw.id;
           return {
             ...kw,
             tanggal: updatedTx.tanggal,
@@ -766,31 +777,74 @@ export default function App() {
             uraian: updatedTx.uraian,
             noBukti: updatedTx.noBukti,
             nominal: updatedTx.pengeluaran || updatedTx.penerimaan || kw.nominal,
+            isLocked: true,
+            isManual: true,
+            isManualDate: true,
           };
         }
         return kw;
       });
 
-      // 3. Update or upsert into manualBkuTransactions using the normalized BKU ID
-      const existingManual = prev.manualBkuTransactions || [];
-      const exists = existingManual.some(
-        (m) => m.id === sourceBkuId || m.id === updatedTx.id || m.kwitansiIdRef === updatedTx.kwitansiIdRef
-      );
+      // 2. Prepare locked manual BKU transaction
+      const manualItem: BkuTransaction = {
+        ...updatedTx,
+        id: anchorId,
+        kwitansiIdRef: matchedKwId || updatedTx.kwitansiIdRef,
+        isLocked: true,
+        isManual: true,
+        isManualDate: true,
+      };
 
-      const updatedManual = exists
-        ? existingManual.map((m) =>
-            m.id === sourceBkuId || m.id === updatedTx.id || m.kwitansiIdRef === updatedTx.kwitansiIdRef
-              ? { ...updatedTx, id: sourceBkuId }
-              : m
-          )
-        : [...existingManual, { ...updatedTx, id: sourceBkuId }];
+      // 3. Update or upsert manual transactions using the same Immutable Anchor ID or noBukti
+      const existingManual = prev.manualBkuTransactions || [];
+      const matchManualIndex = existingManual.findIndex((m) => {
+        const mBukti = (m.noBukti || '').trim().toUpperCase();
+        return (
+          m.id === anchorId ||
+          m.id === updatedTx.id ||
+          (matchedKwId && m.kwitansiIdRef === matchedKwId) ||
+          (cleanBukti && cleanBukti !== '-' && mBukti === cleanBukti)
+        );
+      });
+
+      let updatedManual: BkuTransaction[];
+      if (matchManualIndex >= 0) {
+        updatedManual = [...existingManual];
+        updatedManual[matchManualIndex] = manualItem;
+      } else {
+        updatedManual = [...existingManual, manualItem];
+      }
+
+      // 4. If transaction is also present in BKB (Bank), sync it too
+      const updatedBkb = (prev.bkbRecords || []).map((b) => {
+        const bBukti = (b.noBukti || '').trim().toUpperCase();
+        if (
+          b.id === baseId ||
+          b.id === updatedTx.id ||
+          (cleanBukti && cleanBukti !== '-' && bBukti === cleanBukti)
+        ) {
+          return {
+            ...b,
+            tanggal: updatedTx.tanggal,
+            tanggalObj: updatedTx.tanggalObj,
+            bulan: updatedTx.bulan,
+            uraian: updatedTx.uraian,
+            noBukti: updatedTx.noBukti,
+          };
+        }
+        return b;
+      });
 
       return {
         ...prev,
         kwitansiList: updatedKwitansi,
         manualBkuTransactions: updatedManual,
+        bkbRecords: updatedBkb,
       };
     });
+
+    // 5. Force Immediate persistence to Cloud / Local
+    handleManualSaveNow();
   };
 
   const handleDeleteBku = (txToDelete: BkuTransaction) => {

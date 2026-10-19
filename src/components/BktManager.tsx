@@ -381,6 +381,10 @@ export const BktManager: React.FC<BktManagerProps> = ({
           penerimaan: formData.jenis === 'PENERIMAAN' ? formData.nominal : 0,
           pengeluaran: formData.jenis === 'PENGELUARAN' ? formData.nominal : 0,
           kategoriBiaya: formData.kategoriBiaya,
+          kwitansiIdRef: editingTx.kwitansiIdRef,
+          isManualDate: true,
+          isLocked: true,
+          isManual: true,
         });
       }
     } else {

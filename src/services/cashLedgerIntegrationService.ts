@@ -263,6 +263,9 @@ export function calculateIntegratedBkt(
       kategoriBiaya: item.kategoriBiaya,
       kwitansiIdRef: item.kwitansiIdRef,
       metodeBayar: 'TUNAI',
+      isLocked: item.isLocked,
+      isManualDate: item.isManualDate,
+      isManual: item.isManual,
     });
   });
 

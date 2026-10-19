@@ -2753,12 +2753,32 @@ export function calculateBkuFromTransactions(
       return;
     }
 
-    // Check if user manually edited this transaction in BKU
-    const manualKwOverride = manualTransactions.find(
-      (m) => m.id === kwBkuId || m.kwitansiIdRef === kw.id
-    );
+    // Check if user manually edited this transaction in BKU or BKT
+    const cleanKwBukti = (kw.noBukti || '').trim().toUpperCase();
+    const manualKwOverride = manualTransactions.find((m) => {
+      const mBukti = (m.noBukti || '').trim().toUpperCase();
+      return (
+        m.id === kwBkuId ||
+        m.id === `bku-${cleanKwId}` ||
+        m.id === kw.id ||
+        m.kwitansiIdRef === kw.id ||
+        (cleanKwBukti && cleanKwBukti !== '-' && mBukti === cleanKwBukti)
+      );
+    });
     if (manualKwOverride) {
-      result.push(manualKwOverride);
+      result.push({
+        ...manualKwOverride,
+        id: kwBkuId,
+        tanggal: manualKwOverride.tanggal || kw.tanggal,
+        tanggalObj: manualKwOverride.tanggalObj || parseTxDateToIso(manualKwOverride.tanggal || kw.tanggal, parseInt(yearStr, 10)),
+        bulan: manualKwOverride.bulan || kw.bulan,
+        uraian: manualKwOverride.uraian || kw.uraian,
+        noBukti: manualKwOverride.noBukti || kw.noBukti,
+        pengeluaran: manualKwOverride.pengeluaran || kw.nominal,
+        kwitansiIdRef: kw.id,
+        isLocked: true,
+        isManualDate: true,
+      });
       return;
     }
 
@@ -2784,8 +2804,10 @@ export function calculateBkuFromTransactions(
       }
     }
 
-    // Enforce business rules on payment dates
-    if (kw.mingguKeRef && progressWeeks && progressWeeks.length > 0) {
+    const isKwDateManuallyLocked = Boolean(kw.isLocked || kw.isManualDate);
+
+    // Enforce business rules on payment dates ONLY if not manually locked
+    if (!isKwDateManuallyLocked && kw.mingguKeRef && progressWeeks && progressWeeks.length > 0) {
       const matchW = progressWeeks.find((w) => w.mingguKe === kw.mingguKeRef);
       if (matchW) {
         const resolvedW = resolveWeekDates(matchW, yearStr);
@@ -2898,6 +2920,27 @@ export function calculateBkuFromTransactions(
 
       const bkuUpahId = `bku-wage-w${wNum}`;
       if (deletedIds.includes(bkuUpahId)) return;
+
+      const manualWageOverride = manualTransactions.find((m) => {
+        const mBukti = (m.noBukti || '').trim().toUpperCase();
+        return (
+          m.id === bkuUpahId ||
+          m.kwitansiIdRef === `kw-upah-m${wNum}` ||
+          (mBukti && (mBukti === ukBukti.toUpperCase() || mBukti === `UK/${wNum}/${yearStr}`.toUpperCase()))
+        );
+      });
+
+      if (manualWageOverride) {
+        result.push({
+          ...manualWageOverride,
+          id: bkuUpahId,
+          noBukti: ukBukti,
+          pengeluaran: manualWageOverride.pengeluaran || cappedUpah,
+          isLocked: true,
+          isManualDate: true,
+        });
+        return;
+      }
 
       // Apply 2-day date shift to align with bank cash availability
       const originalDate = new Date(`${wDates.endDate}T00:00:00`);
