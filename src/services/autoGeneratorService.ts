@@ -115,6 +115,142 @@ export function isMaterialOnlyPurchase(tx: { noBukti?: string; uraian?: string }
   return false;
 }
 
+/**
+ * Membersihkan uraian transaksi dari catatan pemecahan tahap buatan sistem
+ * seperti "(Tahap 1 / Sesuai Sisa Kas)", "(Tahap 2 / Pelunasan Sisa)", dll.
+ * Menghasilkan deskripsi belanja material yang bersih dan wajar (natural) layaknya belanja langsung.
+ */
+export function cleanNaturalUraian(uraian: string): string {
+  if (!uraian) return '';
+  return uraian
+    .replace(/\s*\(\s*Tahap\s*[12]\s*\/[^\)]*\)/gi, '')
+    .replace(/\s*\(\s*Tahap\s*[12][^\)]*\)/gi, '')
+    .replace(/\s*-\s*Tahap\s*[12][^-]*/gi, '')
+    .trim();
+}
+
+/**
+ * Menurunkan nomor SPB yang selaras dengan nomor bukti kwitansi tanpa tanda pemecahan khusus.
+ */
+export function deriveSpbFromBukti(noBukti?: string, defaultSpb?: string): string {
+  if (!noBukti || noBukti === '-') return defaultSpb || '';
+  const cleanBukti = noBukti.replace(/-B$/, '').trim();
+
+  // Pattern XX/KW-MAT/YYYY -> SPB-XX/MAT/YYYY
+  const matchMat = cleanBukti.match(/^(\d{1,3})\/KW-MAT\/(.*)$/i);
+  if (matchMat) {
+    return `SPB-${matchMat[1]}/MAT/${matchMat[2]}`;
+  }
+
+  // Pattern XX/KW-ALAT/YYYY -> SPB-XX/ALAT/YYYY
+  const matchAlat = cleanBukti.match(/^(\d{1,3})\/KW-ALAT\/(.*)$/i);
+  if (matchAlat) {
+    return `SPB-${matchAlat[1]}/ALAT/${matchAlat[2]}`;
+  }
+
+  // Pattern XX/KW-SMKK/YYYY -> SPB-XX/SMKK/YYYY
+  const matchSmkk = cleanBukti.match(/^(\d{1,3})\/KW-SMKK\/(.*)$/i);
+  if (matchSmkk) {
+    return `SPB-${matchSmkk[1]}/SMKK/${matchSmkk[2]}`;
+  }
+
+  // Pattern Fur/XX/YYYY -> SPB-Fur/XX/YYYY
+  const matchFur = cleanBukti.match(/^Fur\/(\d{1,3})\/(.*)$/i);
+  if (matchFur) {
+    return `SPB-Fur/${matchFur[1]}/${matchFur[2]}`;
+  }
+
+  // Pattern SipLah/XX/YYYY -> SPB-SipLah/XX/YYYY
+  const matchSip = cleanBukti.match(/^SipLah\/(\d{1,3})\/(.*)$/i);
+  if (matchSip) {
+    return `SPB-SipLah/${matchSip[1]}/${matchSip[2]}`;
+  }
+
+  // Pattern CTK/XX/YYYY -> SPB-CTK/XX/YYYY
+  const matchCtk = cleanBukti.match(/^CTK\/(\d{1,3})\/(.*)$/i);
+  if (matchCtk) {
+    return `SPB-CTK/${matchCtk[1]}/${matchCtk[2]}`;
+  }
+
+  return (defaultSpb || '').replace(/-B$/, '').trim();
+}
+
+/**
+ * Mengurutkan dan memberi nomor bukti berurutan secara otomatis untuk seluruh pembelanjaan material
+ * (KW-MAT / Fur) dalam BKU maupun BKT tanpa ada akhiran "-B", tanpa melompati nomor,
+ * sehingga transaksi split langsung melanjutkan nomor berikutnya secara normal dan konsisten.
+ */
+export function renumberMaterialTransactionsChronologically<
+  T extends {
+    noBukti?: string;
+    uraian?: string;
+    tanggal?: string;
+    tanggalObj?: string;
+    jenis?: string;
+    pengeluaran?: number;
+    penerimaan?: number;
+    pemasukan?: number;
+  }
+>(list: T[], targetYear: string = '2026'): T[] {
+  const safeYear = targetYear?.trim() || '2026';
+  let matSeq = 0;
+  let furSeq = 0;
+
+  return list.map((tx) => {
+    // Lewati transaksi penerimaan / penarikan kas
+    if (tx.jenis === 'PENERIMAAN' || (tx.pemasukan && tx.pemasukan > 0)) {
+      return {
+        ...tx,
+        uraian: cleanNaturalUraian(tx.uraian || ''),
+        noBukti: (tx.noBukti || '').replace(/-B$/, '').trim(),
+      };
+    }
+
+    // Lewati pembayaran pasti (Konsultan, Pengawas, SPJ, SMKK, SipLah, Cetak, Upah)
+    if (isFixedNonSplitPayment(tx)) {
+      return {
+        ...tx,
+        uraian: cleanNaturalUraian(tx.uraian || ''),
+        noBukti: (tx.noBukti || '').replace(/-B$/, '').trim(),
+      };
+    }
+
+    const bukti = (tx.noBukti || '').replace(/-B$/, '').trim();
+    const uraian = cleanNaturalUraian(tx.uraian || '');
+    const combined = `${bukti} ${uraian}`.toLowerCase();
+
+    // Kusen, Pintu & Jendela Aluminium (Fur)
+    const isFur = /fur\/|pintu|jendela|kusen|aluminium/i.test(combined);
+    if (isFur) {
+      furSeq++;
+      const padSeq = String(furSeq).padStart(2, '0');
+      return {
+        ...tx,
+        noBukti: `Fur/${padSeq}/${safeYear}`,
+        uraian,
+      };
+    }
+
+    // Bahan Material Bangunan (KW-MAT)
+    const isMat = /kw-mat|kwt-mat|\bmat\b|material|bahan|semen|pasir|bata|batu|keramik|besi|cat|kayu/i.test(combined) || isMaterialOnlyPurchase(tx);
+    if (isMat) {
+      matSeq++;
+      const padSeq = String(matSeq).padStart(2, '0');
+      return {
+        ...tx,
+        noBukti: `${padSeq}/KW-MAT/${safeYear}`,
+        uraian,
+      };
+    }
+
+    return {
+      ...tx,
+      uraian,
+      noBukti: bukti,
+    };
+  });
+}
+
 export function getDateInWeek(startDateIso: string, dayOffset: number) {
   const sBase = new Date(`${startDateIso}T00:00:00`);
   const clampedOffset = Math.min(6, Math.max(0, dayOffset));
@@ -3222,7 +3358,7 @@ export function calculateBkuFromTransactions(
         splitBkuList.push({
           ...tx,
           id: `${tx.id}-p1`,
-          uraian: tx.uraian.includes('Tahap 1') ? tx.uraian : `${tx.uraian} (Tahap 1 / Sesuai Sisa Kas)`,
+          uraian: cleanNaturalUraian(tx.uraian),
           pengeluaran: part1Nominal,
         });
 
@@ -3236,8 +3372,8 @@ export function calculateBkuFromTransactions(
           tanggal: part2Date,
           tanggalObj: part2Iso,
           bulan: part2Bulan,
-          uraian: tx.uraian.includes('Tahap 2') ? tx.uraian : `${tx.uraian} (Tahap 2 / Pelunasan Sisa)`,
-          noBukti: tx.noBukti && tx.noBukti !== '-' ? `${tx.noBukti}-B` : tx.noBukti,
+          uraian: cleanNaturalUraian(tx.uraian),
+          noBukti: (tx.noBukti || '').replace(/-B$/, '').trim(),
           pengeluaran: part2Nominal,
           penerimaan: 0,
         };
@@ -3274,6 +3410,11 @@ export function calculateBkuFromTransactions(
     return a.tanggalObj.localeCompare(b.tanggalObj);
   });
 
+  // Strict Chronological Sequential Renumbering for Material Receipts in BKU:
+  // Seluruh belanja material yang terpecah maupun yang utuh diberi nomor berurutan secara otomatis
+  // (01/KW-MAT/2026, 02/KW-MAT/2026, 03/KW-MAT/2026, ...) tanpa akhiran -B dan tanpa tanda khusus.
+  processedBkuList = renumberMaterialTransactionsChronologically(processedBkuList, yearStr);
+
   // Compute running balance & guarantee 100% unique React IDs
   let currentSaldo = 0;
   const seenBkuTxIds = new Set<string>();
@@ -3294,6 +3435,8 @@ export function calculateBkuFromTransactions(
 
     finalUniqueResult.push({
       ...tx,
+      uraian: cleanNaturalUraian(tx.uraian || ''),
+      noBukti: (tx.noBukti || '').replace(/-B$/, '').trim(),
       id: finalId,
       saldo: currentSaldo,
     });

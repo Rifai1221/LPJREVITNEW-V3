@@ -10,11 +10,14 @@ import {
 } from '../types';
 import { resolveWeekDates, parseTxDateToIso } from '../utils/monthHelper';
 import {
+  cleanNaturalUraian,
+  deriveSpbFromBukti,
   getAutoHealedKwitansiItems,
   getHarmonizedKwitansiNoBukti,
   getHarmonizedKwitansiUraian,
   isFixedNonSplitPayment,
   isMaterialOnlyPurchase,
+  renumberMaterialTransactionsChronologically,
 } from './autoGeneratorService';
 
 /**
@@ -394,19 +397,17 @@ export function calculateIntegratedBkt(
       const part1Nominal = runningCash;
       const part2Nominal = expenseNominal - part1Nominal;
 
-      // Catat Tahap 1 sesuai sisa kas yang tersedia (Saldo kas pas Rp 0, tidak minus)
+      // Catat Bagian 1 sesuai sisa kas yang tersedia (Saldo kas pas Rp 0, tidak minus)
       runningCash = 0;
       finalBktItems.push({
         ...curr,
         id: `${curr.id}-p1`,
-        uraian: curr.uraian.includes('Tahap 1')
-          ? curr.uraian
-          : `${curr.uraian} (Tahap 1 / Sesuai Sisa Kas)`,
+        uraian: cleanNaturalUraian(curr.uraian),
         pengeluaran: part1Nominal,
         saldo: 0,
       });
 
-      // Jadwalkan Tahap 2 pada tanggal penarikan bank berikutnya
+      // Jadwalkan Bagian 2 pada tanggal penarikan bank berikutnya
       const part2Date = nextWithdrawal ? nextWithdrawal.tanggal : curr.tanggal;
       const part2Iso = nextWithdrawal ? nextWithdrawal.iso : currIso;
       const part2Bulan = nextWithdrawal ? nextWithdrawal.bulan : curr.bulan;
@@ -417,10 +418,8 @@ export function calculateIntegratedBkt(
         tanggal: part2Date,
         tanggalObj: part2Iso,
         bulan: part2Bulan,
-        uraian: curr.uraian.includes('Tahap 2')
-          ? curr.uraian
-          : `${curr.uraian} (Tahap 2 / Pelunasan Sisa)`,
-        noBukti: curr.noBukti && curr.noBukti !== '-' ? `${curr.noBukti}-B` : curr.noBukti,
+        uraian: cleanNaturalUraian(curr.uraian),
+        noBukti: (curr.noBukti || '').replace(/-B$/, '').trim(),
         pengeluaran: part2Nominal,
         pemasukan: 0,
         saldo: 0,
@@ -447,11 +446,18 @@ export function calculateIntegratedBkt(
     runningCash -= expenseNominal;
     finalBktItems.push({
       ...curr,
+      uraian: cleanNaturalUraian(curr.uraian),
+      noBukti: (curr.noBukti || '').replace(/-B$/, '').trim(),
       saldo: runningCash,
     });
   }
 
-  return finalBktItems;
+  const targetYear =
+    finalBktItems.find((b) => b.noBukti)?.noBukti?.match(/\b(20\d\d)\b/)?.[1] ||
+    finalBktItems.find((b) => b.tanggalObj || b.tanggal)?.tanggalObj?.slice(0, 4) ||
+    '2026';
+
+  return renumberMaterialTransactionsChronologically(finalBktItems, targetYear);
 }
 
 /**
@@ -523,17 +529,42 @@ export function findMatchedKwitansiForTransaction(
   const isSplit =
     tx.id.includes('-p1') ||
     tx.id.includes('-p2') ||
-    tx.uraian.includes('Tahap 1') ||
-    tx.uraian.includes('Tahap 2');
+    (tx as any).isSplit;
 
   const baseTxId = tx.id.replace(/-p[12]$/, '');
   const cleanTxBuktiNorm = (tx.noBukti || '').replace(/-B$/, '').trim();
 
   // Helper to wrap the final matched kwitansi with scaled volume if split
   const wrapResult = (k: KwitansiDocument | null): KwitansiDocument | null => {
-    if (!k || !isSplit) return k;
+    if (!k) return null;
+    const resolvedBukti = tx.noBukti && tx.noBukti !== '-' ? tx.noBukti.replace(/-B$/, '').trim() : k.noBukti;
+    const resolvedSpb = deriveSpbFromBukti(resolvedBukti, k.noSpb);
+    const cleanUraian = cleanNaturalUraian(tx.uraian || k.uraian);
+
+    if (!isSplit) {
+      if (resolvedBukti && resolvedBukti !== k.noBukti) {
+        return {
+          ...k,
+          noBukti: resolvedBukti,
+          noSpb: resolvedSpb,
+          uraian: cleanUraian,
+        };
+      }
+      return {
+        ...k,
+        uraian: cleanUraian,
+      };
+    }
+
     const txNom = (tx as any).pengeluaran || (tx as any).pemasukan || k.nominal;
-    if (Math.abs(txNom - k.nominal) < 2) return k;
+    if (Math.abs(txNom - k.nominal) < 2) {
+      return {
+        ...k,
+        noBukti: resolvedBukti,
+        noSpb: resolvedSpb,
+        uraian: cleanUraian,
+      };
+    }
 
     const ratio = k.nominal > 0 ? txNom / k.nominal : 1;
     const scaledItems = (k.items || []).map((it) => {
@@ -552,8 +583,9 @@ export function findMatchedKwitansiForTransaction(
       tanggal: tx.tanggal,
       tanggalFormatted: tx.tanggal,
       bulan: tx.bulan,
-      uraian: tx.uraian,
-      noBukti: tx.noBukti || k.noBukti,
+      uraian: cleanUraian,
+      noBukti: resolvedBukti,
+      noSpb: resolvedSpb,
       items: scaledItems,
     };
   };
@@ -789,15 +821,18 @@ export function synthesizeKwitansiFromTransaction(
     }
   }
 
+  const cleanBukti = (tx.noBukti || '').replace(/-B$/, '').trim();
+  const cleanUraian = cleanNaturalUraian(tx.uraian);
+
   const equivKw: Partial<KwitansiDocument> = {
     id: tx.kwitansiIdRef || `kw-syn-${tx.id}`,
-    noBukti: tx.noBukti,
-    noSpb: `SPB-${tx.noBukti || '01'}`,
+    noBukti: cleanBukti,
+    noSpb: deriveSpbFromBukti(cleanBukti, `SPB-${cleanBukti || '01'}`),
     tipe,
     tanggal: tx.tanggal,
     tanggalFormatted: tx.tanggal,
     bulan: tx.bulan,
-    uraian: tx.uraian,
+    uraian: cleanUraian,
     namaToko,
     penerimaNama,
     penerimaPekerjaan,
