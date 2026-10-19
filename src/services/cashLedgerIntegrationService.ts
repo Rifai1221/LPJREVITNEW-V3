@@ -316,16 +316,43 @@ export function calculateIntegratedBkt(
       continue;
     }
 
-    // It's an expense (item.pengeluaran > 0)
     const isUpah = /uk[\/\-_]|upah tukang|upah borongan|daftar hadir/i.test(`${item.noBukti || ''} ${item.uraian}`);
 
     if (isUpah) {
-      // Upah tukang dibayar lunas tepat waktu
-      running = running - item.pengeluaran;
-      finalBktRows.push({
-        ...item,
-        saldo: running,
-      });
+      if (item.pengeluaran <= running || futureInflows.length === 0) {
+        running = running - item.pengeluaran;
+        finalBktRows.push({
+          ...item,
+          saldo: running,
+        });
+      } else {
+        const nextBankDraw = futureInflows.find((inf) => (inf.tanggalObj || parseTxDateToIso(inf.tanggal)) > itemIso);
+
+        if (nextBankDraw) {
+          const nextDrawIso = nextBankDraw.tanggalObj || parseTxDateToIso(nextBankDraw.tanggal);
+          const nextDrawDate = nextBankDraw.tanggal;
+          const nextDrawBulan = nextBankDraw.bulan;
+
+          deferredBktQueue.push({
+            targetIso: nextDrawIso,
+            targetDate: nextDrawDate,
+            targetBulan: nextDrawBulan,
+            item: {
+              ...item,
+              tanggal: nextDrawDate,
+              tanggalObj: nextDrawIso,
+              bulan: nextDrawBulan,
+              saldo: 0,
+            },
+          });
+        } else {
+          running = running - item.pengeluaran;
+          finalBktRows.push({
+            ...item,
+            saldo: running,
+          });
+        }
+      }
       continue;
     }
 
