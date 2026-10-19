@@ -14,7 +14,7 @@ import {
   RabDivision,
   RabSubItem,
 } from '../types';
-import { resolveWeekDates, parseTxDateToIso } from '../utils/monthHelper';
+import { resolveWeekDates, parseTxDateToIso, indonesianMonths, monthOrderMap } from '../utils/monthHelper';
 import { getAhspWageRateForRole } from '../utils/divisionHelper';
 
 export function getDateInWeek(startDateIso: string, dayOffset: number) {
@@ -68,8 +68,8 @@ export function extractWeekNumberFromKwitansi(
   const spb = (k.noSpb || '').trim();
   const combinedBukti = `${bukti} ${spb}`;
 
-  // UK/01/2026, ADM/01/2026, KONS-P/01/2026, KONS-W/01/2026, etc are always week-based
-  const matchBuktiWeekly = combinedBukti.match(/(?:UK|ADM|KONS-P|KONS-W)\/(\d{1,2})\//i);
+  // UK/01/2026 is week-based labor wages
+  const matchBuktiWeekly = combinedBukti.match(/(?:UK)\/(\d{1,2})\//i);
   if (matchBuktiWeekly) {
     const num = parseInt(matchBuktiWeekly[1], 10);
     if (!isNaN(num) && num > 0 && num <= 52) return num;
@@ -1109,7 +1109,7 @@ export function getAutoHealedKwitansiItems<
     /smkk|k3|keselamatan kerja|apd/i.test(uraianStr) ||
     kw.tipe === 'SMKK') &&
     !/pengelola|administrasi|spj/i.test(uraianStr) && 
-    kw.kategoriBiayaPajak !== 'Perencanaan_Pengelolaan';
+    (kw as any).kategoriBiayaPajak !== 'Perencanaan_Pengelolaan';
 
   if (isSmkk) {
     const isCorrupted =
@@ -2007,38 +2007,36 @@ export function renumberKwitansiChronologically<
   });
 
   // 5. Renumber Konsultan Perencana
+  // 5. Renumber Konsultan Perencana (Monthly sequence)
   const sortedKonsP = sortChronologically(konsPList);
-  const renumberedKonsP = sortedKonsP.map((kw) => {
-    const wNum = kw.mingguKeRef || 1;
-    const padW = String(wNum).padStart(2, '0');
+  const renumberedKonsP = sortedKonsP.map((kw, idx) => {
+    const padM = String(idx + 1).padStart(2, '0');
     return {
       ...kw,
-      noBukti: `KONS-P/${padW}/${safeYear}`,
-      noSpb: `SPB-KONS-P/${padW}/${safeYear}`,
+      noBukti: `KONS-P/${padM}/${safeYear}`,
+      noSpb: `SPB-KONS-P/${padM}/${safeYear}`,
     };
   });
 
-  // 6. Renumber Konsultan Pengawas
+  // 6. Renumber Konsultan Pengawas (Monthly sequence)
   const sortedKonsW = sortChronologically(konsWList);
-  const renumberedKonsW = sortedKonsW.map((kw) => {
-    const wNum = kw.mingguKeRef || 1;
-    const padW = String(wNum).padStart(2, '0');
+  const renumberedKonsW = sortedKonsW.map((kw, idx) => {
+    const padM = String(idx + 1).padStart(2, '0');
     return {
       ...kw,
-      noBukti: `KONS-W/${padW}/${safeYear}`,
-      noSpb: `SPB-KONS-W/${padW}/${safeYear}`,
+      noBukti: `KONS-W/${padM}/${safeYear}`,
+      noSpb: `SPB-KONS-W/${padM}/${safeYear}`,
     };
   });
 
-  // 7. Renumber Administrasi
+  // 7. Renumber Administrasi / Pengelola SPJ (Monthly sequence)
   const sortedAdm = sortChronologically(admList);
-  const renumberedAdm = sortedAdm.map((kw) => {
-    const wNum = kw.mingguKeRef || 1;
-    const padW = String(wNum).padStart(2, '0');
+  const renumberedAdm = sortedAdm.map((kw, idx) => {
+    const padM = String(idx + 1).padStart(2, '0');
     return {
       ...kw,
-      noBukti: `ADM/${padW}/${safeYear}`,
-      noSpb: `SPB-ADM/${padW}/${safeYear}`,
+      noBukti: `ADM/${padM}/${safeYear}`,
+      noSpb: `SPB-ADM/${padM}/${safeYear}`,
     };
   });
 
@@ -2875,104 +2873,8 @@ export function calculateBkuFromTransactions(
     }
   });
 
-  // 2c. Auto-generate Management BKU entries strictly from active week RINCIAN BIAYA MANAJEMEN input (div-m1, div-m2, div-m3)
-  const paguTotal = school?.totalAnggaran || 552457000;
-  activeWeeks.forEach((weekObj) => {
-    const wNum = weekObj.mingguKe;
-    const wDates = resolveWeekDates(weekObj, yearStr);
-    const weekPad = String(wNum).padStart(2, '0');
-
-    const divM1 = weekObj.divisions?.find((d) => d.id === 'div-m1' || /perencana/i.test(d.uraian));
-    const divM2 = weekObj.divisions?.find((d) => d.id === 'div-m2' || /pengawas/i.test(d.uraian));
-    const divM3 = weekObj.divisions?.find((d) => d.id === 'div-m3' || /pengelolaan|administrasi/i.test(d.uraian));
-
-    // Perencana (div-m1)
-    if (divM1 && (divM1.prestasiMingguIni || 0) > 0) {
-      const pBukti = `KONS-P/${weekPad}/${yearStr}`;
-      const alreadyHasP = result.some((r) => {
-        const rB = (r.noBukti || '').toUpperCase().trim();
-        if (rB === pBukti.toUpperCase() || rB === `KONS-P/${wNum}/${yearStr}`.toUpperCase()) return true;
-        if (/kons-p/i.test(rB) && (rB.includes(`/${weekPad}/`) || rB.includes(`/${wNum}/`))) return true;
-        if (/perencana/i.test(r.uraian || '') && (rB.includes(`/${weekPad}/`) || rB.includes(`/${wNum}/`) || rB.endsWith(`-${wNum}`))) return true;
-        return false;
-      });
-      if (!alreadyHasP) {
-        const pRecipient = resolveManagementRecipient('PERENCANA', school, stores);
-        const pNominal = Math.round((paguTotal * divM1.prestasiMingguIni) / 100);
-        result.push({
-          id: `bku-mgt-p-w${wNum}`,
-          tanggal: wDates.endDateSlash,
-          tanggalObj: wDates.endDate,
-          bulan: wDates.bulan || startProjectBulan,
-          jenis: 'PENGELUARAN',
-          uraian: `Bayar Honorarium Jasa Perencana Teknis (${pRecipient})`,
-          noBukti: pBukti,
-          penerimaan: 0,
-          pengeluaran: pNominal,
-          kategoriBiaya: 'Perencanaan_Pengelolaan',
-          kwitansiIdRef: `kw-kons-p-m${wNum}`,
-        });
-      }
-    }
-
-    // Pengawas (div-m2)
-    if (divM2 && (divM2.prestasiMingguIni || 0) > 0) {
-      const wBukti = `KONS-W/${weekPad}/${yearStr}`;
-      const alreadyHasW = result.some((r) => {
-        const rB = (r.noBukti || '').toUpperCase().trim();
-        if (rB === wBukti.toUpperCase() || rB === `KONS-W/${wNum}/${yearStr}`.toUpperCase()) return true;
-        if (/kons-w/i.test(rB) && (rB.includes(`/${weekPad}/`) || rB.includes(`/${wNum}/`))) return true;
-        if (/pengawas/i.test(r.uraian || '') && (rB.includes(`/${weekPad}/`) || rB.includes(`/${wNum}/`) || rB.endsWith(`-${wNum}`))) return true;
-        return false;
-      });
-      if (!alreadyHasW) {
-        const wRecipient = resolveManagementRecipient('PENGAWAS', school, stores);
-        const wNominal = Math.round((paguTotal * divM2.prestasiMingguIni) / 100);
-        result.push({
-          id: `bku-mgt-w-w${wNum}`,
-          tanggal: wDates.endDateSlash,
-          tanggalObj: wDates.endDate,
-          bulan: wDates.bulan || startProjectBulan,
-          jenis: 'PENGELUARAN',
-          uraian: `Bayar Honorarium Jasa Pengawas Lapangan (${wRecipient})`,
-          noBukti: wBukti,
-          penerimaan: 0,
-          pengeluaran: wNominal,
-          kategoriBiaya: 'Perencanaan_Pengelolaan',
-          kwitansiIdRef: `kw-kons-w-m${wNum}`,
-        });
-      }
-    }
-
-    // Pengelolaan ADM (div-m3)
-    if (divM3 && (divM3.prestasiMingguIni || 0) > 0) {
-      const admBukti = `ADM/${weekPad}/${yearStr}`;
-      const alreadyHasAdm = result.some((r) => {
-        const rB = (r.noBukti || '').toUpperCase().trim();
-        if (rB === admBukti.toUpperCase() || rB === `ADM/${wNum}/${yearStr}`.toUpperCase()) return true;
-        if (/adm\//i.test(rB) && (rB.includes(`/${weekPad}/`) || rB.includes(`/${wNum}/`))) return true;
-        if (/administrasi|pengelolaan/i.test(r.uraian || '') && (rB.includes(`/${weekPad}/`) || rB.includes(`/${wNum}/`) || rB.endsWith(`-${wNum}`))) return true;
-        return false;
-      });
-      if (!alreadyHasAdm) {
-        const admRecipient = resolveManagementRecipient('PENGELOLA', school, stores);
-        const admNominal = Math.round((paguTotal * divM3.prestasiMingguIni) / 100);
-        result.push({
-          id: `bku-mgt-adm-w${wNum}`,
-          tanggal: wDates.endDateSlash,
-          tanggalObj: wDates.endDate,
-          bulan: wDates.bulan || startProjectBulan,
-          jenis: 'PENGELUARAN',
-          uraian: `Bayar Biaya Pengelolaan Administrasi LPJ (${admRecipient})`,
-          noBukti: admBukti,
-          penerimaan: 0,
-          pengeluaran: admNominal,
-          kategoriBiaya: 'Perencanaan_Pengelolaan',
-          kwitansiIdRef: `kw-adm-m${wNum}`,
-        });
-      }
-    }
-  });
+  // 2c. Management BKU entries (Perencana, Pengawas, Pengelola SPJ) are now monthly receipts
+  // and are already populated chronologically from kwitansiList above on their exact payment dates.
 
   // 3. Add Termin 2 bank withdrawal
   const manualInit2 = manualTransactions.find((m) => m.id === 'bku-init-2');
@@ -3888,94 +3790,10 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
     }
 
     // 5. Handle MANAJEMEN / KONSULTAN divisions
+    // Honorarium Perencana, Pengawas & Pengelola SPJ dialihkan ke pembayaran bulanan (setiap akhir bulan & akhir proyek)
     if (div.kategori === 'MANAJEMEN' || /perencana|pengawas|administrasi/i.test(div.uraian)) {
-      const isPerencana = /perencana/i.test(div.uraian);
-      const isPengawas = /pengawas/i.test(div.uraian);
-      const isAdm = /administrasi|pengelolaan/i.test(div.uraian);
-
-      const nomBiaya = Math.max(
-        250000,
-        Math.round(progressRatio * (school.totalAnggaran || 500000000) * ((div.bobotTotal || 1) / 100))
-      );
-
-      let kwBukti = `ADM/${targetWeek < 10 ? '0' + targetWeek : targetWeek}/${yearStr}`;
-      let penerimaNama = resolveManagementRecipient('PENGELOLA', school, stores);
-      let penerimaPekerjaan = defaultPengelolaSpjStore ? defaultPengelolaSpjStore.pekerjaan || 'Pengelola SPJ' : 'Pengelola SPJ';
-      let namaToko = defaultPengelolaSpjStore ? defaultPengelolaSpjStore.namaToko : undefined;
-      let tipeKw: KwitansiDocument['tipe'] = 'OPERASIONAL';
-      let isPph23 = false;
-      let pph23Amount = 0;
-
-      if (isPerencana) {
-        kwBukti = `KONS-P/${targetWeek < 10 ? '0' + targetWeek : targetWeek}/${yearStr}`;
-        penerimaNama = resolveManagementRecipient('PERENCANA', school, stores);
-        penerimaPekerjaan = 'Konsultan Perencana Teknis';
-        namaToko = undefined;
-        tipeKw = 'KONSULTAN';
-        isPph23 = true;
-        pph23Amount = Math.round(nomBiaya * 0.02 * 100) / 100;
-      } else if (isPengawas) {
-        kwBukti = `KONS-W/${targetWeek < 10 ? '0' + targetWeek : targetWeek}/${yearStr}`;
-        penerimaNama = resolveManagementRecipient('PENGAWAS', school, stores);
-        penerimaPekerjaan = 'Konsultan Pengawas Lapangan';
-        namaToko = undefined;
-        tipeKw = 'KONSULTAN';
-        isPph23 = true;
-        pph23Amount = Math.round(nomBiaya * 0.02 * 100) / 100;
-      }
-
-      // Administrasi LPJ dibayarkan pada hari Jumat (Day 4) saat penyusunan laporan mingguan & dokumentasi selesai
-      // Honor Konsultan Perencana & Pengawas pada hari Sabtu (Day 5 / Akhir Minggu)
-      const opDayOffset = isAdm ? 4 : 5;
-      const opDateInfo = getDateInWeek(weekDates.startDate, opDayOffset);
-
-      const manKwDoc: KwitansiDocument = {
-        id: `kw-man-m${targetWeek}-${dIdx}-${Date.now()}`,
-        noBukti: kwBukti,
-        noSpb: `SPB-${kwBukti}`,
-        tipe: tipeKw,
-        tanggal: opDateInfo.dateSlash,
-        tanggalFormatted: opDateInfo.dateFormatted,
-        bulan: opDateInfo.bulan,
-        uraian: isPerencana
-          ? `Pembayaran Lunas Honorarium Jasa Perencana Teknis Minggu Ke-${targetWeek} (${formattedDateStart} s.d ${formattedDateEnd}), Revitalisasi ${school.namaSekolah}`
-          : isPengawas
-          ? `Pembayaran Lunas Honorarium Jasa Pengawas Lapangan Minggu Ke-${targetWeek} (${formattedDateStart} s.d ${formattedDateEnd}), Revitalisasi ${school.namaSekolah}`
-          : `Pembayaran Lunas Biaya Pengelolaan SPJ & Administrasi Kegiatan Minggu Ke-${targetWeek} (${formattedDateStart} s.d ${formattedDateEnd}), Revitalisasi ${school.namaSekolah}`,
-        penerimaNama,
-        penerimaPekerjaan,
-        penerimaAlamat: school.kabKota,
-        namaToko,
-        nominal: nomBiaya,
-        items: [
-          {
-            namaBarang: isAdm
-              ? `Biaya Pengelolaan Administrasi, ATK & Dokumentasi Minggu Ke-${targetWeek}`
-              : `Honorarium Jasa / Pengelolaan Minggu Ke-${targetWeek}`,
-            volume: 1,
-            satuan: 'Minggu',
-            hargaSatuan: nomBiaya,
-            jumlah: nomBiaya,
-          },
-        ],
-        isPpn: false,
-        isPph22: false,
-        isPph23,
-        ppnAmount: 0,
-        pph22Amount: 0,
-        pph23Amount,
-        kategoriBiayaPajak: 'Perencanaan_Pengelolaan',
-        keteranganSpb: `Surat Perintah Bayar ${isAdm ? 'Biaya Administrasi' : 'Honor Jasa'} Minggu Ke-${targetWeek} (${opDateInfo.dateFormatted})`,
-        mingguKeRef: targetWeek,
-      };
-
-      const existManIdx = newKwitansiList.findIndex((k) => k.noBukti === kwBukti);
-      if (existManIdx >= 0) {
-        newKwitansiList[existManIdx] = manKwDoc;
-      } else {
-        newKwitansiList.push(manKwDoc);
-      }
-      generatedCount.manajemen++;
+      // Management receipts are now generated exclusively on a monthly basis via generateMonthlyManagementTransactions
+      return;
     }
   });
 
@@ -4751,6 +4569,345 @@ export interface MultiWeekGenerationResult {
 }
 
 /**
+ * Monthly Management & Consultant Kwitansi Generator:
+ * Generates Kwitansi for:
+ * 1. Konsultan Perencana Teknis (KONS-P)
+ * 2. Konsultan Pengawas Lapangan (KONS-W)
+ * 3. Tim Pengelola Administrasi SPJ & LPJ (ADM)
+ * 
+ * Sesuai aturan:
+ * - Pembayaran dilakukan setiap akhir bulan kalender (e.g. 31 Juli, 31 Agustus, 30 September).
+ * - Khusus bulan terakhir, tanggal pembayaran tepat pada tanggal berakhirnya pekerjaan / serah terima proyek.
+ * - Nilai nominal mengikuti akumulasi bobot/prestasi mingguan dari minggu-minggu yang berjalan di bulan bersangkutan.
+ * - Pada bulan terakhir / penyelesaian akhir, seluruh sisa pagu anggaran dilunaskan 100% klop dengan RAB.
+ */
+export function generateMonthlyManagementTransactions({
+  weeksToUse,
+  activeWeeks,
+  school,
+  stores = [],
+  realSchoolData,
+  existingKwitansi = [],
+}: {
+  weeksToUse: ProjectProgressWeek[];
+  activeWeeks: ProjectProgressWeek[];
+  school: SchoolMasterData;
+  stores?: StoreVendor[];
+  realSchoolData?: RealSchoolData;
+  existingKwitansi?: KwitansiDocument[];
+}): {
+  managementKwitansi: KwitansiDocument[];
+  generatedCount: number;
+} {
+  const yearStr = school?.tahunAnggaran?.trim() || '2026';
+  const paguTotal = school?.totalAnggaran || 552457000;
+
+  if (!weeksToUse || weeksToUse.length === 0 || !activeWeeks || activeWeeks.length === 0) {
+    return { managementKwitansi: [], generatedCount: 0 };
+  }
+
+  // 1. Identify Project End Date
+  const firstWeek = weeksToUse[0] || activeWeeks[0];
+  const lastWeek = weeksToUse[weeksToUse.length - 1] || activeWeeks[activeWeeks.length - 1];
+  const lastResolved = resolveWeekDates(lastWeek || { mingguKe: 14 }, yearStr);
+
+  let finalProjectEndDate = lastResolved.endDate; // e.g. "2026-10-15" or "2026-10-06"
+  if (school?.periodePenggunaan) {
+    const match = school.periodePenggunaan.match(/(?:sampai|s\.d\.?|s\/d|-)\s*(\d{1,2})\s+([a-zA-Z]+|\d{1,2})\s+(\d{4})/i);
+    if (match) {
+      const day = match[1].padStart(2, '0');
+      const monthPart = match[2];
+      const year = match[3];
+      const monthNum = monthOrderMap[monthPart.toLowerCase()] || parseInt(monthPart, 10);
+      if (monthNum >= 1 && monthNum <= 12) {
+        finalProjectEndDate = `${year}-${String(monthNum).padStart(2, '0')}-${day}`;
+      }
+    }
+  }
+
+  const [finalYearStr, finalMonthStr, finalDayStr] = finalProjectEndDate.split('-');
+  const finalYear = parseInt(finalYearStr, 10) || parseInt(yearStr, 10) || 2026;
+  const finalMonthNum = parseInt(finalMonthStr, 10) || 10;
+  const finalMonthName = indonesianMonths[finalMonthNum - 1] || 'Oktober';
+  const finalMonthKey = `${finalMonthName} ${finalYear}`;
+
+  // 2. Budget & Weight per Role from RealSchoolData or Defaults
+  const divP = realSchoolData?.divisions?.find((d) => /perencana/i.test(d.uraian));
+  const divW = realSchoolData?.divisions?.find((d) => /pengawas/i.test(d.uraian));
+  const divA = realSchoolData?.divisions?.find((d) => /pengelolaan|administrasi/i.test(d.uraian));
+
+  const bobotP = divP?.bobotPersen || (divP && divP.subTotal > 0 ? (divP.subTotal / paguTotal) * 100 : 2.23);
+  const bobotW = divW?.bobotPersen || (divW && divW.subTotal > 0 ? (divW.subTotal / paguTotal) * 100 : 2.74);
+  const bobotA = divA?.bobotPersen || (divA && divA.subTotal > 0 ? (divA.subTotal / paguTotal) * 100 : 3.23);
+
+  const budgetP = divP?.subTotal || Math.round((paguTotal * bobotP) / 100);
+  const budgetW = divW?.subTotal || Math.round((paguTotal * bobotW) / 100);
+  const budgetA = divA?.subTotal || Math.round((paguTotal * bobotA) / 100);
+
+  // 3. Map weeks by month
+  const monthWeeksMap = new Map<string, ProjectProgressWeek[]>();
+  weeksToUse.forEach((w) => {
+    const wDates = resolveWeekDates(w, yearStr);
+    const mKey = wDates.bulan; // e.g. "Juli 2026"
+    if (!monthWeeksMap.has(mKey)) {
+      monthWeeksMap.set(mKey, []);
+    }
+    monthWeeksMap.get(mKey)!.push(w);
+  });
+
+  const sortedMonthKeys = Array.from(monthWeeksMap.keys()).sort((a, b) => {
+    const [mA, yA] = a.split(' ');
+    const [mB, yB] = b.split(' ');
+    const scoreA = (parseInt(yA, 10) || 2026) * 100 + (monthOrderMap[mA.toLowerCase()] || 1);
+    const scoreB = (parseInt(yB, 10) || 2026) * 100 + (monthOrderMap[mB.toLowerCase()] || 1);
+    return scoreA - scoreB;
+  });
+
+  const activeSet = new Set(activeWeeks.map((w) => w.mingguKe));
+  const activeMonthKeys = sortedMonthKeys.filter((mKey) => {
+    const mWeeks = monthWeeksMap.get(mKey) || [];
+    return mWeeks.some((w) => {
+      if (!activeSet.has(w.mingguKe)) return false;
+      const divSum = (w.divisions || []).reduce((s, d) => s + (d.prestasiMingguIni || 0), 0);
+      return (w.bobotRealisasi && w.bobotRealisasi > 0) || divSum > 0 || (w.mingguKe === 1 && activeSet.has(1));
+    });
+  });
+
+  if (activeMonthKeys.length === 0) {
+    return { managementKwitansi: [], generatedCount: 0 };
+  }
+
+  const managementKwitansi: KwitansiDocument[] = [];
+  let paidSoFarP = 0;
+  let paidSoFarW = 0;
+  let paidSoFarA = 0;
+
+  const defaultPengelolaSpjStore = (stores || []).find(
+    (s) => s.kategori === 'PENGELOLA_SPJ' || /pengelola.*spj|pengelola spj/i.test(`${s.namaToko} ${s.pekerjaan || ''}`)
+  );
+
+  activeMonthKeys.forEach((mKey, mIdx) => {
+    const mWeeks = monthWeeksMap.get(mKey) || [];
+    const isFinalMonth = mKey === finalMonthKey || mIdx === activeMonthKeys.length - 1;
+
+    let dateSlash: string;
+    let dateFormatted: string;
+    let bulan = mKey;
+
+    if (isFinalMonth) {
+      // Khusus bulan terakhir: tepat pada tanggal berakhirnya pekerjaan proyek
+      const [fYear, fMonth, fDay] = finalProjectEndDate.split('-');
+      const dayNum = parseInt(fDay, 10) || 15;
+      const fMNum = parseInt(fMonth, 10) || 10;
+      const monthLabel = indonesianMonths[fMNum - 1] || 'Oktober';
+      dateSlash = `${String(dayNum).padStart(2, '0')}/${String(fMNum).padStart(2, '0')}/${fYear}`;
+      dateFormatted = `${dayNum} ${monthLabel} ${fYear}`;
+      bulan = `${monthLabel} ${fYear}`;
+    } else {
+      // Setiap akhir bulan: tanggal terakhir di bulan bersangkutan (e.g. 31 Juli, 31 Agustus, 30 September)
+      const [mName, yStr] = mKey.split(' ');
+      const mNum = monthOrderMap[mName.toLowerCase()] || 7;
+      const yNum = parseInt(yStr, 10) || 2026;
+      const lastDay = new Date(yNum, mNum, 0).getDate();
+      const pDay = String(lastDay).padStart(2, '0');
+      const pMon = String(mNum).padStart(2, '0');
+      dateSlash = `${pDay}/${pMon}/${yNum}`;
+      dateFormatted = `${lastDay} ${indonesianMonths[mNum - 1]} ${yNum}`;
+      bulan = mKey;
+    }
+
+    // Akumulasi bobot mingguan dari minggu-minggu di bulan bersangkutan
+    let mProgP = 0;
+    let mProgW = 0;
+    let mProgA = 0;
+
+    mWeeks.forEach((w) => {
+      const dP = w.divisions?.find((d) => d.id === 'div-m1' || /perencana/i.test(d.uraian));
+      const dW = w.divisions?.find((d) => d.id === 'div-m2' || /pengawas/i.test(d.uraian));
+      const dA = w.divisions?.find((d) => d.id === 'div-m3' || /pengelolaan|administrasi/i.test(d.uraian));
+
+      mProgP += (dP?.prestasiMingguIni || 0);
+      mProgW += (dW?.prestasiMingguIni || 0);
+      mProgA += (dA?.prestasiMingguIni || 0);
+    });
+
+    const mFisikSum = mWeeks.reduce((acc, w) => acc + (w.bobotRealisasi || 0), 0);
+    if (mProgP === 0 && mFisikSum > 0 && paidSoFarP < budgetP) {
+      mProgP = Math.round(((mFisikSum / 100) * bobotP) * 1000) / 1000;
+    }
+    if (mProgW === 0 && mFisikSum > 0 && paidSoFarW < budgetW) {
+      mProgW = Math.round(((mFisikSum / 100) * bobotW) * 1000) / 1000;
+    }
+    if (mProgA === 0 && mFisikSum > 0 && paidSoFarA < budgetA) {
+      mProgA = Math.round(((mFisikSum / 100) * bobotA) * 1000) / 1000;
+    }
+
+    // Kalkulasi nominal (Pelunasan 100% pada bulan terakhir)
+    let nomP = 0;
+    if (isFinalMonth) {
+      nomP = Math.max(0, budgetP - paidSoFarP);
+    } else if (mProgP > 0 && bobotP > 0) {
+      nomP = Math.round((budgetP * mProgP) / bobotP);
+      nomP = Math.min(nomP, Math.max(0, budgetP - paidSoFarP));
+    }
+
+    let nomW = 0;
+    if (isFinalMonth) {
+      nomW = Math.max(0, budgetW - paidSoFarW);
+    } else if (mProgW > 0 && bobotW > 0) {
+      nomW = Math.round((budgetW * mProgW) / bobotW);
+      nomW = Math.min(nomW, Math.max(0, budgetW - paidSoFarW));
+    }
+
+    let nomA = 0;
+    if (isFinalMonth) {
+      nomA = Math.max(0, budgetA - paidSoFarA);
+    } else if (mProgA > 0 && bobotA > 0) {
+      nomA = Math.round((budgetA * mProgA) / bobotA);
+      nomA = Math.min(nomA, Math.max(0, budgetA - paidSoFarA));
+    }
+
+    paidSoFarP += nomP;
+    paidSoFarW += nomW;
+    paidSoFarA += nomA;
+
+    const minW = Math.min(...mWeeks.map((w) => w.mingguKe));
+    const maxW = Math.max(...mWeeks.map((w) => w.mingguKe));
+    const weekSpanText = minW === maxW ? `Minggu Ke-${minW}` : `Minggu Ke-${minW} s.d ${maxW}`;
+    const mSeq = mIdx + 1;
+    const padM = String(mSeq).padStart(2, '0');
+
+    // 1. Perencana
+    if (nomP > 0) {
+      const pph23P = Math.round(nomP * 0.02 * 100) / 100;
+      managementKwitansi.push({
+        id: `kw-kons-p-m${mSeq}-${Date.now()}`,
+        noBukti: `KONS-P/${padM}/${yearStr}`,
+        noSpb: `SPB-KONS-P/${padM}/${yearStr}`,
+        tipe: 'KONSULTAN',
+        tanggal: dateSlash,
+        tanggalFormatted: dateFormatted,
+        bulan,
+        uraian: isFinalMonth
+          ? `Pembayaran Lunas (Pelunasan Akhir) Honorarium Jasa Konsultan Perencana Teknis per Tanggal Akhir Proyek (${dateFormatted}), Revitalisasi ${school.namaSekolah}`
+          : `Pembayaran Lunas Honorarium Jasa Konsultan Perencana Teknis Bulan ${bulan} (${weekSpanText}), Revitalisasi ${school.namaSekolah}`,
+        penerimaNama: resolveManagementRecipient('PERENCANA', school, stores),
+        penerimaPekerjaan: 'Konsultan Perencana Teknis',
+        penerimaAlamat: school.kabKota,
+        nominal: nomP,
+        items: [
+          {
+            namaBarang: isFinalMonth
+              ? 'Honorarium Jasa Konsultansi Perencanaan Teknis & Dokumen Laporan Akhir (Pelunasan Akhir Proyek)'
+              : `Honorarium Jasa Konsultansi Perencanaan Teknis (Akumulasi Progres ${weekSpanText})`,
+            volume: 1,
+            satuan: 'Bulan',
+            hargaSatuan: nomP,
+            jumlah: nomP,
+          },
+        ],
+        isPpn: false,
+        isPph22: false,
+        isPph23: true,
+        ppnAmount: 0,
+        pph22Amount: 0,
+        pph23Amount: pph23P,
+        kategoriBiayaPajak: 'Perencanaan_Pengelolaan',
+        keteranganSpb: `Surat Perintah Bayar Honorarium Konsultan Perencana (${dateFormatted})`,
+        mingguKeRef: maxW,
+      });
+    }
+
+    // 2. Pengawas
+    if (nomW > 0) {
+      const pph23W = Math.round(nomW * 0.02 * 100) / 100;
+      managementKwitansi.push({
+        id: `kw-kons-w-m${mSeq}-${Date.now()}`,
+        noBukti: `KONS-W/${padM}/${yearStr}`,
+        noSpb: `SPB-KONS-W/${padM}/${yearStr}`,
+        tipe: 'KONSULTAN',
+        tanggal: dateSlash,
+        tanggalFormatted: dateFormatted,
+        bulan,
+        uraian: isFinalMonth
+          ? `Pembayaran Lunas (Pelunasan Akhir) Honorarium Jasa Konsultan Pengawas Lapangan per Tanggal Akhir Proyek (${dateFormatted}), Revitalisasi ${school.namaSekolah}`
+          : `Pembayaran Lunas Honorarium Jasa Konsultan Pengawas Lapangan Bulan ${bulan} (${weekSpanText}), Revitalisasi ${school.namaSekolah}`,
+        penerimaNama: resolveManagementRecipient('PENGAWAS', school, stores),
+        penerimaPekerjaan: 'Konsultan Pengawas Lapangan',
+        penerimaAlamat: school.kabKota,
+        nominal: nomW,
+        items: [
+          {
+            namaBarang: isFinalMonth
+              ? 'Honorarium Jasa Konsultansi Pengawasan Teknis Lapangan (Pelunasan Akhir Proyek)'
+              : `Honorarium Jasa Konsultansi Pengawasan Teknis Lapangan (Akumulasi Progres ${weekSpanText})`,
+            volume: 1,
+            satuan: 'Bulan',
+            hargaSatuan: nomW,
+            jumlah: nomW,
+          },
+        ],
+        isPpn: false,
+        isPph22: false,
+        isPph23: true,
+        ppnAmount: 0,
+        pph22Amount: 0,
+        pph23Amount: pph23W,
+        kategoriBiayaPajak: 'Perencanaan_Pengelolaan',
+        keteranganSpb: `Surat Perintah Bayar Honorarium Konsultan Pengawas (${dateFormatted})`,
+        mingguKeRef: maxW,
+      });
+    }
+
+    // 3. Pengelola SPJ
+    if (nomA > 0) {
+      managementKwitansi.push({
+        id: `kw-adm-m${mSeq}-${Date.now()}`,
+        noBukti: `ADM/${padM}/${yearStr}`,
+        noSpb: `SPB-ADM/${padM}/${yearStr}`,
+        tipe: 'OPERASIONAL',
+        tanggal: dateSlash,
+        tanggalFormatted: dateFormatted,
+        bulan,
+        uraian: isFinalMonth
+          ? `Pembayaran Lunas (Pelunasan Akhir) Biaya Pengelolaan Administrasi SPJ & LPJ Kegiatan per Tanggal Akhir Proyek (${dateFormatted}), Revitalisasi ${school.namaSekolah}`
+          : `Pembayaran Lunas Biaya Pengelolaan Administrasi SPJ & LPJ Kegiatan Bulan ${bulan} (${weekSpanText}), Revitalisasi ${school.namaSekolah}`,
+        penerimaNama: resolveManagementRecipient('PENGELOLA', school, stores),
+        penerimaPekerjaan: defaultPengelolaSpjStore ? defaultPengelolaSpjStore.pekerjaan || 'Pengelola SPJ' : 'Pengelola SPJ',
+        penerimaAlamat: school.kabKota,
+        namaToko: defaultPengelolaSpjStore ? defaultPengelolaSpjStore.namaToko : undefined,
+        nominal: nomA,
+        items: [
+          {
+            namaBarang: isFinalMonth
+              ? 'Biaya Pengelolaan Administrasi, Penyusunan Dokumen SPJ & LPJ Final (Pelunasan Akhir Proyek)'
+              : `Biaya Pengelolaan Administrasi, Penyusunan Dokumen SPJ & ATK (Akumulasi Progres ${weekSpanText})`,
+            volume: 1,
+            satuan: 'Bulan',
+            hargaSatuan: nomA,
+            jumlah: nomA,
+          },
+        ],
+        isPpn: false,
+        isPph22: false,
+        isPph23: false,
+        ppnAmount: 0,
+        pph22Amount: 0,
+        pph23Amount: 0,
+        kategoriBiayaPajak: 'Perencanaan_Pengelolaan',
+        keteranganSpb: `Surat Perintah Bayar Biaya Pengelolaan Administrasi (${dateFormatted})`,
+        mingguKeRef: maxW,
+      });
+    }
+  });
+
+  return {
+    managementKwitansi,
+    generatedCount: managementKwitansi.length,
+  };
+}
+
+/**
  * Intelligent Multi-Week Procurement & Wage Generator:
  * Solves the "mencicil nanggung" problem by allowing procurement by realistic construction batches
  * while keeping labor wages 100% weekly aligned with weekly progress inputs.
@@ -4774,7 +4931,16 @@ export function generateRealisticMultiWeekTransactions({
 
   // If user selected WEEKLY_CONSOLIDATED mode, run per-week consolidated generator
   if (procurementMode === 'WEEKLY_CONSOLIDATED') {
-    let currentKwitansi = [...existingKwitansi];
+    // Clean up old auto-generated management kwitansi to allow fresh monthly generation
+    let currentKwitansi = [...existingKwitansi.filter((k) => {
+      const isManualOrLocked = isReceiptLocked(k);
+      if (isManualOrLocked) return true;
+      const isMgmt =
+        k.tipe === 'KONSULTAN' ||
+        /kons-p|kons-w|perencana|pengawas/i.test(`${k.noBukti} ${k.uraian}`) ||
+        (k.tipe === 'OPERASIONAL' && /\badm\b|pengelola|spj/i.test(`${k.noBukti} ${k.uraian}`));
+      return !isMgmt;
+    })];
     let currentWageReports = [...existingWageReports];
     let currentBkb = [...existingBkb];
     const generatedCount = { bahan: 0, upah: 0, alat: 0, smkk: 0, manajemen: 0 };
@@ -4807,6 +4973,25 @@ export function generateRealisticMultiWeekTransactions({
       generatedCount.manajemen += res.generatedCount.manajemen;
     });
 
+    // Add monthly management kwitansi (Perencana, Pengawas, Pengelola SPJ)
+    const activeWeeksForConsolidated = sortedWeeks
+      .map((num) => weeksToUse.find((w) => w.mingguKe === num))
+      .filter(Boolean) as ProjectProgressWeek[];
+
+    const monthlyMgmtRes = generateMonthlyManagementTransactions({
+      weeksToUse,
+      activeWeeks: activeWeeksForConsolidated,
+      school,
+      stores,
+      realSchoolData,
+      existingKwitansi: currentKwitansi,
+    });
+
+    monthlyMgmtRes.managementKwitansi.forEach((kw) => {
+      currentKwitansi.push(kw);
+      generatedCount.manajemen++;
+    });
+
     return {
       updatedKwitansi: renumberKwitansiChronologically(deduplicateKwitansiList(currentKwitansi), yearStr),
       updatedWageReports: currentWageReports,
@@ -4832,6 +5017,11 @@ export function generateRealisticMultiWeekTransactions({
   const cleanExistingKwitansi = existingKwitansi.filter((k) => {
     const isManualOrLocked = isReceiptLocked(k);
     if (isManualOrLocked) return true;
+    const isMgmt =
+      k.tipe === 'KONSULTAN' ||
+      /kons-p|kons-w|perencana|pengawas/i.test(`${k.noBukti} ${k.uraian}`) ||
+      (k.tipe === 'OPERASIONAL' && /\badm\b|pengelola|spj/i.test(`${k.noBukti} ${k.uraian}`));
+    if (isMgmt) return false;
     const wNum = extractWeekNumberFromKwitansi(k, weeksToUse, yearStr);
     return wNum === null || !selectedSet.has(wNum);
   });
@@ -4895,7 +5085,7 @@ export function generateRealisticMultiWeekTransactions({
     (s) => s.kategori === 'PERCETAKAN' || /percetakan|printing|dexa|cetak/i.test(`${s.namaToko} ${s.pekerjaan || ''}`)
   ) || defaultMaterialStore;
 
-  // A. Generate WEEKLY LABOR WAGES (UK) & MANAGEMENT (ADM, KONS-P, KONS-W) for EACH ACTIVE WEEK
+  // A. Generate WEEKLY LABOR WAGES (UK) for EACH ACTIVE WEEK
   activeWeeks.forEach((weekObj) => {
     const resSingle = generateWeeklyTransactionsFromProgressAndRealData({
       targetWeek: weekObj.mingguKe,
@@ -4913,16 +5103,32 @@ export function generateRealisticMultiWeekTransactions({
     });
 
     resSingle.updatedKwitansi.forEach((kw) => {
-      if (kw.tipe === 'UPAH' || kw.tipe === 'KONSULTAN' || (kw.tipe === 'OPERASIONAL' && /adm|pengelola/i.test(kw.uraian))) {
+      if (kw.tipe === 'UPAH') {
         newKwitansiList.push(kw);
-        if (kw.tipe === 'UPAH') generatedCount.upah++;
-        else generatedCount.manajemen++;
+        generatedCount.upah++;
       }
     });
 
     resSingle.updatedWageReports.forEach((wr) => {
       updatedWageReports.push(wr);
     });
+  });
+
+  // A2. Generate MONTHLY MANAGEMENT & CONSULTANT KWITANSI (KONS-P, KONS-W, ADM/SPJ)
+  // Dibayarkan setiap akhir bulan kalender, dan khusus bulan terakhir tepat pada tanggal berakhirnya pekerjaan.
+  // Nominal mengikuti alur akumulasi bobot mingguan di setiap bulan bersangkutan.
+  const monthlyMgmtRes = generateMonthlyManagementTransactions({
+    weeksToUse,
+    activeWeeks,
+    school,
+    stores,
+    realSchoolData,
+    existingKwitansi,
+  });
+
+  monthlyMgmtRes.managementKwitansi.forEach((kw) => {
+    newKwitansiList.push(kw);
+    generatedCount.manajemen++;
   });
 
   // B. Generate INITIAL PREPARATION (Papan Nama Proyek & SMKK) at Week 1
@@ -5685,6 +5891,11 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
       /siplah/i.test(uraian) ||
       /mebel|meubilair|meubeler|perabot/i.test(uraian) ||
       (k.items && k.items.some((i: any) => /kursi siswa|meja setengah|rak mainan|loker|rak buku|papan kreasi|rak sepatu/i.test(i.namaBarang || '')));
+    const isManagement =
+      tipe === 'KONSULTAN' ||
+      /kons-p|kons-w/i.test(bukti) ||
+      /adm|pengelola|spj/i.test(bukti) ||
+      /perencana|pengawas|biaya pengelolaan/i.test(uraian);
     return (
       tipe === 'CETAK' ||
       /^CTK\//i.test(bukti) ||
@@ -5692,7 +5903,8 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
       tipe === 'SMKK' ||
       /KW-SMKK/i.test(bukti) ||
       /smkk|k3|keselamatan kerja|apd/i.test(uraian) ||
-      isSiplahOrMeub
+      isSiplahOrMeub ||
+      isManagement
     );
   };
 
@@ -5713,6 +5925,11 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
         /siplah/i.test(k.noBukti || '') ||
         /siplah|mebel|meubilair|meubeler|perabot/i.test(k.uraian || '') ||
         (k.items && k.items.some((i: any) => /kursi siswa|meja setengah|rak mainan|loker|rak buku|papan kreasi|rak sepatu/i.test(i.namaBarang || '')));
+      const isManagement =
+        (k.tipe || '').toUpperCase() === 'KONSULTAN' ||
+        /kons-p|kons-w/i.test(k.noBukti || '') ||
+        /adm|pengelola|spj/i.test(k.noBukti || '') ||
+        /perencana|pengawas|biaya pengelolaan/i.test(k.uraian || '');
 
       if (isPapan) {
         const pItems = [
@@ -5748,6 +5965,8 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
           penerimaPekerjaan: k.penerimaPekerjaan || `Mitra Penyedia ${storeName}`,
           uraian: `Pembayaran Lunas Belanja Barang via ${storeName} (${topNames || 'Meubilair / Perabot'}), Tahap Pengadaan Meubilair / Perabot Revitalisasi ${school.namaSekolah}, Tahun ${targetYear}.`,
         });
+      } else if (isManagement) {
+        fixedPreparationKw.push(k);
       } else {
         // SMKK
         const sNominal = exactSmkkNominal > 0 ? exactSmkkNominal : k.nominal;

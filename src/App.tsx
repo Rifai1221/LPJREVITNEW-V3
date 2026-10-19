@@ -1418,6 +1418,13 @@ export default function App() {
         (k.tipe as string) === 'MANUAL'
       );
       if (isManual) return true;
+      const isManagement =
+        k.tipe === 'KONSULTAN' ||
+        /kons-p|kons-w|perencana|pengawas/i.test(`${k.noBukti} ${k.uraian}`) ||
+        (k.tipe === 'OPERASIONAL' && /\badm\b|pengelola|spj/i.test(`${k.noBukti} ${k.uraian}`));
+      if (isManagement) {
+        return false;
+      }
       const wNum = extractWeekNumberFromKwitansi(k, weeksToUse, yearStr);
       if (wNum !== null && validTargetWeeks.includes(wNum)) {
         return false;

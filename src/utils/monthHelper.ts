@@ -1,11 +1,11 @@
 import { SchoolMasterData } from '../types';
 
-const indonesianMonths = [
+export const indonesianMonths = [
   'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
   'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
 ];
 
-const monthOrderMap: Record<string, number> = {
+export const monthOrderMap: Record<string, number> = {
   januari: 1, jan: 1,
   februari: 2, feb: 2,
   maret: 3, mar: 3,
