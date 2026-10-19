@@ -308,22 +308,39 @@ export function calculateIntegratedBkt(
         /material|bahan|semen|pasir|batu|besi|kayu|paku|bata|cat|cerucuk|pancang/i.test(desc);
 
       if (isFrontLoaded) {
-        const firstDraw = sortedInflows[0];
-        const secondDraw = sortedInflows[1];
-
-        let targetDraw = firstDraw;
-        if (secondDraw) {
-          const itemIso = item.tanggalObj || parseTxDateToIso(item.tanggal);
-          const secondIso = secondDraw.tanggalObj || parseTxDateToIso(secondDraw.tanggal);
-          if (itemIso >= secondIso) {
-            targetDraw = secondDraw;
+        const itemIso = item.tanggalObj || parseTxDateToIso(item.tanggal);
+        // Find the latest inflow whose date is <= itemIso (preceding bank withdrawal)
+        let targetDraw = sortedInflows[0];
+        for (const inf of sortedInflows) {
+          const infIso = inf.tanggalObj || parseTxDateToIso(inf.tanggal);
+          if (infIso <= itemIso) {
+            targetDraw = inf;
+          } else {
+            break;
           }
         }
 
         if (targetDraw) {
-          item.tanggal = targetDraw.tanggal;
-          item.tanggalObj = targetDraw.tanggalObj || parseTxDateToIso(targetDraw.tanggal);
-          item.bulan = targetDraw.bulan;
+          const targetIso = targetDraw.tanggalObj || parseTxDateToIso(targetDraw.tanggal);
+          const isMaterial = /material|bahan|semen|pasir|batu|besi|kayu|paku|bata|cat|cerucuk|pancang/i.test(desc);
+
+          if (isMaterial) {
+            // Material purchases happen 1 day after bank withdrawal (sehari setelah penarikan)
+            const dObj = new Date(`${targetIso}T00:00:00`);
+            dObj.setDate(dObj.getDate() + 1);
+            const nextIso = dObj.toISOString().split('T')[0];
+            const day = String(dObj.getDate()).padStart(2, '0');
+            const month = String(dObj.getMonth() + 1).padStart(2, '0');
+            const year = dObj.getFullYear();
+            item.tanggal = `${day}/${month}/${year}`;
+            item.tanggalObj = nextIso;
+            item.bulan = targetDraw.bulan;
+          } else {
+            // SMKK / Papan Nama happen on the exact bank withdrawal date (di awal minggu / saat penarikan)
+            item.tanggal = targetDraw.tanggal;
+            item.tanggalObj = targetIso;
+            item.bulan = targetDraw.bulan;
+          }
         }
       }
     });
