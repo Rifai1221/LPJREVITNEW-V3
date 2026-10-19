@@ -35,8 +35,6 @@ import {
   generateStandardBkbRecords,
   calculateRunningBkb,
   calculateIntegratedBkt,
-  calculateSynchronizedBkuList,
-  calculateSynchronizedKwitansiList,
   reconcileCashBalances,
   migrateAndTransformAppState,
 } from './services/cashLedgerIntegrationService';
@@ -517,15 +515,8 @@ export default function App() {
     setTimeout(() => setSwitchNotification(null), 5000);
   };
 
-  const effectiveBkbList = useMemo(() => {
-    if (appState.bkbRecords && appState.bkbRecords.length > 0) {
-      return calculateRunningBkb(appState.bkbRecords);
-    }
-    const standard = generateStandardBkbRecords(appState.school, appState.progressWeeks, bkuWeekLimit);
-    return calculateRunningBkb(standard);
-  }, [appState.bkbRecords, appState.school, appState.progressWeeks, bkuWeekLimit]);
-
-  const rawBkuList = useMemo(() => {
+  // Derived calculations
+  const bkuList = useMemo(() => {
     return calculateBkuFromTransactions(
       appState.kwitansiList,
       appState.school,
@@ -547,17 +538,17 @@ export default function App() {
     appState.stores,
   ]);
 
+  const effectiveBkbList = useMemo(() => {
+    if (appState.bkbRecords && appState.bkbRecords.length > 0) {
+      return calculateRunningBkb(appState.bkbRecords);
+    }
+    const standard = generateStandardBkbRecords(appState.school, appState.progressWeeks, bkuWeekLimit);
+    return calculateRunningBkb(standard);
+  }, [appState.bkbRecords, appState.school, appState.progressWeeks, bkuWeekLimit]);
+
   const bktList = useMemo(() => {
-    return calculateIntegratedBkt(rawBkuList, effectiveBkbList, appState.manualBkuTransactions);
-  }, [rawBkuList, effectiveBkbList, appState.manualBkuTransactions]);
-
-  const bkuList = useMemo(() => {
-    return calculateSynchronizedBkuList(rawBkuList, bktList, appState.manualBkuTransactions);
-  }, [rawBkuList, bktList, appState.manualBkuTransactions]);
-
-  const synchronizedKwitansiList = useMemo(() => {
-    return calculateSynchronizedKwitansiList(appState.kwitansiList, bktList);
-  }, [appState.kwitansiList, bktList]);
+    return calculateIntegratedBkt(bkuList, effectiveBkbList);
+  }, [bkuList, effectiveBkbList]);
 
   const cashReconciliation = useMemo(() => {
     const lastBku = bkuList[bkuList.length - 1];
@@ -758,52 +749,30 @@ export default function App() {
   const handleUpdateBku = (updatedTx: BkuTransaction) => {
     isDirtyRef.current = true;
     setAppState((prev) => {
-      const cleanId = updatedTx.id.replace(/^bkt-inflow-|^bkt-|^bku-/, '');
-      const txNoBukti = updatedTx.noBukti ? updatedTx.noBukti.trim() : '';
-      const hasValidNoBukti = txNoBukti && txNoBukti !== '-' && txNoBukti.toLowerCase() !== 'manual';
-
-      // 1. Sync Kwitansi list by kwitansiIdRef, cleanId, or matching noBukti
-      let updatedKwitansi = prev.kwitansiList.map((kw) => {
-        const matchesRef = (updatedTx.kwitansiIdRef && kw.id === updatedTx.kwitansiIdRef) || kw.id === cleanId;
-        const matchesNoBukti = hasValidNoBukti && kw.noBukti && kw.noBukti.trim().toLowerCase() === txNoBukti.toLowerCase();
-
-        if (matchesRef || matchesNoBukti) {
-          return {
-            ...kw,
-            tanggal: updatedTx.tanggal,
-            tanggalFormatted: updatedTx.tanggal,
-            bulan: updatedTx.bulan,
-            uraian: updatedTx.uraian,
-            noBukti: updatedTx.noBukti,
-            nominal: updatedTx.pengeluaran || updatedTx.penerimaan,
-          };
-        }
-        return kw;
-      });
-
-      // 2. Update or upsert into manualBkuTransactions, syncing all records with same id or same noBukti
-      const manualList = prev.manualBkuTransactions || [];
-      const exists = manualList.some((m) => m.id === cleanId || m.id === updatedTx.id);
-
-      const normalizedUpdatedTx = { ...updatedTx, id: cleanId };
-
-      let updatedManual = manualList.map((m) => {
-        const matchesId = m.id === cleanId || m.id === updatedTx.id || (updatedTx.kwitansiIdRef && m.kwitansiIdRef === updatedTx.kwitansiIdRef);
-        const matchesNoBukti = hasValidNoBukti && m.noBukti && m.noBukti.trim().toLowerCase() === txNoBukti.toLowerCase();
-
-        if (matchesId || matchesNoBukti) {
-          return {
-            ...m,
-            ...normalizedUpdatedTx,
-            id: m.id,
-          };
-        }
-        return m;
-      });
-
-      if (!exists) {
-        updatedManual.push(normalizedUpdatedTx);
+      // 1. If linked to kwitansi, sync kwitansi
+      let updatedKwitansi = prev.kwitansiList;
+      if (updatedTx.kwitansiIdRef) {
+        updatedKwitansi = prev.kwitansiList.map((kw) => {
+          if (kw.id === updatedTx.kwitansiIdRef) {
+            return {
+              ...kw,
+              tanggal: updatedTx.tanggal,
+              tanggalFormatted: updatedTx.tanggal,
+              bulan: updatedTx.bulan,
+              uraian: updatedTx.uraian,
+              noBukti: updatedTx.noBukti,
+              nominal: updatedTx.pengeluaran || updatedTx.penerimaan,
+            };
+          }
+          return kw;
+        });
       }
+
+      // 2. Update or upsert into manualBkuTransactions
+      const exists = (prev.manualBkuTransactions || []).some((m) => m.id === updatedTx.id);
+      const updatedManual = exists
+        ? (prev.manualBkuTransactions || []).map((m) => (m.id === updatedTx.id ? updatedTx : m))
+        : [...(prev.manualBkuTransactions || []), updatedTx];
 
       return {
         ...prev,
@@ -1977,7 +1946,7 @@ Lanjutkan pengosongan data transaksi?`)
           <Dashboard
             school={appState.school}
             rpdItems={appState.rpdItems}
-            kwitansiList={synchronizedKwitansiList}
+            kwitansiList={appState.kwitansiList}
             wageReports={appState.wageReports}
             progressWeeks={appState.progressWeeks}
             taxRecords={taxRecords}
@@ -1999,7 +1968,7 @@ Lanjutkan pengosongan data transaksi?`)
             realData={appState.realSchoolData || defaultRealSchoolData}
             school={appState.school}
             stores={appState.stores || []}
-            kwitansiList={synchronizedKwitansiList || []}
+            kwitansiList={appState.kwitansiList || []}
             onUpdateRealData={handleUpdateRealData}
             onApplyToAllModules={handleApplyRealDataToAll}
           />
@@ -2044,7 +2013,7 @@ Lanjutkan pengosongan data transaksi?`)
             onAutoGenerateAllWeeks={handleAutoGenerateAllWeeks}
             onOpenPrintModal={(weekNum, docType) => handleOpenPrint(docType || 'PROGRESS', undefined, weekNum)}
             bkuList={bkuList}
-            kwitansiList={synchronizedKwitansiList}
+            kwitansiList={appState.kwitansiList}
             onAddTransaction={(tx, weekNum) => handleAddManualBku(tx, weekNum)}
             onUpdateTransaction={handleUpdateBku}
             onDeleteTransaction={handleDeleteBku}
@@ -2058,7 +2027,7 @@ Lanjutkan pengosongan data transaksi?`)
             school={appState.school}
             progressWeeks={appState.progressWeeks}
             stores={appState.stores || []}
-            kwitansiList={synchronizedKwitansiList}
+            kwitansiList={appState.kwitansiList}
             bktList={bktList}
             bkbList={effectiveBkbList}
             onOpenPrintModal={(month, filterOpts) =>
@@ -2093,7 +2062,7 @@ Lanjutkan pengosongan data transaksi?`)
             school={appState.school}
             progressWeeks={appState.progressWeeks}
             stores={appState.stores || []}
-            kwitansiList={synchronizedKwitansiList}
+            kwitansiList={appState.kwitansiList}
             bkuList={bkuList}
             bkbList={effectiveBkbList}
             onOpenPrintModal={(month, filterOpts) =>
@@ -2153,7 +2122,7 @@ Lanjutkan pengosongan data transaksi?`)
 
         {activeTab === 'kwitansi' && (
           <KwitansiManager
-            kwitansiList={synchronizedKwitansiList}
+            kwitansiList={appState.kwitansiList}
             school={appState.school}
             progressWeeks={appState.progressWeeks}
             stores={appState.stores || []}
@@ -2177,7 +2146,7 @@ Lanjutkan pengosongan data transaksi?`)
             realSchoolData={appState.realSchoolData}
             divisions={appState.realSchoolData?.divisions}
             progressWeeks={appState.progressWeeks}
-            kwitansiList={synchronizedKwitansiList}
+            kwitansiList={appState.kwitansiList}
             onUpdateWageReports={handleUpdateWageReports}
             onUpdateWorkers={handleUpdateWorkers}
             onUpdateKwitansiList={handleUpdateKwitansiList}
@@ -2247,7 +2216,7 @@ Lanjutkan pengosongan data transaksi?`)
         filterOptions={printFilterOptions}
         school={appState.school}
         rpdItems={appState.rpdItems}
-        kwitansiList={synchronizedKwitansiList}
+        kwitansiList={appState.kwitansiList}
         wageReports={appState.wageReports}
         bkuList={bkuList}
         bktList={bktList}
