@@ -749,21 +749,14 @@ export default function App() {
   const handleUpdateBku = (updatedTx: BkuTransaction) => {
     isDirtyRef.current = true;
     setAppState((prev) => {
-      const cleanId = updatedTx.id.replace(/^(bkt-|bku-|kw-|bku-kw-)+/g, '');
+      // 1. Normalize ID to ensure we find the source BKU transaction regardless of prefix
+      const baseId = updatedTx.id.replace(/^(bkt-|bku-|kw-|bku-kw-)+/g, '');
+      const sourceBkuId = `bku-${baseId}`;
 
-      // 1. Find and update matching kwitansi in kwitansiList
-      let matchedKwId = updatedTx.kwitansiIdRef;
-      if (!matchedKwId) {
-        const foundKw = prev.kwitansiList.find(
-          (kw) => kw.id === cleanId || kw.id === updatedTx.id || (updatedTx.noBukti && kw.noBukti === updatedTx.noBukti)
-        );
-        if (foundKw) {
-          matchedKwId = foundKw.id;
-        }
-      }
-
+      // 2. Update KwitansiList if linked
       const updatedKwitansi = prev.kwitansiList.map((kw) => {
-        if (kw.id === matchedKwId || (updatedTx.noBukti && kw.noBukti === updatedTx.noBukti)) {
+        // Match by ID, ref, or Bukti
+        if (kw.id === updatedTx.kwitansiIdRef || kw.id === baseId || kw.noBukti === updatedTx.noBukti) {
           return {
             ...kw,
             tanggal: updatedTx.tanggal,
@@ -778,25 +771,19 @@ export default function App() {
         return kw;
       });
 
-      const normalizedTx: BkuTransaction = {
-        ...updatedTx,
-        kwitansiIdRef: matchedKwId || updatedTx.kwitansiIdRef,
-        id: updatedTx.id.startsWith('bku-') ? updatedTx.id : `bku-${cleanId}`,
-      };
-
-      // 2. Update or upsert into manualBkuTransactions
+      // 3. Update or upsert into manualBkuTransactions using the normalized BKU ID
       const existingManual = prev.manualBkuTransactions || [];
       const exists = existingManual.some(
-        (m) => m.id === updatedTx.id || m.id === normalizedTx.id || (matchedKwId && m.kwitansiIdRef === matchedKwId)
+        (m) => m.id === sourceBkuId || m.id === updatedTx.id || m.kwitansiIdRef === updatedTx.kwitansiIdRef
       );
 
       const updatedManual = exists
         ? existingManual.map((m) =>
-            m.id === updatedTx.id || m.id === normalizedTx.id || (matchedKwId && m.kwitansiIdRef === matchedKwId)
-              ? normalizedTx
+            m.id === sourceBkuId || m.id === updatedTx.id || m.kwitansiIdRef === updatedTx.kwitansiIdRef
+              ? { ...updatedTx, id: sourceBkuId }
               : m
           )
-        : [...existingManual, normalizedTx];
+        : [...existingManual, { ...updatedTx, id: sourceBkuId }];
 
       return {
         ...prev,
