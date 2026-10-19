@@ -269,30 +269,173 @@ export function calculateIntegratedBkt(
     });
   });
 
-  // 3. Urutkan secara kronologis akurat:
-  // - Ascending berdasarkan tanggal
-  // - Jika pada tanggal yang sama: Pemasukan dari penarikan bank diletakkan LEBIH DAHULU sebelum belanja tunai
-  bktItems.sort((a, b) => {
+  // 3. Ekstraksi daftar seluruh penarikan bank (inflows) yang terurut berdasarkan tanggal
+  const bankWithdrawals = bktItems
+    .filter((t) => (t.pemasukan || 0) > 0)
+    .map((t) => ({
+      iso: t.tanggalObj || parseTxDateToIso(t.tanggal),
+      tanggal: t.tanggal,
+      bulan: t.bulan,
+      nominal: t.pemasukan,
+    }))
+    .sort((a, b) => a.iso.localeCompare(b.iso));
+
+  // 4. Urutkan transaksi awal secara kronologis (pemasukan didahulukan jika pada tanggal yang sama)
+  const initialSorted = [...bktItems].sort((a, b) => {
     const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
     const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
     if (isoA !== isoB) {
       return isoA.localeCompare(isoB);
     }
-    // Dahulukan pemasukan tunai
-    if (a.pemasukan > 0 && b.pemasukan === 0) return -1;
-    if (b.pemasukan > 0 && a.pemasukan === 0) return 1;
+    if ((a.pemasukan || 0) > 0 && (b.pemasukan || 0) === 0) return -1;
+    if ((b.pemasukan || 0) > 0 && (a.pemasukan || 0) === 0) return 1;
     return 0;
   });
 
-  // 4. Hitung saldo kumulatif berjalan (Running Balance)
-  let running = 0;
-  return bktItems.map((item) => {
-    running = running + (item.pemasukan || 0) - (item.pengeluaran || 0);
-    return {
-      ...item,
-      saldo: running,
-    };
-  });
+  // 5. Intelligent Anti-Minus Cash-Cap Quantity Splitter
+  // Menjamin saldo kas BKT TIDAK PERNAH MINUS (< 0).
+  // Jika pengeluaran melebihi sisa kas tunai sebelum ada penarikan bank berikutnya:
+  // - Tahap 1: Dibayarkan sebesar kas yang tersedia (saldo menjadi Rp 0, tidak minus).
+  // - Tahap 2: Sisa pembayaran dialokasikan pada tanggal penarikan bank berikutnya saat dana kas baru masuk.
+  const queue: BktTransaction[] = [...initialSorted];
+  const finalBktItems: BktTransaction[] = [];
+  let runningCash = 0;
+  let safetyLoop = 0;
+  const maxIterations = queue.length * 5;
+
+  const insertChronologically = (q: BktTransaction[], item: BktTransaction) => {
+    const itemIso = item.tanggalObj || parseTxDateToIso(item.tanggal);
+    const idx = q.findIndex((existing) => {
+      const exIso = existing.tanggalObj || parseTxDateToIso(existing.tanggal);
+      if (exIso > itemIso) return true;
+      if (exIso === itemIso && (existing.pemasukan || 0) === 0 && (item.pemasukan || 0) > 0) return true;
+      return false;
+    });
+    if (idx === -1) {
+      q.push(item);
+    } else {
+      q.splice(idx, 0, item);
+    }
+  };
+
+  while (queue.length > 0 && safetyLoop < maxIterations) {
+    safetyLoop++;
+    const curr = queue.shift()!;
+
+    // A. Pemasukan Kas Tunai (Penarikan Bank)
+    if ((curr.pemasukan || 0) > 0) {
+      runningCash += curr.pemasukan;
+      finalBktItems.push({
+        ...curr,
+        saldo: runningCash,
+      });
+      continue;
+    }
+
+    // B. Pengeluaran Belanja Tunai
+    const expenseNominal = curr.pengeluaran || 0;
+    if (expenseNominal <= 0) {
+      finalBktItems.push({
+        ...curr,
+        saldo: runningCash,
+      });
+      continue;
+    }
+
+    // Jika saldo kas saat ini mencukupi, bayar penuh
+    if (expenseNominal <= runningCash) {
+      runningCash -= expenseNominal;
+      finalBktItems.push({
+        ...curr,
+        saldo: runningCash,
+      });
+      continue;
+    }
+
+    // KAS TIDAK MENCUKUPI (Potensi Minus):
+    // Cari tanggal penarikan bank berikutnya setelah tanggal transaksi ini
+    const currIso = curr.tanggalObj || parseTxDateToIso(curr.tanggal);
+    const nextWithdrawal = bankWithdrawals.find((w) => w.iso > currIso);
+
+    // Smart Liquidity-Based Wage Deferred:
+    // Upah tukang TIDAK BOLEH dipecah receh/sebagian (wajib dibayar utuh).
+    // Jika kas belum cukup sebelum penarikan bank berikutnya, tanggal pembayaran upah
+    // otomatis dimundurkan secara utuh ke tanggal penarikan bank berikutnya saat dana kas cair.
+    const isWageTx = /upah|tukang|pekerja|mandor|borongan/i.test(`${curr.noBukti} ${curr.uraian}`);
+    if (isWageTx && nextWithdrawal) {
+      const deferredWageTx: BktTransaction = {
+        ...curr,
+        tanggal: nextWithdrawal.tanggal,
+        tanggalObj: nextWithdrawal.iso,
+        bulan: nextWithdrawal.bulan,
+      };
+      insertChronologically(queue, deferredWageTx);
+      continue;
+    }
+
+    // Kasus 1: Masih ada sisa kas tunai > 0 (bisa dibayar sebagian untuk material/non-upah)
+    if (runningCash > 0) {
+      const part1Nominal = runningCash;
+      const part2Nominal = expenseNominal - part1Nominal;
+
+      // Catat Tahap 1 sesuai sisa kas yang tersedia (Saldo kas pas Rp 0, tidak minus)
+      runningCash = 0;
+      finalBktItems.push({
+        ...curr,
+        id: `${curr.id}-p1`,
+        uraian: curr.uraian.includes('Tahap 1')
+          ? curr.uraian
+          : `${curr.uraian} (Tahap 1 / Sesuai Sisa Kas)`,
+        pengeluaran: part1Nominal,
+        saldo: 0,
+      });
+
+      // Jadwalkan Tahap 2 pada tanggal penarikan bank berikutnya
+      const part2Date = nextWithdrawal ? nextWithdrawal.tanggal : curr.tanggal;
+      const part2Iso = nextWithdrawal ? nextWithdrawal.iso : currIso;
+      const part2Bulan = nextWithdrawal ? nextWithdrawal.bulan : curr.bulan;
+
+      const part2Tx: BktTransaction = {
+        ...curr,
+        id: `${curr.id}-p2`,
+        tanggal: part2Date,
+        tanggalObj: part2Iso,
+        bulan: part2Bulan,
+        uraian: curr.uraian.includes('Tahap 2')
+          ? curr.uraian
+          : `${curr.uraian} (Tahap 2 / Pelunasan Sisa)`,
+        noBukti: curr.noBukti && curr.noBukti !== '-' ? `${curr.noBukti}-B` : curr.noBukti,
+        pengeluaran: part2Nominal,
+        pemasukan: 0,
+        saldo: 0,
+      };
+
+      insertChronologically(queue, part2Tx);
+      continue;
+    }
+
+    // Kasus 2: Kas tunai saat ini sudah Rp 0:
+    // Tunda pembayaran transaksi ini ke tanggal penarikan bank berikutnya
+    if (nextWithdrawal) {
+      const deferredTx: BktTransaction = {
+        ...curr,
+        tanggal: nextWithdrawal.tanggal,
+        tanggalObj: nextWithdrawal.iso,
+        bulan: nextWithdrawal.bulan,
+      };
+      insertChronologically(queue, deferredTx);
+      continue;
+    }
+
+    // Fallback darurat jika tidak ada penarikan bank lagi
+    runningCash -= expenseNominal;
+    finalBktItems.push({
+      ...curr,
+      saldo: runningCash,
+    });
+  }
+
+  return finalBktItems;
 }
 
 /**
@@ -361,10 +504,48 @@ export function findMatchedKwitansiForTransaction(
 ): KwitansiDocument | null {
   if (!tx || !kwitansiList || kwitansiList.length === 0) return null;
 
+  const isSplit =
+    tx.id.includes('-p1') ||
+    tx.id.includes('-p2') ||
+    tx.uraian.includes('Tahap 1') ||
+    tx.uraian.includes('Tahap 2');
+
+  const baseTxId = tx.id.replace(/-p[12]$/, '');
+  const cleanTxBuktiNorm = (tx.noBukti || '').replace(/-B$/, '').trim();
+
+  // Helper to wrap the final matched kwitansi with scaled volume if split
+  const wrapResult = (k: KwitansiDocument | null): KwitansiDocument | null => {
+    if (!k || !isSplit) return k;
+    const txNom = (tx as any).pengeluaran || (tx as any).pemasukan || k.nominal;
+    if (Math.abs(txNom - k.nominal) < 2) return k;
+
+    const ratio = k.nominal > 0 ? txNom / k.nominal : 1;
+    const scaledItems = (k.items || []).map((it) => {
+      const vol = Math.max(1, Math.round(it.volume * ratio));
+      return {
+        ...it,
+        volume: vol,
+        jumlah: Math.round(vol * it.hargaSatuan),
+      };
+    });
+
+    return {
+      ...k,
+      id: `${k.id}-${tx.id.includes('-p2') ? 'p2' : 'p1'}`,
+      nominal: txNom,
+      tanggal: tx.tanggal,
+      tanggalFormatted: tx.tanggal,
+      bulan: tx.bulan,
+      uraian: tx.uraian,
+      noBukti: tx.noBukti || k.noBukti,
+      items: scaledItems,
+    };
+  };
+
   // 1. Cocokkan ID referensi langsung jika tersedia
   if (tx.kwitansiIdRef) {
-    const byRef = kwitansiList.find((k) => k.id === tx.kwitansiIdRef);
-    if (byRef) return byRef;
+    const byRef = kwitansiList.find((k) => k.id === tx.kwitansiIdRef || k.id === tx.kwitansiIdRef.replace(/-p[12]$/, ''));
+    if (byRef) return wrapResult(byRef);
   }
 
   // 2. Cocokkan prefix ID sistem
@@ -372,10 +553,13 @@ export function findMatchedKwitansiForTransaction(
     (k) =>
       tx.id === `bku-kw-${k.id}` ||
       tx.id === `bkt-kw-${k.id}` ||
+      baseTxId === `bku-kw-${k.id}` ||
+      baseTxId === `bkt-kw-${k.id}` ||
       tx.id === k.id ||
-      k.id.includes(tx.id.replace(/^bku-|^bkt-/, ''))
+      baseTxId === k.id ||
+      k.id.includes(baseTxId.replace(/^bku-|^bkt-/, ''))
   );
-  if (byPrefixId) return byPrefixId;
+  if (byPrefixId) return wrapResult(byPrefixId);
 
   // 3. Cocokkan Transaksi Upah Tenaga Kerja / Mandor
   const isTxUpah = /upah|tukang|pekerja|mandor|borongan/i.test(`${tx.noBukti} ${tx.uraian}`);
@@ -398,7 +582,7 @@ export function findMatchedKwitansiForTransaction(
             k.id.includes(`upah-w${wNum}`) ||
             k.id.includes(`wage-w${wNum}`))
       );
-      if (upahKw) return upahKw;
+      if (upahKw) return wrapResult(upahKw);
     }
 
     const txNom = (tx as any).pengeluaran || (tx as any).pemasukan || 0;
@@ -407,7 +591,7 @@ export function findMatchedKwitansiForTransaction(
         (k.tipe === 'UPAH' || /upah/i.test(k.uraian)) &&
         (k.tanggal === tx.tanggal || Math.abs(k.nominal - txNom) < 2)
     );
-    if (upahByDateOrNom) return upahByDateOrNom;
+    if (upahByDateOrNom) return wrapResult(upahByDateOrNom);
   }
 
   // 4. Cocokkan Konsultan & Manajemen LPJ
@@ -432,12 +616,12 @@ export function findMatchedKwitansiForTransaction(
       if (k.tanggal === tx.tanggal) return true;
       return false;
     });
-    if (mgtKw) return mgtKw;
+    if (mgtKw) return wrapResult(mgtKw);
   }
 
   // 5. Cocokkan berdasarkan No Bukti (dengan normalisasi karakter dan angka)
   if (tx.noBukti && tx.noBukti !== '-' && tx.noBukti.trim()) {
-    const cleanTxBukti = tx.noBukti.trim().toLowerCase();
+    const cleanTxBukti = baseTxBukti.toLowerCase();
     const isTxMat = /kwt[\/\-_]?mat|kw[\/\-_]?mat|\bmat\b|mat[\/\-_]|material/i.test(cleanTxBukti);
     const isTxKons = /kons|perencana|pengawas/i.test(cleanTxBukti);
     const isTxUpah = /uk\b|upah/i.test(cleanTxBukti);
@@ -459,14 +643,13 @@ export function findMatchedKwitansiForTransaction(
       const numTx = cleanTxBukti.replace(/\D/g, '');
       const numK = cleanKBukti.replace(/\D/g, '');
       if (numTx && numK && parseInt(numTx, 10) === parseInt(numK, 10) && numTx.length <= 4 && numK.length <= 4) {
-        // Only consider equal if type prefixes align
         const prefixTx = cleanTxBukti.replace(/[\d\/\-_]/g, '');
         const prefixK = cleanKBukti.replace(/[\d\/\-_]/g, '');
         if (prefixTx === prefixK) return true;
       }
       return false;
     });
-    if (byNoBukti) return byNoBukti;
+    if (byNoBukti) return wrapResult(byNoBukti);
   }
 
   // 6. Cocokkan Toko & Nominal Pembelian Material / SMKK
@@ -495,13 +678,13 @@ export function findMatchedKwitansiForTransaction(
       if (k.tanggal === tx.tanggal) return true;
       return false;
     });
-    if (byStoreAndNom) return byStoreAndNom;
+    if (byStoreAndNom) return wrapResult(byStoreAndNom);
 
     // Fallback: nominal sama persis dan tanggal sama persis
     const byDateAndNom = kwitansiList.find(
       (k) => Math.abs(k.nominal - txNom) < 2 && k.tanggal === tx.tanggal
     );
-    if (byDateAndNom) return byDateAndNom;
+    if (byDateAndNom) return wrapResult(byDateAndNom);
   }
 
   return null;

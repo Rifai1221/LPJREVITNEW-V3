@@ -2658,7 +2658,8 @@ export function calculateBkuFromTransactions(
   deletedIds: string[] = [],
   wageReports: WeeklyWageReport[] = [],
   bkuWeekLimit?: number,
-  stores: StoreVendor[] = []
+  stores: StoreVendor[] = [],
+  bkbList: BkbTransaction[] = []
 ): BkuTransaction[] {
   if (deletedIds.includes('ALL_BKU')) {
     return [];
@@ -3059,8 +3060,148 @@ export function calculateBkuFromTransactions(
   // 5. Ironclad Deduplication pass: Guarantee zero duplicate transactions in BKU, BKT, Rekap & Cetak
   const dedupedResult = deduplicateBkuTransactions(result);
 
+  // 5b. Anti-Minus Cash Splitter (Sinkronisasi dengan Kas Bank BKB):
+  // Jika transaksi belanja tunai melebihi sisa kas penarikan bank pada tanggal tersebut,
+  // sistem memecah transaksi menjadi:
+  // - Tahap 1: Dibayar sesuai kas yang tersedia (saldo tidak minus).
+  // - Tahap 2: Sisa pembayaran dialokasikan pada tanggal penarikan bank berikutnya setelah kas masuk.
+  let processedBkuList = dedupedResult;
+  const bankCashInflows = (bkbList || [])
+    .filter((b) => (b.pengeluaran || 0) > 0 && b.kategori !== 'BIAYA_ADMIN')
+    .map((b) => ({
+      iso: b.tanggalObj || parseTxDateToIso(b.tanggal),
+      tanggal: b.tanggal,
+      bulan: b.bulan,
+      nominal: b.pengeluaran,
+    }))
+    .sort((a, b) => a.iso.localeCompare(b.iso));
+
+  if (bankCashInflows.length > 0) {
+    const queue = [...dedupedResult].sort((a, b) => {
+      const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
+      const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
+      if (isoA !== isoB) return isoA.localeCompare(isoB);
+      if (a.jenis === 'PENERIMAAN' && b.jenis === 'PENGELUARAN') return -1;
+      if (a.jenis === 'PENGELUARAN' && b.jenis === 'PENERIMAAN') return 1;
+      return 0;
+    });
+
+    const splitBkuList: BkuTransaction[] = [];
+    let cashOnHand = 0;
+    let nextInflowIdx = 0;
+
+    const insertBkuChronologically = (q: BkuTransaction[], item: BkuTransaction) => {
+      const itemIso = item.tanggalObj || parseTxDateToIso(item.tanggal);
+      const idx = q.findIndex((ex) => {
+        const exIso = ex.tanggalObj || parseTxDateToIso(ex.tanggal);
+        if (exIso > itemIso) return true;
+        if (exIso === itemIso && ex.jenis === 'PENGELUARAN' && item.jenis === 'PENERIMAAN') return true;
+        return false;
+      });
+      if (idx === -1) q.push(item);
+      else q.splice(idx, 0, item);
+    };
+
+    let safety = 0;
+    const maxIters = queue.length * 4;
+
+    while (queue.length > 0 && safety < maxIters) {
+      safety++;
+      const tx = queue.shift()!;
+      const txIso = tx.tanggalObj || parseTxDateToIso(tx.tanggal);
+
+      while (nextInflowIdx < bankCashInflows.length && bankCashInflows[nextInflowIdx].iso <= txIso) {
+        cashOnHand += bankCashInflows[nextInflowIdx].nominal;
+        nextInflowIdx++;
+      }
+
+      if (tx.jenis === 'PENERIMAAN') {
+        splitBkuList.push(tx);
+        continue;
+      }
+
+      const expenseNominal = tx.pengeluaran || 0;
+      if (expenseNominal <= 0 || tx.metodeBayar === 'BANK') {
+        splitBkuList.push(tx);
+        continue;
+      }
+
+      if (expenseNominal <= cashOnHand) {
+        cashOnHand -= expenseNominal;
+        splitBkuList.push(tx);
+        continue;
+      }
+
+      const nextBank = bankCashInflows.find((b) => b.iso > txIso);
+
+      // Smart Liquidity-Based Wage Deferred:
+      // Upah tukang TIDAK DIPERBOLEHKAN dipecah sebagian (wajib dibayar utuh).
+      // Jika kas belum cukup sebelum penarikan bank berikutnya, tanggal pembayaran upah
+      // dimundurkan secara utuh ke tanggal penarikan bank berikutnya saat dana kas cair.
+      const isWageTx = /upah|tukang|pekerja|mandor|borongan/i.test(`${tx.noBukti} ${tx.uraian}`);
+      if (isWageTx && nextBank) {
+        const deferredWageTx: BkuTransaction = {
+          ...tx,
+          tanggal: nextBank.tanggal,
+          tanggalObj: nextBank.iso,
+          bulan: nextBank.bulan,
+        };
+        insertBkuChronologically(queue, deferredWageTx);
+        continue;
+      }
+
+      if (cashOnHand > 0) {
+        const part1Nominal = cashOnHand;
+        const part2Nominal = expenseNominal - part1Nominal;
+        cashOnHand = 0;
+
+        splitBkuList.push({
+          ...tx,
+          id: `${tx.id}-p1`,
+          uraian: tx.uraian.includes('Tahap 1') ? tx.uraian : `${tx.uraian} (Tahap 1 / Sesuai Sisa Kas)`,
+          pengeluaran: part1Nominal,
+        });
+
+        const part2Date = nextBank ? nextBank.tanggal : tx.tanggal;
+        const part2Iso = nextBank ? nextBank.iso : txIso;
+        const part2Bulan = nextBank ? nextBank.bulan : tx.bulan;
+
+        const part2Tx: BkuTransaction = {
+          ...tx,
+          id: `${tx.id}-p2`,
+          tanggal: part2Date,
+          tanggalObj: part2Iso,
+          bulan: part2Bulan,
+          uraian: tx.uraian.includes('Tahap 2') ? tx.uraian : `${tx.uraian} (Tahap 2 / Pelunasan Sisa)`,
+          noBukti: tx.noBukti && tx.noBukti !== '-' ? `${tx.noBukti}-B` : tx.noBukti,
+          pengeluaran: part2Nominal,
+          penerimaan: 0,
+        };
+
+        insertBkuChronologically(queue, part2Tx);
+        continue;
+      }
+
+      if (nextBank) {
+        const deferredTx: BkuTransaction = {
+          ...tx,
+          tanggal: nextBank.tanggal,
+          tanggalObj: nextBank.iso,
+          bulan: nextBank.bulan,
+        };
+        insertBkuChronologically(queue, deferredTx);
+        continue;
+      }
+
+      cashOnHand -= expenseNominal;
+      splitBkuList.push(tx);
+    }
+
+    processedBkuList = splitBkuList;
+  }
+
   // Sort chronologically
-  dedupedResult.sort((a, b) => {
+  processedBkuList.sort((a, b) => {
     if (a.tanggalObj === b.tanggalObj) {
       if (a.jenis === 'PENERIMAAN' && b.jenis === 'PENGELUARAN') return -1;
       if (a.jenis === 'PENGELUARAN' && b.jenis === 'PENERIMAAN') return 1;
@@ -3074,7 +3215,7 @@ export function calculateBkuFromTransactions(
   const seenBkuTxIds = new Set<string>();
   const finalUniqueResult: BkuTransaction[] = [];
 
-  dedupedResult.forEach((tx) => {
+  processedBkuList.forEach((tx) => {
     if (tx.jenis === 'PENERIMAAN') {
       currentSaldo += tx.penerimaan;
     } else {

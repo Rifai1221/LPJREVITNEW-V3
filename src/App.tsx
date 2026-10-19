@@ -516,6 +516,14 @@ export default function App() {
   };
 
   // Derived calculations
+  const effectiveBkbList = useMemo(() => {
+    if (appState.bkbRecords && appState.bkbRecords.length > 0) {
+      return calculateRunningBkb(appState.bkbRecords);
+    }
+    const standard = generateStandardBkbRecords(appState.school, appState.progressWeeks, bkuWeekLimit);
+    return calculateRunningBkb(standard);
+  }, [appState.bkbRecords, appState.school, appState.progressWeeks, bkuWeekLimit]);
+
   const bkuList = useMemo(() => {
     return calculateBkuFromTransactions(
       appState.kwitansiList,
@@ -525,7 +533,8 @@ export default function App() {
       appState.deletedBkuIds || [],
       appState.wageReports || [],
       bkuWeekLimit,
-      appState.stores || []
+      appState.stores || [],
+      effectiveBkbList
     );
   }, [
     appState.kwitansiList,
@@ -536,15 +545,8 @@ export default function App() {
     appState.wageReports,
     bkuWeekLimit,
     appState.stores,
+    effectiveBkbList,
   ]);
-
-  const effectiveBkbList = useMemo(() => {
-    if (appState.bkbRecords && appState.bkbRecords.length > 0) {
-      return calculateRunningBkb(appState.bkbRecords);
-    }
-    const standard = generateStandardBkbRecords(appState.school, appState.progressWeeks, bkuWeekLimit);
-    return calculateRunningBkb(standard);
-  }, [appState.bkbRecords, appState.school, appState.progressWeeks, bkuWeekLimit]);
 
   const bktList = useMemo(() => {
     return calculateIntegratedBkt(bkuList, effectiveBkbList);
