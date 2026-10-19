@@ -465,6 +465,45 @@ export function calculateSynchronizedBkuList(
 }
 
 /**
+ * Menyinkronkan tanggal dokumen Kwitansi dengan tanggal BKT/BKU yang telah disesuaikan (geser tanggal/anti-minus).
+ * Memastikan Kwitansi, BKU, dan BKT memiliki tanggal yang sama persis (Unified Transaction Date).
+ */
+export function calculateSynchronizedKwitansiList(
+  kwitansiList: KwitansiDocument[],
+  bktList: BktTransaction[]
+): KwitansiDocument[] {
+  if (!kwitansiList || kwitansiList.length === 0 || !bktList || bktList.length === 0) {
+    return kwitansiList;
+  }
+
+  const bktMap = new Map<string, BktTransaction>();
+  bktList.forEach((bkt) => {
+    const cleanId = bkt.id.replace(/^bkt-/, '').replace(/-p[12]$/, '');
+    bktMap.set(cleanId, bkt);
+    if (bkt.kwitansiIdRef) {
+      bktMap.set(bkt.kwitansiIdRef, bkt);
+    }
+  });
+
+  return kwitansiList.map((kw) => {
+    let matched = bktMap.get(kw.id) || bktMap.get(`bku-${kw.id}`) || bktMap.get(`kw-${kw.id}`);
+    if (!matched && kw.noBukti) {
+      matched = bktList.find((bkt) => bkt.noBukti === kw.noBukti && (bkt.pengeluaran || 0) > 0);
+    }
+
+    if (matched && (matched.tanggal || matched.tanggalObj)) {
+      return {
+        ...kw,
+        tanggal: matched.tanggal,
+        tanggalFormatted: matched.tanggal,
+        bulan: matched.bulan || kw.bulan,
+      };
+    }
+    return kw;
+  });
+}
+
+/**
  * Mendapatkan posisi saldo akhir BKB pada suatu bulan tertentu
  */
 export function getBkbSaldoAtMonth(bkbList: BkbTransaction[], monthName: string): number {

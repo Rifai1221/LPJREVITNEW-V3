@@ -36,6 +36,7 @@ import {
   calculateRunningBkb,
   calculateIntegratedBkt,
   calculateSynchronizedBkuList,
+  calculateSynchronizedKwitansiList,
   reconcileCashBalances,
   migrateAndTransformAppState,
 } from './services/cashLedgerIntegrationService';
@@ -553,6 +554,10 @@ export default function App() {
   const bkuList = useMemo(() => {
     return calculateSynchronizedBkuList(rawBkuList, bktList);
   }, [rawBkuList, bktList]);
+
+  const synchronizedKwitansiList = useMemo(() => {
+    return calculateSynchronizedKwitansiList(appState.kwitansiList, bktList);
+  }, [appState.kwitansiList, bktList]);
 
   const cashReconciliation = useMemo(() => {
     const lastBku = bkuList[bkuList.length - 1];
@@ -1950,7 +1955,7 @@ Lanjutkan pengosongan data transaksi?`)
           <Dashboard
             school={appState.school}
             rpdItems={appState.rpdItems}
-            kwitansiList={appState.kwitansiList}
+            kwitansiList={synchronizedKwitansiList}
             wageReports={appState.wageReports}
             progressWeeks={appState.progressWeeks}
             taxRecords={taxRecords}
@@ -1972,7 +1977,7 @@ Lanjutkan pengosongan data transaksi?`)
             realData={appState.realSchoolData || defaultRealSchoolData}
             school={appState.school}
             stores={appState.stores || []}
-            kwitansiList={appState.kwitansiList || []}
+            kwitansiList={synchronizedKwitansiList || []}
             onUpdateRealData={handleUpdateRealData}
             onApplyToAllModules={handleApplyRealDataToAll}
           />
@@ -2017,7 +2022,7 @@ Lanjutkan pengosongan data transaksi?`)
             onAutoGenerateAllWeeks={handleAutoGenerateAllWeeks}
             onOpenPrintModal={(weekNum, docType) => handleOpenPrint(docType || 'PROGRESS', undefined, weekNum)}
             bkuList={bkuList}
-            kwitansiList={appState.kwitansiList}
+            kwitansiList={synchronizedKwitansiList}
             onAddTransaction={(tx, weekNum) => handleAddManualBku(tx, weekNum)}
             onUpdateTransaction={handleUpdateBku}
             onDeleteTransaction={handleDeleteBku}
@@ -2031,7 +2036,7 @@ Lanjutkan pengosongan data transaksi?`)
             school={appState.school}
             progressWeeks={appState.progressWeeks}
             stores={appState.stores || []}
-            kwitansiList={appState.kwitansiList}
+            kwitansiList={synchronizedKwitansiList}
             bktList={bktList}
             bkbList={effectiveBkbList}
             onOpenPrintModal={(month, filterOpts) =>
@@ -2066,7 +2071,7 @@ Lanjutkan pengosongan data transaksi?`)
             school={appState.school}
             progressWeeks={appState.progressWeeks}
             stores={appState.stores || []}
-            kwitansiList={appState.kwitansiList}
+            kwitansiList={synchronizedKwitansiList}
             bkuList={bkuList}
             bkbList={effectiveBkbList}
             onOpenPrintModal={(month, filterOpts) =>
@@ -2126,7 +2131,7 @@ Lanjutkan pengosongan data transaksi?`)
 
         {activeTab === 'kwitansi' && (
           <KwitansiManager
-            kwitansiList={appState.kwitansiList}
+            kwitansiList={synchronizedKwitansiList}
             school={appState.school}
             progressWeeks={appState.progressWeeks}
             stores={appState.stores || []}
@@ -2150,7 +2155,7 @@ Lanjutkan pengosongan data transaksi?`)
             realSchoolData={appState.realSchoolData}
             divisions={appState.realSchoolData?.divisions}
             progressWeeks={appState.progressWeeks}
-            kwitansiList={appState.kwitansiList}
+            kwitansiList={synchronizedKwitansiList}
             onUpdateWageReports={handleUpdateWageReports}
             onUpdateWorkers={handleUpdateWorkers}
             onUpdateKwitansiList={handleUpdateKwitansiList}
@@ -2220,7 +2225,7 @@ Lanjutkan pengosongan data transaksi?`)
         filterOptions={printFilterOptions}
         school={appState.school}
         rpdItems={appState.rpdItems}
-        kwitansiList={appState.kwitansiList}
+        kwitansiList={synchronizedKwitansiList}
         wageReports={appState.wageReports}
         bkuList={bkuList}
         bktList={bktList}
