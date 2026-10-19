@@ -292,15 +292,45 @@ export function calculateIntegratedBkt(
   const inflowItems: BktTransaction[] = bktItems.filter((it) => (it.pemasukan || 0) > 0);
   const rawOutflowItems: BktTransaction[] = bktItems.filter((it) => (it.pengeluaran || 0) > 0);
 
-  const processedOutflows: BktTransaction[] = [];
-  let simRunning = 0;
-
-  // Sort inflowItems chronologically for simulation lookup
+  // Sort inflowItems chronologically for simulation lookup and alignment
   const sortedInflows = [...inflowItems].sort((a, b) => {
     const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
     const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
     return isoA.localeCompare(isoB);
   });
+
+  // Front-load and align SMKK, Papan Nama, and Material purchases to happen right after bank withdrawals
+  if (sortedInflows.length > 0) {
+    rawOutflowItems.forEach((item) => {
+      const desc = `${item.noBukti || ''} ${item.uraian}`.toLowerCase();
+      const isFrontLoaded =
+        /smkk|keselamatan|k3|papan nama|papan proyek/i.test(desc) ||
+        /material|bahan|semen|pasir|batu|besi|kayu|paku|bata|cat|cerucuk|pancang/i.test(desc);
+
+      if (isFrontLoaded) {
+        const firstDraw = sortedInflows[0];
+        const secondDraw = sortedInflows[1];
+
+        let targetDraw = firstDraw;
+        if (secondDraw) {
+          const itemIso = item.tanggalObj || parseTxDateToIso(item.tanggal);
+          const secondIso = secondDraw.tanggalObj || parseTxDateToIso(secondDraw.tanggal);
+          if (itemIso >= secondIso) {
+            targetDraw = secondDraw;
+          }
+        }
+
+        if (targetDraw) {
+          item.tanggal = targetDraw.tanggal;
+          item.tanggalObj = targetDraw.tanggalObj || parseTxDateToIso(targetDraw.tanggal);
+          item.bulan = targetDraw.bulan;
+        }
+      }
+    });
+  }
+
+  const processedOutflows: BktTransaction[] = [];
+  let simRunning = 0;
 
   rawOutflowItems.forEach((item) => {
     const itemIso = item.tanggalObj || parseTxDateToIso(item.tanggal);
