@@ -749,30 +749,54 @@ export default function App() {
   const handleUpdateBku = (updatedTx: BkuTransaction) => {
     isDirtyRef.current = true;
     setAppState((prev) => {
-      // 1. If linked to kwitansi, sync kwitansi
-      let updatedKwitansi = prev.kwitansiList;
-      if (updatedTx.kwitansiIdRef) {
-        updatedKwitansi = prev.kwitansiList.map((kw) => {
-          if (kw.id === updatedTx.kwitansiIdRef) {
-            return {
-              ...kw,
-              tanggal: updatedTx.tanggal,
-              tanggalFormatted: updatedTx.tanggal,
-              bulan: updatedTx.bulan,
-              uraian: updatedTx.uraian,
-              noBukti: updatedTx.noBukti,
-              nominal: updatedTx.pengeluaran || updatedTx.penerimaan,
-            };
-          }
-          return kw;
-        });
+      const cleanId = updatedTx.id.replace(/^(bkt-|bku-|kw-|bku-kw-)+/g, '');
+
+      // 1. Find and update matching kwitansi in kwitansiList
+      let matchedKwId = updatedTx.kwitansiIdRef;
+      if (!matchedKwId) {
+        const foundKw = prev.kwitansiList.find(
+          (kw) => kw.id === cleanId || kw.id === updatedTx.id || (updatedTx.noBukti && kw.noBukti === updatedTx.noBukti)
+        );
+        if (foundKw) {
+          matchedKwId = foundKw.id;
+        }
       }
 
+      const updatedKwitansi = prev.kwitansiList.map((kw) => {
+        if (kw.id === matchedKwId || (updatedTx.noBukti && kw.noBukti === updatedTx.noBukti)) {
+          return {
+            ...kw,
+            tanggal: updatedTx.tanggal,
+            tanggalFormatted: updatedTx.tanggal,
+            tanggalObj: updatedTx.tanggalObj,
+            bulan: updatedTx.bulan,
+            uraian: updatedTx.uraian,
+            noBukti: updatedTx.noBukti,
+            nominal: updatedTx.pengeluaran || updatedTx.penerimaan || kw.nominal,
+          };
+        }
+        return kw;
+      });
+
+      const normalizedTx: BkuTransaction = {
+        ...updatedTx,
+        kwitansiIdRef: matchedKwId || updatedTx.kwitansiIdRef,
+        id: updatedTx.id.startsWith('bku-') ? updatedTx.id : `bku-${cleanId}`,
+      };
+
       // 2. Update or upsert into manualBkuTransactions
-      const exists = (prev.manualBkuTransactions || []).some((m) => m.id === updatedTx.id);
+      const existingManual = prev.manualBkuTransactions || [];
+      const exists = existingManual.some(
+        (m) => m.id === updatedTx.id || m.id === normalizedTx.id || (matchedKwId && m.kwitansiIdRef === matchedKwId)
+      );
+
       const updatedManual = exists
-        ? (prev.manualBkuTransactions || []).map((m) => (m.id === updatedTx.id ? updatedTx : m))
-        : [...(prev.manualBkuTransactions || []), updatedTx];
+        ? existingManual.map((m) =>
+            m.id === updatedTx.id || m.id === normalizedTx.id || (matchedKwId && m.kwitansiIdRef === matchedKwId)
+              ? normalizedTx
+              : m
+          )
+        : [...existingManual, normalizedTx];
 
       return {
         ...prev,
