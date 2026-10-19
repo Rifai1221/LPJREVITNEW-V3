@@ -186,29 +186,8 @@ export function calculateRunningBkb(bkbList: BkbTransaction[]): BkbTransaction[]
  */
 export function calculateIntegratedBkt(
   bkuList: BkuTransaction[],
-  bkbList: BkbTransaction[] = [],
-  manualBkuTransactions: BkuTransaction[] = []
+  bkbList: BkbTransaction[] = []
 ): BktTransaction[] {
-  const manualIds = new Set((manualBkuTransactions || []).map((m) => m.id));
-  const manualNoBuktis = new Set((manualBkuTransactions || []).map((m) => m.noBukti?.trim().toLowerCase()).filter(Boolean));
-  
-  const manualMap = new Map<string, BkuTransaction>();
-  (manualBkuTransactions || []).forEach((m) => {
-    manualMap.set(m.id, m);
-    if (m.kwitansiIdRef) {
-      manualMap.set(m.kwitansiIdRef, m);
-      manualMap.set(`bku-${m.kwitansiIdRef}`, m);
-      manualMap.set(`kw-${m.kwitansiIdRef}`, m);
-    }
-    const cleanMid = m.id.replace(/^bku-|^bkt-|^kw-/, '');
-    manualMap.set(cleanMid, m);
-    manualMap.set(`bku-${cleanMid}`, m);
-    manualMap.set(`kw-${cleanMid}`, m);
-    if (m.noBukti && m.noBukti.trim() !== '-' && m.noBukti.trim().toLowerCase() !== 'manual') {
-      manualMap.set(m.noBukti.trim().toLowerCase(), m);
-    }
-  });
-
   const bktItems: BktTransaction[] = [];
 
   // 1. Ambil seluruh transaksi Penarikan Tunai dari BKB (Kredit / Pengeluaran di Bank)
@@ -271,36 +250,18 @@ export function calculateIntegratedBkt(
       return;
     }
 
-    const cleanId = item.id.replace(/^bku-|^bkt-|^kw-/, '');
-    const itemNoBukti = item.noBukti?.trim().toLowerCase();
-    const manualMatch =
-      manualMap.get(item.id) ||
-      manualMap.get(cleanId) ||
-      (item.kwitansiIdRef ? manualMap.get(item.kwitansiIdRef) : undefined) ||
-      (itemNoBukti && itemNoBukti !== '-' && itemNoBukti !== 'manual' ? manualMap.get(itemNoBukti) : undefined);
-
-    const effectiveItem = manualMatch ? {
-      ...item,
-      tanggal: manualMatch.tanggal,
-      tanggalObj: manualMatch.tanggalObj,
-      bulan: manualMatch.bulan,
-      uraian: manualMatch.uraian,
-      noBukti: manualMatch.noBukti,
-      pengeluaran: manualMatch.pengeluaran || item.pengeluaran,
-    } : item;
-
     bktItems.push({
       id: `bkt-${item.id}`,
-      tanggal: effectiveItem.tanggal,
-      tanggalObj: effectiveItem.tanggalObj || parseTxDateToIso(effectiveItem.tanggal),
-      bulan: effectiveItem.bulan,
-      uraian: effectiveItem.uraian,
-      noBukti: effectiveItem.noBukti,
+      tanggal: item.tanggal, // BKU source provides the updated tanggal
+      tanggalObj: item.tanggalObj || parseTxDateToIso(item.tanggal), // BKU source provides updated tanggalObj
+      bulan: item.bulan,
+      uraian: item.uraian,
+      noBukti: item.noBukti,
       pemasukan: 0,
-      pengeluaran: effectiveItem.pengeluaran,
+      pengeluaran: item.pengeluaran,
       saldo: 0,
-      kategoriBiaya: effectiveItem.kategoriBiaya,
-      kwitansiIdRef: effectiveItem.kwitansiIdRef,
+      kategoriBiaya: item.kategoriBiaya,
+      kwitansiIdRef: item.kwitansiIdRef,
       metodeBayar: 'TUNAI',
     });
   });
@@ -320,294 +281,14 @@ export function calculateIntegratedBkt(
     return 0;
   });
 
-  // 4. Hitung saldo kumulatif berjalan dengan Proteksi Zero-Deficit Cash Flow:
-  // - Upah tukang (UK / Upah) selalu diprioritaskan lunas tepat waktu.
-  // - Belanja material/operasional yang melebihi saldo kas sebelum penarikan bank berikutnya
-  //   otomatis dipecah (sebagian dibayar sesuai saldo kas tersisa, dan sisanya dibayarkan setelah uang kas ditarik dari bank).
-  // - Saldo BKT dijamin 100% tidak pernah minus (running >= 0).
-  const finalBktRows: BktTransaction[] = [];
-
-  // Separate inflows (bank withdrawals) and raw outflows (expenses)
-  const inflowItems: BktTransaction[] = bktItems.filter((it) => (it.pemasukan || 0) > 0);
-  const rawOutflowItems: BktTransaction[] = bktItems.filter((it) => (it.pengeluaran || 0) > 0);
-
-  // Sort inflowItems chronologically for simulation lookup and alignment
-  const sortedInflows = [...inflowItems].sort((a, b) => {
-    const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
-    const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
-    return isoA.localeCompare(isoB);
-  });
-
-  // Front-load and align SMKK, Papan Nama, and Material purchases to happen right after bank withdrawals
-  if (sortedInflows.length > 0) {
-    rawOutflowItems.forEach((item) => {
-      const cleanItemId = item.id.replace(/^bku-|^bkt-/, '');
-      const itemNoBukti = item.noBukti?.trim().toLowerCase();
-      const isManual = manualIds.has(cleanItemId) || manualIds.has(item.id) || (itemNoBukti && itemNoBukti !== '-' && manualNoBuktis.has(itemNoBukti));
-      if (isManual) {
-        return;
-      }
-
-      const desc = `${item.noBukti || ''} ${item.uraian}`.toLowerCase();
-      const isFrontLoaded =
-        /smkk|keselamatan|k3|papan nama|papan proyek/i.test(desc) ||
-        /material|bahan|semen|pasir|batu|besi|kayu|paku|bata|cat|cerucuk|pancang/i.test(desc);
-
-      if (isFrontLoaded) {
-        const itemIso = item.tanggalObj || parseTxDateToIso(item.tanggal);
-        // Find the latest inflow whose date is <= itemIso (preceding bank withdrawal)
-        let targetDraw = sortedInflows[0];
-        for (const inf of sortedInflows) {
-          const infIso = inf.tanggalObj || parseTxDateToIso(inf.tanggal);
-          if (infIso <= itemIso) {
-            targetDraw = inf;
-          } else {
-            break;
-          }
-        }
-
-        if (targetDraw) {
-          const targetIso = targetDraw.tanggalObj || parseTxDateToIso(targetDraw.tanggal);
-          const isMaterial = /material|bahan|semen|pasir|batu|besi|kayu|paku|bata|cat|cerucuk|pancang/i.test(desc);
-
-          if (isMaterial) {
-            // Material purchases happen 1 day after bank withdrawal (sehari setelah penarikan)
-            const dObj = new Date(`${targetIso}T00:00:00`);
-            dObj.setDate(dObj.getDate() + 1);
-            const nextIso = dObj.toISOString().split('T')[0];
-            const day = String(dObj.getDate()).padStart(2, '0');
-            const month = String(dObj.getMonth() + 1).padStart(2, '0');
-            const year = dObj.getFullYear();
-            item.tanggal = `${day}/${month}/${year}`;
-            item.tanggalObj = nextIso;
-            item.bulan = targetDraw.bulan;
-          } else {
-            // SMKK / Papan Nama happen on the exact bank withdrawal date (di awal minggu / saat penarikan)
-            item.tanggal = targetDraw.tanggal;
-            item.tanggalObj = targetIso;
-            item.bulan = targetDraw.bulan;
-          }
-        }
-      }
-    });
-  }
-
-  const processedOutflows: BktTransaction[] = [];
-  let simRunning = 0;
-
-  rawOutflowItems.forEach((item) => {
-    const itemIso = item.tanggalObj || parseTxDateToIso(item.tanggal);
-    const isUpah = /uk[\/\-_]|upah tukang|upah borongan|daftar hadir/i.test(`${item.noBukti || ''} ${item.uraian}`);
-
-    if (item.pengeluaran <= simRunning || sortedInflows.length === 0) {
-      simRunning -= item.pengeluaran;
-      processedOutflows.push({ ...item, saldo: 0 });
-    } else if (isUpah || simRunning === 0) {
-      const targetDraw = sortedInflows.find((inf) => (inf.tanggalObj || parseTxDateToIso(inf.tanggal)) > itemIso) || sortedInflows[sortedInflows.length - 1];
-      if (targetDraw) {
-        const targetIso = targetDraw.tanggalObj || parseTxDateToIso(targetDraw.tanggal);
-        processedOutflows.push({
-          ...item,
-          tanggal: targetDraw.tanggal,
-          tanggalObj: targetIso,
-          bulan: targetDraw.bulan,
-          saldo: 0,
-        });
-      } else {
-        simRunning -= item.pengeluaran;
-        processedOutflows.push({ ...item, saldo: 0 });
-      }
-    } else {
-      const part1 = simRunning;
-      const part2 = item.pengeluaran - part1;
-      simRunning = 0;
-
-      processedOutflows.push({
-        ...item,
-        id: `${item.id}-p1`,
-        pengeluaran: part1,
-        saldo: 0,
-      });
-
-      const targetDraw = sortedInflows.find((inf) => (inf.tanggalObj || parseTxDateToIso(inf.tanggal)) > itemIso) || sortedInflows[sortedInflows.length - 1];
-      if (targetDraw) {
-        const targetIso = targetDraw.tanggalObj || parseTxDateToIso(targetDraw.tanggal);
-        processedOutflows.push({
-          ...item,
-          id: `${item.id}-p2`,
-          tanggal: targetDraw.tanggal,
-          tanggalObj: targetIso,
-          bulan: targetDraw.bulan,
-          pengeluaran: part2,
-          saldo: 0,
-        });
-      } else {
-        simRunning -= part2;
-        processedOutflows.push({
-          ...item,
-          id: `${item.id}-p2`,
-          pengeluaran: part2,
-          saldo: 0,
-        });
-      }
-    }
-  });
-
-  // Combine all rows (inflows + processed outflows)
-  const allRows: BktTransaction[] = [...inflowItems, ...processedOutflows];
-
-  // Sort chronologically: date ascending, with inflows first on same date
-  allRows.sort((a, b) => {
-    const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
-    const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
-    if (isoA !== isoB) {
-      return isoA.localeCompare(isoB);
-    }
-    // Inflows (pemasukan > 0) come before outflows (pengeluaran > 0)
-    if ((a.pemasukan || 0) > 0 && (b.pemasukan || 0) === 0) return -1;
-    if ((b.pemasukan || 0) > 0 && (a.pemasukan || 0) === 0) return 1;
-    return 0;
-  });
-
-  // Final cumulative running balance pass
+  // 4. Hitung saldo kumulatif berjalan (Running Balance)
   let running = 0;
-  allRows.forEach((row) => {
-    running = running + (row.pemasukan || 0) - (row.pengeluaran || 0);
-    finalBktRows.push({
-      ...row,
+  return bktItems.map((item) => {
+    running = running + (item.pemasukan || 0) - (item.pengeluaran || 0);
+    return {
+      ...item,
       saldo: running,
-    });
-  });
-
-  return finalBktRows;
-}
-
-/**
- * Menyinkronkan tanggal transaksi BKU dengan tanggal yang telah disesuaikan/digeser di BKT
- * (misalnya penyesuaian front-loading atau pencegahan minus), memastikan tanggal BKU dan BKT identik 100%.
- */
-export function calculateSynchronizedBkuList(
-  bkuList: BkuTransaction[],
-  bktList: BktTransaction[],
-  manualBkuTransactions: BkuTransaction[] = []
-): BkuTransaction[] {
-  const manualIds = new Set((manualBkuTransactions || []).map((m) => m.id));
-  const manualNoBuktis = new Set((manualBkuTransactions || []).map((m) => m.noBukti?.trim().toLowerCase()).filter(Boolean));
-
-  const bktMap = new Map<string, BktTransaction>();
-  bktList.forEach((bkt) => {
-    const cleanId = bkt.id.replace(/^bkt-/, '').replace(/-p[12]$/, '');
-    bktMap.set(cleanId, bkt);
-  });
-
-  return bkuList.map((bku) => {
-    const cleanBkuId = bku.id.replace(/^bku-/, '');
-    const bkuNoBukti = bku.noBukti?.trim().toLowerCase();
-    const isManual = manualIds.has(cleanBkuId) || manualIds.has(bku.id) || (bkuNoBukti && bkuNoBukti !== '-' && manualNoBuktis.has(bkuNoBukti));
-
-    if (isManual) {
-      return bku;
-    }
-
-    const bktMatch = bktMap.get(bku.id);
-    if (bktMatch && (bktMatch.pengeluaran || 0) > 0) {
-      return {
-        ...bku,
-        tanggal: bktMatch.tanggal,
-        tanggalObj: bktMatch.tanggalObj,
-        bulan: bktMatch.bulan,
-      };
-    }
-    return bku;
-  });
-}
-
-/**
- * Menyinkronkan tanggal dokumen Kwitansi dengan tanggal BKT/BKU yang telah disesuaikan (geser tanggal/anti-minus).
- * Memastikan Kwitansi, BKU, dan BKT memiliki tanggal yang sama persis (Unified Transaction Date).
- */
-export function calculateSynchronizedKwitansiList(
-  kwitansiList: KwitansiDocument[],
-  bktList: BktTransaction[],
-  manualBkuTransactions: BkuTransaction[] = []
-): KwitansiDocument[] {
-  if (!kwitansiList || kwitansiList.length === 0) {
-    return kwitansiList;
-  }
-
-  const manualMap = new Map<string, BkuTransaction>();
-  (manualBkuTransactions || []).forEach((m) => {
-    manualMap.set(m.id, m);
-    if (m.kwitansiIdRef) {
-      manualMap.set(m.kwitansiIdRef, m);
-      manualMap.set(`kw-${m.kwitansiIdRef}`, m);
-      manualMap.set(`bku-${m.kwitansiIdRef}`, m);
-    }
-    const cleanMid = m.id.replace(/^bku-|^bkt-|^kw-/, '');
-    manualMap.set(cleanMid, m);
-    if (m.noBukti && m.noBukti.trim() !== '-' && m.noBukti.trim().toLowerCase() !== 'manual') {
-      manualMap.set(m.noBukti.trim().toLowerCase(), m);
-    }
-  });
-
-  const bktMap = new Map<string, BktTransaction>();
-  bktList.forEach((bkt) => {
-    const cleanId = bkt.id.replace(/^bkt-/, '').replace(/-p[12]$/, '');
-    bktMap.set(cleanId, bkt);
-    if (bkt.kwitansiIdRef) {
-      bktMap.set(bkt.kwitansiIdRef, bkt);
-    }
-    if (bkt.noBukti && bkt.noBukti.trim() !== '-') {
-      bktMap.set(bkt.noBukti.trim().toLowerCase(), bkt);
-    }
-  });
-
-  return kwitansiList.map((kw) => {
-    const cleanKwId = kw.id.replace(/^kw-|^bku-|^bkt-/, '');
-    const kwNoBukti = kw.noBukti?.trim().toLowerCase();
-
-    // 1. Check manual override first
-    const manualMatch =
-      manualMap.get(kw.id) ||
-      manualMap.get(cleanKwId) ||
-      manualMap.get(`kw-${kw.id}`) ||
-      (kwNoBukti && kwNoBukti !== '-' ? manualMap.get(kwNoBukti) : undefined);
-
-    if (manualMatch && manualMatch.tanggal) {
-      return {
-        ...kw,
-        tanggal: manualMatch.tanggal,
-        tanggalFormatted: manualMatch.tanggal,
-        bulan: manualMatch.bulan || kw.bulan,
-      };
-    }
-
-    // 2. Check BKT synchronized match
-    let matched =
-      bktMap.get(kw.id) ||
-      bktMap.get(cleanKwId) ||
-      bktMap.get(`bku-${kw.id}`) ||
-      bktMap.get(`kw-${kw.id}`);
-
-    if (!matched && kw.noBukti) {
-      matched = bktList.find(
-        (bkt) =>
-          bkt.noBukti &&
-          kw.noBukti &&
-          bkt.noBukti.trim().toLowerCase() === kw.noBukti.trim().toLowerCase() &&
-          (bkt.pengeluaran || 0) > 0
-      );
-    }
-
-    if (matched && (matched.tanggal || matched.tanggalObj)) {
-      return {
-        ...kw,
-        tanggal: matched.tanggal,
-        tanggalFormatted: matched.tanggal,
-        bulan: matched.bulan || kw.bulan,
-      };
-    }
-    return kw;
+    };
   });
 }
 
