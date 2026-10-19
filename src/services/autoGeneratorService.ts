@@ -14,8 +14,50 @@ import {
   RabDivision,
   RabSubItem,
 } from '../types';
-import { resolveWeekDates, parseTxDateToIso, indonesianMonths, monthOrderMap, formatIndonesianDateLong, getBulanFromTanggal } from '../utils/monthHelper';
+import { resolveWeekDates, parseTxDateToIso, indonesianMonths, monthOrderMap } from '../utils/monthHelper';
 import { getAhspWageRateForRole } from '../utils/divisionHelper';
+
+/**
+ * Menghitung Cadangan Upah Terkunci (Labor Reserve) untuk minggu berjalan.
+ * Memastikan uang untuk tukang diprioritaskan sebelum belanja material.
+ */
+export function calculateLockedLaborReserve(
+  wageReports: WeeklyWageReport[],
+  targetWeek: number
+): number {
+  const report = wageReports.find((r) => r.mingguKe === targetWeek);
+  return report ? report.totalUpah : 0;
+}
+
+/**
+ * Memecah kwitansi material jika melebihi kas yang tersedia, 
+ * dengan tetap memprioritaskan cadangan upah tukang.
+ */
+export function splitMaterialPurchases(
+  kw: KwitansiDocument,
+  availableCash: number,
+  laborReserve: number
+): KwitansiDocument[] {
+  const netAvailableForMaterial = Math.max(0, availableCash - laborReserve);
+  
+  // Jika cukup, tidak perlu pecah
+  if (kw.nominal <= netAvailableForMaterial || kw.tipe !== 'MATERIAL') {
+    return [kw];
+  }
+
+  // Pecah proporsional
+  const ratio = netAvailableForMaterial / kw.nominal;
+  const kw1Nominal = Math.floor(kw.nominal * ratio);
+  const kw2Nominal = kw.nominal - kw1Nominal;
+
+  const kw1Items = kw.items.map(item => ({...item, volume: item.volume * ratio, jumlah: item.jumlah * ratio}));
+  const kw2Items = kw.items.map(item => ({...item, volume: item.volume * (1 - ratio), jumlah: item.jumlah * (1 - ratio)}));
+
+  return [
+    { ...kw, id: `${kw.id}-part1`, nominal: kw1Nominal, items: kw1Items },
+    { ...kw, id: `${kw.id}-part2`, nominal: kw2Nominal, items: kw2Items, tanggal: 'DITUNDA_SAMPAI_KAS_ADA' }
+  ];
+}
 
 export function getDateInWeek(startDateIso: string, dayOffset: number) {
   const sBase = new Date(`${startDateIso}T00:00:00`);
@@ -983,6 +1025,14 @@ export function getAutoHealedKwitansiItems<
 ): T[] {
   if (!kw) return [];
 
+  // Solusi 3: Mode Proteksi Kunci (Locked Manual Receipt)
+  // Kwitansi manual, terkunci, atau kwitansi yang sudah memiliki rincian barang dipertahankan
+  const isManual = Boolean((kw as any).isManual);
+  const isLocked = isReceiptLocked(kw as any);
+  if ((isManual || isLocked || (kw.items && kw.items.length > 0)) && kw.items && kw.items.length > 0) {
+    return kw.items;
+  }
+
   const noBuktiStr = (kw.noBukti || '').toLowerCase();
   const uraianStr = (kw.uraian || '').toLowerCase();
   const perStr = (kw.penerimaPekerjaan || '').toLowerCase();
@@ -990,17 +1040,9 @@ export function getAutoHealedKwitansiItems<
   const combined = `${noBuktiStr} ${uraianStr} ${perStr} ${(kw.penerimaNama || '').toLowerCase()} ${storeStr}`;
   const nom = kw.nominal || 0;
 
-  const hasCorruptedMaterials = Boolean(
-    kw.items?.some((it) =>
-      /semen|pasir|split|batu\s*kali|bata|hebel|keramik|granit|besi|cat|triplek|paku|pintu|kusen|kayu|atap|seng|spandek|pipa|kloset|lampu|kabel/i.test(
-        it.namaBarang
-      )
-    )
-  );
-
   // 0. UPAH TUKANG / TENAGA KERJA (Protected: Never convert into store materials!)
   if (kw.tipe === 'UPAH' || /^uk[\/\-_]/i.test(noBuktiStr) || /daftar hadir|upah tukang|upah borongan/i.test(uraianStr)) {
-    if (kw.items && kw.items.length > 0 && !hasCorruptedMaterials) {
+    if (kw.items && kw.items.length > 0) {
       return kw.items;
     }
     return [
@@ -1021,21 +1063,15 @@ export function getAutoHealedKwitansiItems<
     (/perencana/i.test(uraianStr) && !/tb\.|toko material|pembelian bahan/i.test(combined));
 
   if (isPerencana) {
-    if (!kw.items || kw.items.length === 0 || hasCorruptedMaterials || !kw.items.some((it) => /perencana/i.test(it.namaBarang))) {
-      const isFinal = /pelunasan|akhir proyek|final/i.test(uraianStr);
-      return [
-        {
-          namaBarang: isFinal
-            ? 'Honorarium Jasa Konsultansi Perencanaan Teknis & Dokumen Laporan Akhir (Pelunasan Akhir Proyek)'
-            : 'Honorarium Jasa Konsultansi Perencanaan Teknis Bulanan',
-          volume: 1,
-          satuan: 'Bulan',
-          hargaSatuan: nom,
-          jumlah: nom,
-        },
-      ] as unknown as T[];
-    }
-    return kw.items;
+    return [
+      {
+        namaBarang: 'Jasa Konsultansi Perencanaan Teknis & Penyusunan Dokumen RAB / Gambar Kerja',
+        volume: 1,
+        satuan: 'Ls',
+        hargaSatuan: nom,
+        jumlah: nom,
+      },
+    ] as unknown as T[];
   }
 
   // 2. KONSULTAN PENGAWAS LAPANGAN (KONS-W)
@@ -1045,57 +1081,18 @@ export function getAutoHealedKwitansiItems<
     (/pengawas/i.test(uraianStr) && !/tb\.|toko material|pembelian bahan/i.test(combined));
 
   if (isPengawas) {
-    if (!kw.items || kw.items.length === 0 || hasCorruptedMaterials || !kw.items.some((it) => /pengawas/i.test(it.namaBarang))) {
-      const isFinal = /pelunasan|akhir proyek|final/i.test(uraianStr);
-      return [
-        {
-          namaBarang: isFinal
-            ? 'Honorarium Jasa Konsultansi Pengawasan Teknis Lapangan (Pelunasan Akhir Proyek)'
-            : 'Honorarium Jasa Konsultansi Pengawasan Teknis Lapangan Bulanan',
-          volume: 1,
-          satuan: 'Bulan',
-          hargaSatuan: nom,
-          jumlah: nom,
-        },
-      ] as unknown as T[];
-    }
-    return kw.items;
+    return [
+      {
+        namaBarang: 'Jasa Konsultansi Pengawasan Teknis Lapangan & Laporan Kemajuan Pekerjaan',
+        volume: 1,
+        satuan: 'Ls',
+        hargaSatuan: nom,
+        jumlah: nom,
+      },
+    ] as unknown as T[];
   }
 
-  // 3. PENGELOLA SPJ & ADMINISTRASI LPJ (ADM / SPJ)
-  const isPengelolaAdm =
-    (kw.tipe === 'OPERASIONAL' && (/\badm\b|pengelola|spj|lpj|administrasi/i.test(combined))) ||
-    /\badm\b|kw[\/\-_]?adm|kw[\/\-_]?spj/i.test(noBuktiStr) ||
-    /pengelola.*(spj|administrasi|lpj)|administrasi lpj|biaya pengelolaan/i.test(uraianStr) ||
-    /pengelola spj/i.test(combined);
-
-  if (isPengelolaAdm) {
-    if (!kw.items || kw.items.length === 0 || hasCorruptedMaterials || !kw.items.some((it) => /pengelolaan|administrasi|spj|lpj/i.test(it.namaBarang))) {
-      const isFinal = /pelunasan|akhir proyek|final/i.test(uraianStr);
-      return [
-        {
-          namaBarang: isFinal
-            ? 'Biaya Pengelolaan Administrasi, Penyusunan Dokumen SPJ & LPJ Final (Pelunasan Akhir Proyek)'
-            : 'Biaya Pengelolaan Administrasi, Penyusunan Dokumen SPJ & ATK Bulanan',
-          volume: 1,
-          satuan: 'Bulan',
-          hargaSatuan: nom,
-          jumlah: nom,
-        },
-      ] as unknown as T[];
-    }
-    return kw.items;
-  }
-
-  // Solusi 3: Mode Proteksi Kunci (Locked Manual Receipt)
-  // Kwitansi manual, terkunci, atau kwitansi yang sudah memiliki rincian barang dipertahankan
-  const isManual = Boolean((kw as any).isManual);
-  const isLocked = isReceiptLocked(kw as any);
-  if ((isManual || isLocked || (kw.items && kw.items.length > 0)) && kw.items && kw.items.length > 0) {
-    return kw.items;
-  }
-
-  // 4. MITRA SIPLAH / MEBELER
+  // 3. MITRA SIPLAH / MEBELER
   const isSiplah =
     /siplah/i.test(noBuktiStr) ||
     /siplah/i.test(uraianStr) ||
@@ -1106,6 +1103,25 @@ export function getAutoHealedKwitansiItems<
   if (isSiplah && kw.items && kw.items.length > 0) {
     // Preserve items (supporting items split across multiple partner stores)
     return consolidateAndStandardizeReceiptItems(kw.items, nom) as unknown as T[];
+  }
+
+  // 4. PENGELOLA SPJ & ADMINISTRASI LPJ (ADM / SPJ)
+  const isPengelolaAdm =
+    kw.tipe === 'OPERASIONAL' ||
+    /\badm\b|kw[\/\-_]?adm|kw[\/\-_]?spj/i.test(noBuktiStr) ||
+    /pengelola.*(spj|administrasi|lpj)|administrasi lpj|biaya pengelolaan/i.test(uraianStr) ||
+    /pengelola spj/i.test(combined);
+
+  if (isPengelolaAdm) {
+    return [
+      {
+        namaBarang: 'Honorarium Biaya Pengelolaan Administrasi SPJ & Pelaporan Kegiatan',
+        volume: 1,
+        satuan: 'Keg',
+        hargaSatuan: nom,
+        jumlah: nom,
+      },
+    ] as unknown as T[];
   }
 
   // 5. PERCETAKAN & PAPAN NAMA (CTK)
@@ -2738,25 +2754,11 @@ export function calculateBkuFromTransactions(
     }
 
     // Check if user manually edited this transaction in BKU
-    const cleanKwBkuId = kwBkuId.replace(/^bku-/, '');
-    const targetKwId = kw.id.replace(/^kw-|^bku-/, '');
-    const kwNoBuktiTrim = kw.noBukti?.trim().toLowerCase();
-
     const manualKwOverride = manualTransactions.find(
-      (m) =>
-        m.id === kwBkuId ||
-        m.id === cleanKwBkuId ||
-        m.id === kw.id ||
-        m.id === targetKwId ||
-        m.kwitansiIdRef === kw.id ||
-        m.kwitansiIdRef === targetKwId ||
-        (kwNoBuktiTrim && kwNoBuktiTrim !== '-' && m.noBukti?.trim().toLowerCase() === kwNoBuktiTrim)
+      (m) => m.id === kwBkuId || m.kwitansiIdRef === kw.id
     );
     if (manualKwOverride) {
-      result.push({
-        ...manualKwOverride,
-        kwitansiIdRef: kw.id,
-      });
+      result.push(manualKwOverride);
       return;
     }
 
@@ -2897,13 +2899,22 @@ export function calculateBkuFromTransactions(
       const bkuUpahId = `bku-wage-w${wNum}`;
       if (deletedIds.includes(bkuUpahId)) return;
 
+      // Apply 2-day date shift to align with bank cash availability
+      const originalDate = new Date(`${wDates.endDate}T00:00:00`);
+      const shiftedDate = new Date(originalDate.getTime() + 2 * 86400000); // Shift 2 days
+      const d = String(shiftedDate.getDate()).padStart(2, '0');
+      const m = String(shiftedDate.getMonth() + 1).padStart(2, '0');
+      const y = shiftedDate.getFullYear();
+      const displayTanggal = `${d}/${m}/${y}`;
+      const isoTanggal = `${y}-${m}-${d}`;
+
       result.push({
         id: bkuUpahId,
-        tanggal: wDates.endDateSlash,
-        tanggalObj: wDates.endDate,
+        tanggal: displayTanggal,
+        tanggalObj: isoTanggal,
         bulan: wDates.bulan || startProjectBulan,
         jenis: 'PENGELUARAN',
-        uraian: `Bayar Upah Borongan Pekerja Fisik Minggu Ke-${wNum}`,
+        uraian: `Bayar Upah Borongan Pekerja Fisik Minggu Ke-${wNum} (Periode ${wDates.endDateSlash.split('/')[0]} ${wDates.bulan.split(' ')[0]})`,
         noBukti: ukBukti,
         penerimaan: 0,
         pengeluaran: cappedUpah,
@@ -4948,369 +4959,6 @@ export function generateMonthlyManagementTransactions({
 }
 
 /**
- * Zero-Deficit Cash Flow & Quantity-Split Engine (Anti-Saldo Minus BKT/BKU):
- * 1. Prioritas Utama Arus Kas: Upah honor tukang borongan mingguan di akhir pekan (Sabtu) wajib diutamakan,
- *    dibayar tepat waktu, dan kasnya diamankan/direservasi terlebih dahulu sebelum saldo dipakai belanja barang.
- * 2. Pemecahan Kwitansi Berbasis Satuan/Volume Realistis (Quantity Split):
- *    Jika pembelian material melebihi sisa saldo kas bebas belanja sebelum penarikan saldo bank berikutnya,
- *    pembelian dipecah berdasarkan volume barang yang masuk akal (misal: 60 zak semen dipecah jadi 20 zak di
- *    Kwitansi 1 dan 40 zak di Kwitansi 2 setelah penarikan tunai bank).
- * 3. Bebas Istilah Termin: Uraian kwitansi murni pembelian tunai biasa tanpa kata "termin 1/termin 2".
- * 4. Saldo BKT dan BKU Dijamin 100% Positif (Zero Negative Balance).
- */
-export function harmonizeKwitansiCashFlowWithBkb({
-  kwitansiList,
-  bkbList = [],
-  wageReports = [],
-  progressWeeks = [],
-  school,
-  yearStr = '2026',
-}: {
-  kwitansiList: KwitansiDocument[];
-  bkbList?: BkbTransaction[];
-  wageReports?: WeeklyWageReport[];
-  progressWeeks?: ProjectProgressWeek[];
-  school: SchoolMasterData;
-  yearStr?: string;
-}): KwitansiDocument[] {
-  if (!kwitansiList || kwitansiList.length === 0) return [];
-
-  const effYear = school?.tahunAnggaran?.trim() || yearStr || '2026';
-  const paguTotal = school?.totalAnggaran || 552457000;
-  const termin1Amount = school?.termin1Nilai || Math.round(paguTotal * ((school?.termin1Persen || 70) / 100));
-  const termin2Amount = school?.termin2Nilai || Math.round(paguTotal * ((school?.termin2Persen || 30) / 100));
-
-  // 1. Resolve Bank Cash Inflows (Penarikan Tunai dari BKB ke Kas Fisik BKT)
-  let inflows: {
-    tanggalObj: string;
-    tanggal: string;
-    tanggalFormatted: string;
-    bulan: string;
-    amount: number;
-    noBukti: string;
-  }[] = [];
-
-  const userWithdrawals = (bkbList || []).filter(
-    (b) => (b.pengeluaran || 0) > 0 && b.kategori !== 'BIAYA_ADMIN'
-  );
-
-  if (userWithdrawals.length > 0) {
-    inflows = userWithdrawals.map((b) => {
-      const iso = b.tanggalObj || parseTxDateToIso(b.tanggal, parseInt(effYear, 10));
-      return {
-        tanggalObj: iso,
-        tanggal: b.tanggal,
-        tanggalFormatted: formatIndonesianDateLong(b.tanggal, effYear),
-        bulan: b.bulan || getBulanFromTanggal(b.tanggal, effYear),
-        amount: b.pengeluaran || 0,
-        noBukti: b.noBukti || 'BKT-01',
-      };
-    });
-  } else {
-    // Standard baseline withdrawals matching institutional guidelines
-    const w1 = progressWeeks && progressWeeks.length > 0 ? progressWeeks[0] : null;
-    const w1Dates = w1 ? resolveWeekDates(w1, effYear) : {
-      startDate: `${effYear}-07-01`,
-      startDateSlash: `01/07/${effYear}`,
-      startDateFormatted: `01 Juli ${effYear}`,
-      bulan: `Juli ${effYear}`,
-    };
-
-    const initialDraw = Math.round(termin1Amount * 0.6);
-    inflows.push({
-      tanggalObj: w1Dates.startDate,
-      tanggal: w1Dates.startDateSlash,
-      tanggalFormatted: w1Dates.startDateFormatted,
-      bulan: w1Dates.bulan,
-      amount: initialDraw,
-      noBukti: 'BKT-01',
-    });
-
-    const w5 = progressWeeks && progressWeeks.length >= 5 ? progressWeeks[4] : null;
-    if (w5) {
-      const w5Dates = resolveWeekDates(w5, effYear);
-      inflows.push({
-        tanggalObj: w5Dates.startDate,
-        tanggal: w5Dates.startDateSlash,
-        tanggalFormatted: w5Dates.startDateFormatted,
-        bulan: w5Dates.bulan,
-        amount: Math.round(termin1Amount * 0.25),
-        noBukti: 'BKT-02',
-      });
-    }
-
-    const w8 = progressWeeks && progressWeeks.length >= 8 ? progressWeeks[7] : null;
-    if (w8 && termin2Amount > 0) {
-      const w8Dates = resolveWeekDates(w8, effYear);
-      inflows.push({
-        tanggalObj: w8Dates.startDate,
-        tanggal: w8Dates.startDateSlash,
-        tanggalFormatted: w8Dates.startDateFormatted,
-        bulan: w8Dates.bulan,
-        amount: Math.round(termin2Amount * 0.7),
-        noBukti: 'BKT-03',
-      });
-    }
-  }
-
-  inflows.sort((a, b) => a.tanggalObj.localeCompare(b.tanggalObj));
-
-  // 2. Identify all weekly wages (UPAH) and map to each week's Saturday
-  const weekWageMap = new Map<number, number>();
-  (wageReports || []).forEach((wr) => {
-    if (wr && wr.totalUpah > 0) {
-      weekWageMap.set(wr.mingguKe, wr.totalUpah);
-    }
-  });
-
-  kwitansiList.forEach((kw) => {
-    const isUpah = kw.tipe === 'UPAH' || /^uk[\/\-_]/i.test(kw.noBukti || '') || /upah tukang|upah borongan/i.test(kw.uraian);
-    if (isUpah) {
-      const wNum = extractWeekNumberFromKwitansi(kw, progressWeeks, effYear);
-      if (wNum && !weekWageMap.has(wNum)) {
-        weekWageMap.set(wNum, kw.nominal);
-      }
-    }
-  });
-
-  // 3. Week boundaries lookup
-  const weekDatesMap = new Map<number, ReturnType<typeof resolveWeekDates>>();
-  (progressWeeks || []).forEach((w) => {
-    weekDatesMap.set(w.mingguKe, resolveWeekDates(w, effYear));
-  });
-
-  const getWeekForDateIso = (dateIso: string): number | null => {
-    for (const [wNum, dates] of weekDatesMap.entries()) {
-      if (dateIso >= dates.startDate && dateIso <= dates.endDate) {
-        return wNum;
-      }
-    }
-    return null;
-  };
-
-  // 4. Sort all kwitansis chronologically (placing wages at the end of the day/week)
-  const preparedKwitansis = [...kwitansiList].map((kw) => {
-    let sortDate = parseTxDateToIso(kw.tanggal, parseInt(effYear, 10));
-    const isUpah = kw.tipe === 'UPAH' || /^uk[\/\-_]/i.test(kw.noBukti || '') || /upah tukang|upah borongan/i.test(kw.uraian);
-    if (isUpah && kw.mingguKeRef && weekDatesMap.has(kw.mingguKeRef)) {
-      const wDates = weekDatesMap.get(kw.mingguKeRef)!;
-      sortDate = wDates.endDate; // Strictly Saturday
-    }
-    return {
-      kw,
-      sortDate,
-      isUpah,
-    };
-  });
-
-  preparedKwitansis.sort((a, b) => {
-    if (a.sortDate !== b.sortDate) {
-      return a.sortDate.localeCompare(b.sortDate);
-    }
-    if (a.isUpah && !b.isUpah) return 1;
-    if (!a.isUpah && b.isUpah) return -1;
-    return (a.kw.noBukti || '').localeCompare(b.kw.noBukti || '');
-  });
-
-  // 5. Cash-Flow Simulation & Intelligent Quantity Splitting
-  const resultKwitansis: KwitansiDocument[] = [];
-  let runningCash = 0;
-  let currentInflowIdx = 0;
-
-  const deferredQueue: { targetDateIso: string; targetDateSlash: string; targetBulan: string; kw: KwitansiDocument }[] = [];
-
-  const applyInflowsUpTo = (targetIso: string) => {
-    while (currentInflowIdx < inflows.length && inflows[currentInflowIdx].tanggalObj <= targetIso) {
-      runningCash += inflows[currentInflowIdx].amount;
-      currentInflowIdx++;
-    }
-  };
-
-  for (let i = 0; i < preparedKwitansis.length; i++) {
-    const item = preparedKwitansis[i];
-    const { kw, sortDate, isUpah } = item;
-
-    // Apply any bank cash withdrawals that occurred on or before this transaction date
-    applyInflowsUpTo(sortDate);
-
-    // Process any deferred kwitansis that have matured by this date
-    while (deferredQueue.length > 0 && deferredQueue[0].targetDateIso <= sortDate) {
-      const def = deferredQueue.shift()!;
-      applyInflowsUpTo(def.targetDateIso);
-      runningCash -= def.kw.nominal;
-      resultKwitansis.push(def.kw);
-    }
-
-    if (isUpah) {
-      // UPAH TUKANG IS STRICTLY PAID ON TIME & WITH HIGHEST PRIORITY
-      runningCash -= kw.nominal;
-      resultKwitansis.push(kw);
-      continue;
-    }
-
-    // Solusi 3: Mode Proteksi Kunci (Locked Manual Receipt)
-    if (isReceiptLocked(kw)) {
-      runningCash -= kw.nominal;
-      resultKwitansis.push(kw);
-      continue;
-    }
-
-    // Determine upcoming reserved wage for the current week (to prevent material spending from stealing tukang wages!)
-    const currentWeekNum = getWeekForDateIso(sortDate);
-    let reservedWageThisWeek = 0;
-    if (currentWeekNum && weekDatesMap.has(currentWeekNum)) {
-      const wDates = weekDatesMap.get(currentWeekNum)!;
-      if (sortDate < wDates.endDate) {
-        reservedWageThisWeek = weekWageMap.get(currentWeekNum) || 0;
-      }
-    }
-
-    const safeSpendingLimit = Math.max(0, runningCash - reservedWageThisWeek);
-
-    if (kw.nominal <= safeSpendingLimit || (safeSpendingLimit <= 0 && currentInflowIdx >= inflows.length)) {
-      // Safe to purchase in full or no more bank inflows exist
-      runningCash -= kw.nominal;
-      resultKwitansis.push(kw);
-    } else {
-      // POTENSI SALDO MINUS TERDETEKSI SEBELUM PENARIKAN TUNAI BERIKUTNYA:
-      // Terapkan Solusi Pemecahan Satuan/Volume Realistis (Quantity Split)
-      const nextInflow = inflows.slice(currentInflowIdx).find((inf) => inf.tanggalObj > sortDate);
-
-      let targetNextIso = nextInflow ? nextInflow.tanggalObj : sortDate;
-      let targetNextSlash = nextInflow ? nextInflow.tanggal : kw.tanggal;
-      let targetNextBulan = nextInflow ? nextInflow.bulan : kw.bulan;
-
-      if (!nextInflow && currentWeekNum && weekDatesMap.has(currentWeekNum)) {
-        // Shift to next Monday after wages
-        const nextMon = getDateInWeek(weekDatesMap.get(currentWeekNum)!.startDate, 7);
-        targetNextIso = nextMon.dateIso;
-        targetNextSlash = nextMon.dateSlash;
-        targetNextBulan = nextMon.bulan;
-      }
-
-      const rawItems = (kw.items && kw.items.length > 0)
-        ? kw.items
-        : [{ namaBarang: kw.uraian, volume: 1, satuan: 'Ls', hargaSatuan: kw.nominal, jumlah: kw.nominal }];
-
-      const items1: typeof rawItems = [];
-      const items2: typeof rawItems = [];
-      let remSafeBudget = safeSpendingLimit;
-
-      for (const it of rawItems) {
-        const unitPrice = it.hargaSatuan || 1;
-        if (remSafeBudget >= unitPrice) {
-          const isIntUnit = /zak|sak|buah|bh|lembar|lbr|batang|btg|set|unit|roll|rol|kpg|keping|kotak|box/i.test(it.satuan || '');
-          let affUnits = 0;
-          if (isIntUnit) {
-            affUnits = Math.min(it.volume, Math.floor(remSafeBudget / unitPrice));
-          } else {
-            affUnits = Math.min(it.volume, Math.floor((remSafeBudget / unitPrice) * 10) / 10);
-          }
-
-          if (affUnits > 0) {
-            const jml1 = Math.round(affUnits * unitPrice);
-            items1.push({
-              ...it,
-              volume: affUnits,
-              jumlah: jml1,
-            });
-            remSafeBudget -= jml1;
-
-            const remVol = Math.round((it.volume - affUnits) * 1000) / 1000;
-            if (remVol > 0) {
-              items2.push({
-                ...it,
-                volume: remVol,
-                jumlah: Math.round(remVol * unitPrice),
-              });
-            }
-          } else {
-            items2.push(it);
-          }
-        } else {
-          items2.push(it);
-        }
-      }
-
-      if (items1.length > 0) {
-        const nom1 = items1.reduce((s, it) => s + it.jumlah, 0);
-        runningCash -= nom1;
-
-        const top1 = items1.map((i) => i.namaBarang).slice(0, 3).join(', ');
-        const isTaxable1 = nom1 >= 2000000;
-        const kw1: KwitansiDocument = {
-          ...kw,
-          id: `${kw.id}-p1`,
-          nominal: nom1,
-          items: items1,
-          uraian: `Pembayaran Lunas Biaya Pembelian Material/Bahan (${top1}), Mengacu Bobot Fisik Bangunan Revitalisasi ${school.namaSekolah}, Tahun ${effYear}, Daftar Terlampir.`,
-          isPpn: isTaxable1,
-          isPph22: isTaxable1,
-          ppnAmount: isTaxable1 ? Math.round((nom1 / 1.11) * 0.11 * 100) / 100 : 0,
-          pph22Amount: isTaxable1 ? Math.round((nom1 / 1.11) * 0.015 * 100) / 100 : 0,
-        };
-        resultKwitansis.push(kw1);
-
-        const nom2 = items2.reduce((s, it) => s + it.jumlah, 0);
-        if (nom2 > 0) {
-          const top2 = items2.map((i) => i.namaBarang).slice(0, 3).join(', ');
-          const isTaxable2 = nom2 >= 2000000;
-          const kw2: KwitansiDocument = {
-            ...kw,
-            id: `${kw.id}-p2`,
-            nominal: nom2,
-            items: items2,
-            tanggal: targetNextSlash,
-            tanggalFormatted: formatIndonesianDateLong(targetNextSlash, effYear),
-            bulan: targetNextBulan,
-            uraian: `Pembayaran Lunas Biaya Pembelian Material/Bahan (${top2}), Mengacu Bobot Fisik Bangunan Revitalisasi ${school.namaSekolah}, Tahun ${effYear}, Daftar Terlampir.`,
-            isPpn: isTaxable2,
-            isPph22: isTaxable2,
-            ppnAmount: isTaxable2 ? Math.round((nom2 / 1.11) * 0.11 * 100) / 100 : 0,
-            pph22Amount: isTaxable2 ? Math.round((nom2 / 1.11) * 0.015 * 100) / 100 : 0,
-            keteranganSpb: `Surat Perintah Bayar Pembelian Bahan Material (${formatIndonesianDateLong(targetNextSlash, effYear)})`,
-            mingguKeRef: getWeekForDateIso(targetNextIso) || kw.mingguKeRef,
-          };
-          deferredQueue.push({
-            targetDateIso: targetNextIso,
-            targetDateSlash: targetNextSlash,
-            targetBulan: targetNextBulan,
-            kw: kw2,
-          });
-        }
-      } else {
-        // Budget too small even for 1 single unit: shift entire receipt to after bank withdrawal
-        const kwDeferred: KwitansiDocument = {
-          ...kw,
-          tanggal: targetNextSlash,
-          tanggalFormatted: formatIndonesianDateLong(targetNextSlash, effYear),
-          bulan: targetNextBulan,
-          keteranganSpb: `Surat Perintah Bayar Pembelian Bahan Material (${formatIndonesianDateLong(targetNextSlash, effYear)})`,
-          mingguKeRef: getWeekForDateIso(targetNextIso) || kw.mingguKeRef,
-        };
-        deferredQueue.push({
-          targetDateIso: targetNextIso,
-          targetDateSlash: targetNextSlash,
-          targetBulan: targetNextBulan,
-          kw: kwDeferred,
-        });
-      }
-    }
-  }
-
-  // Drain remaining deferred queue
-  while (deferredQueue.length > 0) {
-    const def = deferredQueue.shift()!;
-    applyInflowsUpTo(def.targetDateIso);
-    runningCash -= def.kw.nominal;
-    resultKwitansis.push(def.kw);
-  }
-
-  // Final chronological renumbering so all kwitansis have perfect clean serial numbers
-  return renumberKwitansiChronologically(deduplicateKwitansiList(resultKwitansis), effYear);
-}
-
-/**
  * Intelligent Multi-Week Procurement & Wage Generator:
  * Solves the "mencicil nanggung" problem by allowing procurement by realistic construction batches
  * while keeping labor wages 100% weekly aligned with weekly progress inputs.
@@ -5395,17 +5043,8 @@ export function generateRealisticMultiWeekTransactions({
       generatedCount.manajemen++;
     });
 
-    const harmonizedConsolidated = harmonizeKwitansiCashFlowWithBkb({
-      kwitansiList: currentKwitansi,
-      bkbList: currentBkb,
-      wageReports: currentWageReports,
-      progressWeeks: weeksToUse,
-      school,
-      yearStr,
-    });
-
     return {
-      updatedKwitansi: renumberKwitansiChronologically(deduplicateKwitansiList(harmonizedConsolidated), yearStr),
+      updatedKwitansi: renumberKwitansiChronologically(deduplicateKwitansiList(currentKwitansi), yearStr),
       updatedWageReports: currentWageReports,
       updatedBkb: currentBkb,
       generatedCount,
@@ -6125,17 +5764,8 @@ export function generateRealisticMultiWeekTransactions({
     }
   });
 
-  const harmonizedBatch = harmonizeKwitansiCashFlowWithBkb({
-    kwitansiList: newKwitansiList,
-    bkbList: updatedBkb,
-    wageReports: updatedWageReports,
-    progressWeeks: weeksToUse,
-    school,
-    yearStr,
-  });
-
   return {
-    updatedKwitansi: renumberKwitansiChronologically(deduplicateKwitansiList(harmonizedBatch), yearStr),
+    updatedKwitansi: renumberKwitansiChronologically(deduplicateKwitansiList(newKwitansiList), yearStr),
     updatedWageReports,
     updatedBkb,
     generatedCount,
@@ -6453,18 +6083,8 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
     scaledActiveKw = activeWeeklyKw;
   }
 
-  const combinedCalibrated = [...scaledActiveKw, ...fixedPreparationKw, ...nonWeeklyPreserved];
-  const harmonizedFinalKw = harmonizeKwitansiCashFlowWithBkb({
-    kwitansiList: combinedCalibrated,
-    bkbList: (currentBkb && currentBkb.length > 0) ? currentBkb : (existingBkb || []),
-    wageReports: currentWageReports,
-    progressWeeks,
-    school,
-    yearStr: targetYear,
-  });
-
   const finalizedKwitansi = renumberKwitansiChronologically(
-    deduplicateKwitansiList(harmonizedFinalKw),
+    deduplicateKwitansiList([...scaledActiveKw, ...fixedPreparationKw, ...nonWeeklyPreserved]),
     targetYear
   );
 
