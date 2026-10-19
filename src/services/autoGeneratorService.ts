@@ -59,6 +59,62 @@ export function splitMaterialPurchases(
   ];
 }
 
+/**
+ * Memeriksa apakah suatu transaksi merupakan pembayaran pasti/khusus yang TIDAK BOLEH di-split
+ * (seperti Konsultan Perencana, Pengawas, Pengelola SPJ, Belanja SMKK, Belanja SipLah, Belanja Cetak, serta Upah Tukang).
+ * Transaksi jenis ini wajib dicatat dan dibayarkan penuh / utuh.
+ */
+export function isFixedNonSplitPayment(tx: { noBukti?: string; uraian?: string }): boolean {
+  const combined = `${tx.noBukti || ''} ${tx.uraian || ''}`.toLowerCase();
+
+  // 1. Konsultan Perencana Teknis
+  if (/perencana|kons-p|jasa.*perencanaan|honor.*perencana/i.test(combined)) return true;
+
+  // 2. Konsultan Pengawas Lapangan
+  if (/pengawas|kons-w|jasa.*pengawasan|honor.*pengawas/i.test(combined)) return true;
+
+  // 3. Pengelola SPJ / LPJ / Administrasi
+  if (/pengelola|spj|lpj|administrasi|tim\s*teknis|tim\s*pelaksana|p2sp|\badm\b/i.test(combined)) return true;
+
+  // 4. Belanja SMKK / K3 Konstruksi
+  if (/smkk|k3|keselamatan|helm|rompi|boot|p3k|rambu/i.test(combined)) return true;
+
+  // 5. Belanja SipLah (Daring)
+  if (/siplah|toko\s*daring|mitra\s*siplah|blibli|eureka|telkom/i.test(combined)) return true;
+
+  // 6. Belanja Cetak / Percetakan / Penggandaan / Banner / Prasasti / Papan Nama
+  if (/cetak|percetakan|penggandaan|fotocopy|banner|prasasti|papan\s*nama|baliho|\bctk\b/i.test(combined)) return true;
+
+  // 7. Upah Tukang / Pekerja
+  if (/upah|tukang|pekerja|mandor|borongan/i.test(combined)) return true;
+
+  return false;
+}
+
+/**
+ * Memeriksa apakah transaksi adalah murni belanja bahan material konstruksi.
+ * HANYA belanja bahan material yang diperbolehkan untuk di-split sesuai ketersediaan kas fisik.
+ */
+export function isMaterialOnlyPurchase(tx: { noBukti?: string; uraian?: string }): boolean {
+  if (isFixedNonSplitPayment(tx)) {
+    return false;
+  }
+
+  const combined = `${tx.noBukti || ''} ${tx.uraian || ''}`.toLowerCase();
+
+  // Bukti kode material standar
+  if (/kw-mat|spb-.*mat|\bmat\b|tb\.|toko\s*bangunan|toko\s*besi/i.test(combined)) {
+    return true;
+  }
+
+  // Kata kunci material konstruksi fisik
+  if (/bahan|material|semen|pasir|bata|besi|baja|wiremesh|keramik|granit|cat|kayu|paku|kawat|batu|genteng|spandek|hollow|gypsum|kalsiboard|pipa|pintu|kusen|jendela|kaca|rab|belanja\s*material/i.test(combined)) {
+    return true;
+  }
+
+  return false;
+}
+
 export function getDateInWeek(startDateIso: string, dayOffset: number) {
   const sBase = new Date(`${startDateIso}T00:00:00`);
   const clampedOffset = Math.min(6, Math.max(0, dayOffset));
@@ -3134,22 +3190,30 @@ export function calculateBkuFromTransactions(
 
       const nextBank = bankCashInflows.find((b) => b.iso > txIso);
 
-      // Smart Liquidity-Based Wage Deferred:
-      // Upah tukang TIDAK DIPERBOLEHKAN dipecah sebagian (wajib dibayar utuh).
-      // Jika kas belum cukup sebelum penarikan bank berikutnya, tanggal pembayaran upah
-      // dimundurkan secara utuh ke tanggal penarikan bank berikutnya saat dana kas cair.
-      const isWageTx = /upah|tukang|pekerja|mandor|borongan/i.test(`${tx.noBukti} ${tx.uraian}`);
-      if (isWageTx && nextBank) {
-        const deferredWageTx: BkuTransaction = {
-          ...tx,
-          tanggal: nextBank.tanggal,
-          tanggalObj: nextBank.iso,
-          bulan: nextBank.bulan,
-        };
-        insertBkuChronologically(queue, deferredWageTx);
+      // Proteksi Pembayaran Pasti (Konsultan Perencana, Pengawas, Pengelola SPJ, Belanja SMKK, Belanja SipLah, Belanja Cetak, Upah):
+      // Pembayaran pasti ini TIDAK BOLEH di-split sebagian (wajib utuh).
+      // Hanya pembelian bahan material yang diperbolehkan untuk di-split proporsional.
+      const isFixedOrNonMaterial = isFixedNonSplitPayment(tx) || !isMaterialOnlyPurchase(tx);
+
+      if (isFixedOrNonMaterial) {
+        // Jika ada penarikan kas bank berikutnya, undurkan transaksi pembayaran pasti ini secara UTUH
+        if (nextBank) {
+          const deferredTx: BkuTransaction = {
+            ...tx,
+            tanggal: nextBank.tanggal,
+            tanggalObj: nextBank.iso,
+            bulan: nextBank.bulan,
+          };
+          insertBkuChronologically(queue, deferredTx);
+          continue;
+        }
+        // Jika tidak ada penarikan bank berikutnya, tetap catat utuh tanpa split
+        cashOnHand -= expenseNominal;
+        splitBkuList.push(tx);
         continue;
       }
 
+      // HANYA UNTUK BELANJA BAHAN MATERIAL: Lakukan split jika ada sisa kas tunai > 0
       if (cashOnHand > 0) {
         const part1Nominal = cashOnHand;
         const part2Nominal = expenseNominal - part1Nominal;

@@ -9,7 +9,13 @@ import {
   StoreVendor,
 } from '../types';
 import { resolveWeekDates, parseTxDateToIso } from '../utils/monthHelper';
-import { getAutoHealedKwitansiItems, getHarmonizedKwitansiNoBukti, getHarmonizedKwitansiUraian } from './autoGeneratorService';
+import {
+  getAutoHealedKwitansiItems,
+  getHarmonizedKwitansiNoBukti,
+  getHarmonizedKwitansiUraian,
+  isFixedNonSplitPayment,
+  isMaterialOnlyPurchase,
+} from './autoGeneratorService';
 
 /**
  * Service Integrasi Penuh BKU (Buku Kas Umum), BKT (Buku Kas Tunai), dan BKB (Buku Kas Bank).
@@ -357,23 +363,33 @@ export function calculateIntegratedBkt(
     const currIso = curr.tanggalObj || parseTxDateToIso(curr.tanggal);
     const nextWithdrawal = bankWithdrawals.find((w) => w.iso > currIso);
 
-    // Smart Liquidity-Based Wage Deferred:
-    // Upah tukang TIDAK BOLEH dipecah receh/sebagian (wajib dibayar utuh).
-    // Jika kas belum cukup sebelum penarikan bank berikutnya, tanggal pembayaran upah
-    // otomatis dimundurkan secara utuh ke tanggal penarikan bank berikutnya saat dana kas cair.
-    const isWageTx = /upah|tukang|pekerja|mandor|borongan/i.test(`${curr.noBukti} ${curr.uraian}`);
-    if (isWageTx && nextWithdrawal) {
-      const deferredWageTx: BktTransaction = {
+    // Proteksi Pembayaran Pasti (Konsultan Perencana, Pengawas, Pengelola SPJ, Belanja SMKK, Belanja SipLah, Belanja Cetak, Upah):
+    // Pembayaran pasti ini TIDAK BOLEH dipecah/di-split sebagian (wajib utuh).
+    // Hanya pembelian bahan material yang diperbolehkan untuk di-split proporsional.
+    const isFixedOrNonMaterial = isFixedNonSplitPayment(curr) || !isMaterialOnlyPurchase(curr);
+
+    if (isFixedOrNonMaterial) {
+      // Jika ada penarikan kas bank berikutnya, mundurkan transaksi pembayaran pasti ini secara UTUH
+      if (nextWithdrawal) {
+        const deferredTx: BktTransaction = {
+          ...curr,
+          tanggal: nextWithdrawal.tanggal,
+          tanggalObj: nextWithdrawal.iso,
+          bulan: nextWithdrawal.bulan,
+        };
+        insertChronologically(queue, deferredTx);
+        continue;
+      }
+      // Jika tidak ada penarikan bank lagi, catat utuh tanpa split
+      runningCash -= expenseNominal;
+      finalBktItems.push({
         ...curr,
-        tanggal: nextWithdrawal.tanggal,
-        tanggalObj: nextWithdrawal.iso,
-        bulan: nextWithdrawal.bulan,
-      };
-      insertChronologically(queue, deferredWageTx);
+        saldo: runningCash,
+      });
       continue;
     }
 
-    // Kasus 1: Masih ada sisa kas tunai > 0 (bisa dibayar sebagian untuk material/non-upah)
+    // Kasus 1: Masih ada sisa kas tunai > 0 (HANYA UNTUK BELANJA BAHAN MATERIAL)
     if (runningCash > 0) {
       const part1Nominal = runningCash;
       const part2Nominal = expenseNominal - part1Nominal;
@@ -544,7 +560,8 @@ export function findMatchedKwitansiForTransaction(
 
   // 1. Cocokkan ID referensi langsung jika tersedia
   if (tx.kwitansiIdRef) {
-    const byRef = kwitansiList.find((k) => k.id === tx.kwitansiIdRef || k.id === tx.kwitansiIdRef.replace(/-p[12]$/, ''));
+    const refId = tx.kwitansiIdRef;
+    const byRef = kwitansiList.find((k) => k.id === refId || k.id === refId.replace(/-p[12]$/, ''));
     if (byRef) return wrapResult(byRef);
   }
 
@@ -621,7 +638,7 @@ export function findMatchedKwitansiForTransaction(
 
   // 5. Cocokkan berdasarkan No Bukti (dengan normalisasi karakter dan angka)
   if (tx.noBukti && tx.noBukti !== '-' && tx.noBukti.trim()) {
-    const cleanTxBukti = baseTxBukti.toLowerCase();
+    const cleanTxBukti = cleanTxBuktiNorm.toLowerCase();
     const isTxMat = /kwt[\/\-_]?mat|kw[\/\-_]?mat|\bmat\b|mat[\/\-_]|material/i.test(cleanTxBukti);
     const isTxKons = /kons|perencana|pengawas/i.test(cleanTxBukti);
     const isTxUpah = /uk\b|upah/i.test(cleanTxBukti);
