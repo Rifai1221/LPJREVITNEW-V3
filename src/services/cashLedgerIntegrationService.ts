@@ -287,153 +287,104 @@ export function calculateIntegratedBkt(
   //   otomatis dipecah (sebagian dibayar sesuai saldo kas tersisa, dan sisanya dibayarkan setelah uang kas ditarik dari bank).
   // - Saldo BKT dijamin 100% tidak pernah minus (running >= 0).
   const finalBktRows: BktTransaction[] = [];
-  let running = 0;
 
-  // Find all future bank cash inflows
-  const futureInflows = bktItems.filter((it) => (it.pemasukan || 0) > 0);
-  const deferredBktQueue: { targetIso: string; targetDate: string; targetBulan: string; item: BktTransaction }[] = [];
+  // Separate inflows (bank withdrawals) and raw outflows (expenses)
+  const inflowItems: BktTransaction[] = bktItems.filter((it) => (it.pemasukan || 0) > 0);
+  const rawOutflowItems: BktTransaction[] = bktItems.filter((it) => (it.pengeluaran || 0) > 0);
 
-  for (let i = 0; i < bktItems.length; i++) {
-    const item = bktItems[i];
+  const processedOutflows: BktTransaction[] = [];
+  let simRunning = 0;
+
+  // Sort inflowItems chronologically for simulation lookup
+  const sortedInflows = [...inflowItems].sort((a, b) => {
+    const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
+    const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
+    return isoA.localeCompare(isoB);
+  });
+
+  rawOutflowItems.forEach((item) => {
     const itemIso = item.tanggalObj || parseTxDateToIso(item.tanggal);
-
-    // Process any deferred items that have reached their target date
-    while (deferredBktQueue.length > 0 && deferredBktQueue[0].targetIso <= itemIso) {
-      const def = deferredBktQueue.shift()!;
-      running = running + (def.item.pemasukan || 0) - (def.item.pengeluaran || 0);
-      finalBktRows.push({
-        ...def.item,
-        saldo: running,
-      });
-    }
-
-    if ((item.pemasukan || 0) > 0) {
-      running += item.pemasukan;
-      finalBktRows.push({
-        ...item,
-        saldo: running,
-      });
-      continue;
-    }
-
     const isUpah = /uk[\/\-_]|upah tukang|upah borongan|daftar hadir/i.test(`${item.noBukti || ''} ${item.uraian}`);
 
-    if (isUpah) {
-      if (item.pengeluaran <= running || futureInflows.length === 0) {
-        running = running - item.pengeluaran;
-        finalBktRows.push({
+    if (item.pengeluaran <= simRunning || sortedInflows.length === 0) {
+      simRunning -= item.pengeluaran;
+      processedOutflows.push({ ...item, saldo: 0 });
+    } else if (isUpah || simRunning === 0) {
+      const targetDraw = sortedInflows.find((inf) => (inf.tanggalObj || parseTxDateToIso(inf.tanggal)) > itemIso) || sortedInflows[sortedInflows.length - 1];
+      if (targetDraw) {
+        const targetIso = targetDraw.tanggalObj || parseTxDateToIso(targetDraw.tanggal);
+        processedOutflows.push({
           ...item,
-          saldo: running,
+          tanggal: targetDraw.tanggal,
+          tanggalObj: targetIso,
+          bulan: targetDraw.bulan,
+          saldo: 0,
         });
       } else {
-        const nextBankDraw = futureInflows.find((inf) => (inf.tanggalObj || parseTxDateToIso(inf.tanggal)) > itemIso);
-
-        if (nextBankDraw) {
-          const nextDrawIso = nextBankDraw.tanggalObj || parseTxDateToIso(nextBankDraw.tanggal);
-          const nextDrawDate = nextBankDraw.tanggal;
-          const nextDrawBulan = nextBankDraw.bulan;
-
-          deferredBktQueue.push({
-            targetIso: nextDrawIso,
-            targetDate: nextDrawDate,
-            targetBulan: nextDrawBulan,
-            item: {
-              ...item,
-              tanggal: nextDrawDate,
-              tanggalObj: nextDrawIso,
-              bulan: nextDrawBulan,
-              saldo: 0,
-            },
-          });
-        } else {
-          running = running - item.pengeluaran;
-          finalBktRows.push({
-            ...item,
-            saldo: running,
-          });
-        }
+        simRunning -= item.pengeluaran;
+        processedOutflows.push({ ...item, saldo: 0 });
       }
-      continue;
-    }
-
-    // Material / Operational Expense: Check if it exceeds available running cash
-    if (item.pengeluaran <= running || futureInflows.length === 0) {
-      running = running - item.pengeluaran;
-      finalBktRows.push({
-        ...item,
-        saldo: running,
-      });
     } else {
-      // Find the next bank withdrawal
-      const nextBankDraw = futureInflows.find((inf) => (inf.tanggalObj || parseTxDateToIso(inf.tanggal)) > itemIso);
+      const part1 = simRunning;
+      const part2 = item.pengeluaran - part1;
+      simRunning = 0;
 
-      if (nextBankDraw) {
-        const nextDrawIso = nextBankDraw.tanggalObj || parseTxDateToIso(nextBankDraw.tanggal);
-        const nextDrawDate = nextBankDraw.tanggal;
-        const nextDrawBulan = nextBankDraw.bulan;
+      processedOutflows.push({
+        ...item,
+        id: `${item.id}-p1`,
+        pengeluaran: part1,
+        saldo: 0,
+      });
 
-        if (running > 0) {
-          const part1Expense = running;
-          const part2Expense = item.pengeluaran - part1Expense;
-          running = 0;
-
-          // Row 1 (sebelum penarikan saldo, menyerap kas tersisa)
-          finalBktRows.push({
-            ...item,
-            id: `${item.id}-p1`,
-            pengeluaran: part1Expense,
-            saldo: 0,
-          });
-
-          // Row 2 (setelah penarikan saldo dari bank)
-          deferredBktQueue.push({
-            targetIso: nextDrawIso,
-            targetDate: nextDrawDate,
-            targetBulan: nextDrawBulan,
-            item: {
-              ...item,
-              id: `${item.id}-p2`,
-              tanggal: nextDrawDate,
-              tanggalObj: nextDrawIso,
-              bulan: nextDrawBulan,
-              pengeluaran: part2Expense,
-              saldo: 0,
-            },
-          });
-        } else {
-          // Saldo kas 0: seluruh transaksi belanja digeser tepat setelah penarikan saldo bank
-          deferredBktQueue.push({
-            targetIso: nextDrawIso,
-            targetDate: nextDrawDate,
-            targetBulan: nextDrawBulan,
-            item: {
-              ...item,
-              tanggal: nextDrawDate,
-              tanggalObj: nextDrawIso,
-              bulan: nextDrawBulan,
-              saldo: 0,
-            },
-          });
-        }
-      } else {
-        running = running - item.pengeluaran;
-        finalBktRows.push({
+      const targetDraw = sortedInflows.find((inf) => (inf.tanggalObj || parseTxDateToIso(inf.tanggal)) > itemIso) || sortedInflows[sortedInflows.length - 1];
+      if (targetDraw) {
+        const targetIso = targetDraw.tanggalObj || parseTxDateToIso(targetDraw.tanggal);
+        processedOutflows.push({
           ...item,
-          saldo: running,
+          id: `${item.id}-p2`,
+          tanggal: targetDraw.tanggal,
+          tanggalObj: targetIso,
+          bulan: targetDraw.bulan,
+          pengeluaran: part2,
+          saldo: 0,
+        });
+      } else {
+        simRunning -= part2;
+        processedOutflows.push({
+          ...item,
+          id: `${item.id}-p2`,
+          pengeluaran: part2,
+          saldo: 0,
         });
       }
     }
-  }
+  });
 
-  // Drain remaining deferred queue
-  while (deferredBktQueue.length > 0) {
-    const def = deferredBktQueue.shift()!;
-    running = running + (def.item.pemasukan || 0) - (def.item.pengeluaran || 0);
+  // Combine all rows (inflows + processed outflows)
+  const allRows: BktTransaction[] = [...inflowItems, ...processedOutflows];
+
+  // Sort chronologically: date ascending, with inflows first on same date
+  allRows.sort((a, b) => {
+    const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
+    const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
+    if (isoA !== isoB) {
+      return isoA.localeCompare(isoB);
+    }
+    // Inflows (pemasukan > 0) come before outflows (pengeluaran > 0)
+    if ((a.pemasukan || 0) > 0 && (b.pemasukan || 0) === 0) return -1;
+    if ((b.pemasukan || 0) > 0 && (a.pemasukan || 0) === 0) return 1;
+    return 0;
+  });
+
+  // Final cumulative running balance pass
+  let running = 0;
+  allRows.forEach((row) => {
+    running = running + (row.pemasukan || 0) - (row.pengeluaran || 0);
     finalBktRows.push({
-      ...def.item,
+      ...row,
       saldo: running,
     });
-  }
+  });
 
   return finalBktRows;
 }
