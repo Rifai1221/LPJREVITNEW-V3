@@ -32,7 +32,6 @@ import {
   isReceiptLocked,
   balanceFinalMaterialKwitansiToBudget,
   calculateCumulativeRealizedProgress,
-  alignKwitansiToOptionB,
 } from './services/autoGeneratorService';
 import {
   generateStandardBkbRecords,
@@ -201,32 +200,8 @@ export default function App() {
         const loaded = await loadSchoolTenantAppState(activeT);
         if (!isMounted) return;
 
-        // Auto-align kwitansi to Option B on initial load if consultant fees exceed 1.75% target
-        let finalState = loaded.state;
-        if (finalState.kwitansiList && finalState.kwitansiList.length > 0) {
-          const totalAng = finalState.school?.totalAnggaran || 552457000;
-          const targetPerencana = Math.round(totalAng * 0.0175);
-          const currentPerencana = finalState.kwitansiList
-            .filter((k) => {
-              const c = `${k.noBukti || ''} ${k.uraian || ''} ${k.penerimaPekerjaan || ''} ${k.namaToko || ''}`.toLowerCase();
-              return ((k.tipe === 'KONSULTAN' || /kons-p/i.test(c)) && /perencana|perencanaan/i.test(c)) || (/kons-p/i.test(c) && !/pengawas/i.test(c));
-            })
-            .reduce((s, k) => s + (k.nominal || 0), 0);
-
-          if (currentPerencana > targetPerencana + 1000) {
-            const { alignedKwitansi } = alignKwitansiToOptionB({
-              kwitansiList: finalState.kwitansiList,
-              totalAnggaran: totalAng,
-              progressWeeks: finalState.progressWeeks,
-            });
-            finalState = {
-              ...finalState,
-              kwitansiList: alignedKwitansi,
-            };
-          }
-        }
-
-        setAppState(finalState);
+        // Load 100% raw saved state on initial load/refresh without forced auto-overwrite
+        setAppState(loaded.state);
         isLoadedRef.current = true;
         isDirtyRef.current = false; // Initial load is clean, never dirty!
         setIsInitialLoading(false);
@@ -1417,58 +1392,11 @@ export default function App() {
     }
   };
 
-  const handleAlignToOptionB = () => {
-    const paguTotal = appState.school?.totalAnggaran || 552457000;
-    const {
-      alignedKwitansi,
-      adjustedMaterial,
-    } = alignKwitansiToOptionB({
-      kwitansiList: appState.kwitansiList,
-      totalAnggaran: paguTotal,
-      progressWeeks: appState.progressWeeks,
-    });
-
-    isDirtyRef.current = true;
-    setAppState((prev) => ({
-      ...prev,
-      kwitansiList: alignedKwitansi,
-    }));
-    setSwitchNotification(
-      `⚡ Opsi B Berhasil Diterapkan: Seluruh persentase kwitansi manajemen diselaraskan persis dengan Bobot Laporan Mingguan (Perencana 1,75%, Pengawas 2,16%, Pengelola 2,54%). Kelebihan anggaran dialihkan ke Bahan Material (+Rp ${adjustedMaterial.toLocaleString('id-ID')}). Total belanja tepat 100% klop dengan Pagu (Rp ${paguTotal.toLocaleString('id-ID')})!`
-    );
-    setTimeout(() => setSwitchNotification(null), 6000);
-    try {
-      confetti({ particleCount: 75, spread: 85, origin: { y: 0.6 } });
-    } catch {}
-  };
-
-  // Auto-Balance Option A & Auto-Align Option B:
-  // 1. Selaraskan persentase kwitansi manajemen mengikuti pagu bobot 1,75%, 2,16%, 2,54% (Opsi B)
-  // 2. Selaraskan belanja material terakhir agar saldo akhir BKU & BKT tepat Rp 0 (Nihil)
+  // Auto-Balance Option A: Jika progres fisik sudah 100% dan akumulasi belanja melebihi pagu bantuan,
+  // otomatis selaraskan belanja material terakhir agar saldo akhir BKU & BKT tepat Rp 0 (Nihil)
   useEffect(() => {
     if (!isLoadedRef.current || !appState.kwitansiList || appState.kwitansiList.length === 0) return;
     const paguTotal = appState.school?.totalAnggaran || 552457000;
-    const isPerKw = (k: any) => {
-      const c = `${k.noBukti || ''} ${k.uraian || ''} ${k.penerimaPekerjaan || ''} ${k.namaToko || ''}`.toLowerCase();
-      return ((k.tipe === 'KONSULTAN' || /kons-p/i.test(c)) && /perencana|perencanaan/i.test(c)) || (/kons-p/i.test(c) && !/pengawas/i.test(c));
-    };
-    const totalP = appState.kwitansiList.filter(isPerKw).reduce((s, k) => s + (k.nominal || 0), 0);
-    const targetP = Math.round(paguTotal * 0.0175);
-
-    if (totalP > targetP + 50000) {
-      const { alignedKwitansi } = alignKwitansiToOptionB({
-        kwitansiList: appState.kwitansiList,
-        totalAnggaran: paguTotal,
-        progressWeeks: appState.progressWeeks,
-      });
-      isDirtyRef.current = true;
-      setAppState((prev) => ({
-        ...prev,
-        kwitansiList: alignedKwitansi,
-      }));
-      return;
-    }
-
     const currentTotalNominal = appState.kwitansiList.reduce((s, k) => s + (k.nominal || 0), 0);
     const cumBobot = calculateCumulativeRealizedProgress(appState.progressWeeks || [], bkuWeekLimit);
 
@@ -2155,7 +2083,6 @@ Lanjutkan pengosongan data transaksi?`)
             isSyncing={isSyncing}
             lastSyncedText={lastSyncedText}
             onOpenGoogleSheetsSync={() => setIsGoogleSheetsModalOpen(true)}
-            onAlignOptionB={handleAlignToOptionB}
           />
         )}
 

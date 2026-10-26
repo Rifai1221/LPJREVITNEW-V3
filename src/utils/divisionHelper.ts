@@ -386,11 +386,12 @@ export function buildDivisionsFromRealSchoolData(realData: RealSchoolData): Divi
 
     if (isCombinedMan) {
       hasExplicitManagement = true;
-      // Split into 3 management fees: Perencana, Pengawas, Pengelolaan according to Option B (1.75%, 2.16%, 2.54%)
+      // Split into 3 management fees: Perencana, Pengawas, Pengelolaan
       const totalManBobot = div.bobotPersen || (div.subTotal / totalRab) * 100;
-      const ratio = totalManBobot > 0 ? totalManBobot / 6.45 : 1;
-      const bPerencana = Math.round(1.750 * ratio * 1000) / 1000;
-      const bPengawas = Math.round(2.160 * ratio * 1000) / 1000;
+      // Proportions based on official school template (2.23 / 2.74 / 3.23 = 8.20)
+      const ratio = totalManBobot > 0 ? totalManBobot / 8.20 : 1;
+      const bPerencana = Math.round(2.230 * ratio * 1000) / 1000;
+      const bPengawas = Math.round(2.740 * ratio * 1000) / 1000;
       const bPengelolaan = Math.round((totalManBobot - bPerencana - bPengawas) * 1000) / 1000;
 
       result.push({
@@ -490,7 +491,7 @@ export function buildDivisionsFromRealSchoolData(realData: RealSchoolData): Divi
       kode: 'I',
       kategori: 'MANAJEMEN',
       uraian: 'BIAYA PERENCANAAN',
-      bobotTotal: 1.75,
+      bobotTotal: 2.23,
       prestasiMingguLalu: 0,
       prestasiMingguIni: 0,
       prestasiSdMingguIni: 0,
@@ -501,7 +502,7 @@ export function buildDivisionsFromRealSchoolData(realData: RealSchoolData): Divi
       kode: 'II',
       kategori: 'MANAJEMEN',
       uraian: 'BIAYA PENGAWASAN',
-      bobotTotal: 2.16,
+      bobotTotal: 2.74,
       prestasiMingguLalu: 0,
       prestasiMingguIni: 0,
       prestasiSdMingguIni: 0,
@@ -512,7 +513,7 @@ export function buildDivisionsFromRealSchoolData(realData: RealSchoolData): Divi
       kode: 'III',
       kategori: 'MANAJEMEN',
       uraian: 'BIAYA PENGELOLAAN',
-      bobotTotal: 2.54,
+      bobotTotal: 3.23,
       prestasiMingguLalu: 0,
       prestasiMingguIni: 0,
       prestasiSdMingguIni: 0,
