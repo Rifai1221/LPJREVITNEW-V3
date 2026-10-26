@@ -6677,9 +6677,10 @@ export function alignKwitansiToOptionB({
   const divW = firstWeekDivs.find((d) => d.id === 'div-m2' || /pengawas/i.test(d.uraian));
   const divA = firstWeekDivs.find((d) => d.id === 'div-m3' || /pengelolaan|administrasi/i.test(d.uraian));
 
-  const targetP = divP?.bobotTotal && divP.bobotTotal > 0 ? divP.bobotTotal : 1.75;
-  const targetW = divW?.bobotTotal && divW.bobotTotal > 0 ? divW.bobotTotal : 2.16;
-  const targetA = divA?.bobotTotal && divA.bobotTotal > 0 ? divA.bobotTotal : 2.54;
+  // Target persentase Opsi B: Perencana 1,75%, Pengawas 2,16%, Pengelola 2,54% (persis seperti di Laporan Mingguan & Bobot)
+  const targetP = 1.75;
+  const targetW = 2.16;
+  const targetA = 2.54;
 
   const targetBudgetP = Math.round((totalAnggaran * targetP) / 100);
   const targetBudgetW = Math.round((totalAnggaran * targetW) / 100);

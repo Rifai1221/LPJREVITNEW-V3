@@ -386,12 +386,11 @@ export function buildDivisionsFromRealSchoolData(realData: RealSchoolData): Divi
 
     if (isCombinedMan) {
       hasExplicitManagement = true;
-      // Split into 3 management fees: Perencana, Pengawas, Pengelolaan
+      // Split into 3 management fees: Perencana, Pengawas, Pengelolaan according to Option B (1.75%, 2.16%, 2.54%)
       const totalManBobot = div.bobotPersen || (div.subTotal / totalRab) * 100;
-      // Proportions based on official school template (2.23 / 2.74 / 3.23 = 8.20)
-      const ratio = totalManBobot > 0 ? totalManBobot / 8.20 : 1;
-      const bPerencana = Math.round(2.230 * ratio * 1000) / 1000;
-      const bPengawas = Math.round(2.740 * ratio * 1000) / 1000;
+      const ratio = totalManBobot > 0 ? totalManBobot / 6.45 : 1;
+      const bPerencana = Math.round(1.750 * ratio * 1000) / 1000;
+      const bPengawas = Math.round(2.160 * ratio * 1000) / 1000;
       const bPengelolaan = Math.round((totalManBobot - bPerencana - bPengawas) * 1000) / 1000;
 
       result.push({

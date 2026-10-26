@@ -201,8 +201,32 @@ export default function App() {
         const loaded = await loadSchoolTenantAppState(activeT);
         if (!isMounted) return;
 
-        // Load 100% raw saved state on initial load/refresh without forced auto-overwrite
-        setAppState(loaded.state);
+        // Auto-align kwitansi to Option B on initial load if consultant fees exceed 1.75% target
+        let finalState = loaded.state;
+        if (finalState.kwitansiList && finalState.kwitansiList.length > 0) {
+          const totalAng = finalState.school?.totalAnggaran || 552457000;
+          const targetPerencana = Math.round(totalAng * 0.0175);
+          const currentPerencana = finalState.kwitansiList
+            .filter((k) => {
+              const c = `${k.noBukti || ''} ${k.uraian || ''} ${k.penerimaPekerjaan || ''} ${k.namaToko || ''}`.toLowerCase();
+              return ((k.tipe === 'KONSULTAN' || /kons-p/i.test(c)) && /perencana|perencanaan/i.test(c)) || (/kons-p/i.test(c) && !/pengawas/i.test(c));
+            })
+            .reduce((s, k) => s + (k.nominal || 0), 0);
+
+          if (currentPerencana > targetPerencana + 1000) {
+            const { alignedKwitansi } = alignKwitansiToOptionB({
+              kwitansiList: finalState.kwitansiList,
+              totalAnggaran: totalAng,
+              progressWeeks: finalState.progressWeeks,
+            });
+            finalState = {
+              ...finalState,
+              kwitansiList: alignedKwitansi,
+            };
+          }
+        }
+
+        setAppState(finalState);
         isLoadedRef.current = true;
         isDirtyRef.current = false; // Initial load is clean, never dirty!
         setIsInitialLoading(false);
