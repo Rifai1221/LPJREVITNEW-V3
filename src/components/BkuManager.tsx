@@ -65,6 +65,7 @@ interface BkuManagerProps {
   onOpenPrintKwitansi?: (kwId: string, mode: 'KWITANSI' | 'FAKTUR' | 'SPB' | 'ALL') => void;
   onCalibrateToRealProgress?: () => void;
   onCleanDuplicates?: () => void;
+  onAutoBalanceKwitansi?: () => void;
   bkuWeekLimit?: number;
   onChangeBkuWeekLimit?: (limit: number) => void;
   bktList?: BktTransaction[];
@@ -90,6 +91,7 @@ export const BkuManager: React.FC<BkuManagerProps> = ({
   onOpenPrintKwitansi,
   onCalibrateToRealProgress,
   onCleanDuplicates,
+  onAutoBalanceKwitansi,
   onClearAllBku,
   onBulkDeleteBku,
   bkuWeekLimit = 2,
@@ -1385,6 +1387,19 @@ export const BkuManager: React.FC<BkuManagerProps> = ({
               <span>* Data Bank diambil dari Buku Bank (BKB)</span>
               <span>* Data Tunai diambil dari Buku Tunai (BKT)</span>
             </div>
+
+            {saldoAkhir < 0 && (onAutoBalanceKwitansi || onCleanDuplicates) && (
+              <div className="mt-3 pt-2.5 border-t border-rose-200">
+                <button
+                  type="button"
+                  onClick={onAutoBalanceKwitansi || onCleanDuplicates}
+                  className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-gradient-to-r from-amber-600 to-emerald-600 hover:from-amber-700 hover:to-emerald-700 text-white font-bold rounded-lg shadow-xs hover:shadow transition cursor-pointer text-xs text-center"
+                >
+                  <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                  <span>Terapkan Opsi A: Sesuaikan Belanja Material Terakhir (Saldo Rp 0)</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>

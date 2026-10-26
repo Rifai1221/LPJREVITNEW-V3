@@ -30,6 +30,8 @@ import {
   renumberKwitansiChronologically,
   consolidateAndStandardizeReceiptItems,
   isReceiptLocked,
+  balanceFinalMaterialKwitansiToBudget,
+  calculateCumulativeRealizedProgress,
 } from './services/autoGeneratorService';
 import {
   generateStandardBkbRecords,
@@ -1360,13 +1362,67 @@ export default function App() {
     }
   };
 
+  const handleAutoBalanceOptionA = () => {
+    const paguTotal = appState.school?.totalAnggaran || 552457000;
+    const currentTotalNominal = appState.kwitansiList.reduce((s, k) => s + (k.nominal || 0), 0);
+    const cumBobot = calculateCumulativeRealizedProgress(appState.progressWeeks || [], bkuWeekLimit);
+    const targetRatio = cumBobot >= 99.9 ? 1.0 : cumBobot / 100;
+    const { balancedKwitansi, adjustedAmount } = balanceFinalMaterialKwitansiToBudget(
+      appState.kwitansiList,
+      paguTotal,
+      targetRatio
+    );
+
+    if (adjustedAmount > 0) {
+      isDirtyRef.current = true;
+      setAppState((prev) => ({
+        ...prev,
+        kwitansiList: balancedKwitansi,
+      }));
+      setSwitchNotification(
+        `⚡ Opsi A Berhasil Diterapkan: Belanja material terakhir disesuaikan sebesar Rp ${adjustedAmount.toLocaleString('id-ID')}. Total pengeluaran kini pas dengan Pagu (Rp ${paguTotal.toLocaleString('id-ID')}), Saldo Kas BKU & BKT Rp 0 (Nihil / Pas)!`
+      );
+      setTimeout(() => setSwitchNotification(null), 6000);
+      try {
+        confetti({ particleCount: 75, spread: 85, origin: { y: 0.6 } });
+      } catch {}
+    } else {
+      setSwitchNotification(`✅ Belanja material sudah pas dengan pagu anggaran (tidak ada selisih kas).`);
+      setTimeout(() => setSwitchNotification(null), 4000);
+    }
+  };
+
+  // Auto-Balance Option A: Jika progres fisik sudah 100% dan akumulasi belanja melebihi pagu bantuan,
+  // otomatis selaraskan belanja material terakhir agar saldo akhir BKU & BKT tepat Rp 0 (Nihil)
+  useEffect(() => {
+    if (!isLoadedRef.current || !appState.kwitansiList || appState.kwitansiList.length === 0) return;
+    const paguTotal = appState.school?.totalAnggaran || 552457000;
+    const currentTotalNominal = appState.kwitansiList.reduce((s, k) => s + (k.nominal || 0), 0);
+    const cumBobot = calculateCumulativeRealizedProgress(appState.progressWeeks || [], bkuWeekLimit);
+
+    if (cumBobot >= 99.9 && currentTotalNominal > paguTotal) {
+      const { balancedKwitansi, adjustedAmount } = balanceFinalMaterialKwitansiToBudget(
+        appState.kwitansiList,
+        paguTotal,
+        1.0
+      );
+      if (adjustedAmount > 0) {
+        isDirtyRef.current = true;
+        setAppState((prev) => ({
+          ...prev,
+          kwitansiList: balancedKwitansi,
+        }));
+      }
+    }
+  }, [appState.kwitansiList, appState.school, appState.progressWeeks, bkuWeekLimit]);
+
   const handleCleanDuplicates = () => {
     isDirtyRef.current = true;
     const paguTotal = appState.school?.totalAnggaran || 552457000;
     const currentTotalNominal = appState.kwitansiList.reduce((s, k) => s + (k.nominal || 0), 0);
 
-    // If total kwitansi exceeds pagu or has duplicate inflation, run full calibration & deduplication
-    if (currentTotalNominal > paguTotal * 1.02) {
+    // If total kwitansi exceeds pagu, run full calibration & deduplication
+    if (currentTotalNominal > paguTotal) {
       const calRes = calibrateAllTransactionsToCurrentProgress({
         school: appState.school,
         kwitansiList: appState.kwitansiList,
@@ -2116,6 +2172,7 @@ Lanjutkan pengosongan data transaksi?`)
             }
             onCalibrateToRealProgress={handleCalibrateToRealProgress}
             onCleanDuplicates={handleCleanDuplicates}
+            onAutoBalanceKwitansi={handleAutoBalanceOptionA}
             onClearAllBku={handleClearAllBku}
             onBulkDeleteBku={handleBulkDeleteBku}
             bkuWeekLimit={bkuWeekLimit}
@@ -2202,6 +2259,7 @@ Lanjutkan pengosongan data transaksi?`)
             onFullResyncToBudget={handleFullResyncToBudget}
             onCalibrateToRealProgress={handleCalibrateToRealProgress}
             onCleanDuplicates={handleCleanDuplicates}
+            onAutoBalanceKwitansi={handleAutoBalanceOptionA}
           />
         )}
 

@@ -3415,6 +3415,26 @@ export function calculateBkuFromTransactions(
   // (01/KW-MAT/2026, 02/KW-MAT/2026, 03/KW-MAT/2026, ...) tanpa akhiran -B dan tanpa tanda khusus.
   processedBkuList = renumberMaterialTransactionsChronologically(processedBkuList, yearStr);
 
+  // Opsi A Safeguard: Jika bobot mencapai 100% atau periode akhir, selaraskan pengeluaran belanja material terakhir
+  // agar total pengeluaran BKU tepat sama dengan total penerimaan (saldo kas BKU & BKT pas Rp 0 / Nihil).
+  const totalBkuPenerimaan = processedBkuList.filter((tx) => tx.jenis === 'PENERIMAAN').reduce((s, tx) => s + (tx.penerimaan || 0), 0);
+  const totalBkuPengeluaran = processedBkuList.filter((tx) => tx.jenis === 'PENGELUARAN').reduce((s, tx) => s + (tx.pengeluaran || 0), 0);
+  const bkuDiff = totalBkuPengeluaran - totalBkuPenerimaan;
+
+  if (totalBkuPenerimaan > 0 && bkuDiff > 0 && (effLimit >= 14 || calculateCumulativeRealizedProgress(progressWeeks, effLimit) >= 99.9)) {
+    for (let i = processedBkuList.length - 1; i >= 0; i--) {
+      const tx = processedBkuList[i];
+      if (tx.jenis === 'PENGELUARAN' && !tx.isLocked && !isFixedNonSplitPayment(tx) && isMaterialOnlyPurchase(tx)) {
+        const deduct = Math.min(tx.pengeluaran, bkuDiff);
+        processedBkuList[i] = {
+          ...tx,
+          pengeluaran: tx.pengeluaran - deduct,
+        };
+        break;
+      }
+    }
+  }
+
   // Compute running balance & guarantee 100% unique React IDs
   let currentSaldo = 0;
   const seenBkuTxIds = new Set<string>();
@@ -6211,6 +6231,94 @@ export function calculateCumulativeRealizedProgress(
   return Math.round(finalBobot * 100) / 100;
 }
 
+/**
+ * Opsi A: Menyelaraskan kwitansi belanja bahan material terakhir terhadap pagu anggaran
+ * agar total pengeluaran kwitansi tepat sama dengan target anggaran (saldo BKU/BKT Rp 0 / Nihil).
+ * Hanya memotong belanja bahan material (tidak memotong upah tukang, perencana, pengawas, pengelola, SMKK, cetak, siplah).
+ */
+export function balanceFinalMaterialKwitansiToBudget(
+  kwitansiList: KwitansiDocument[],
+  paguTotal: number,
+  targetRatio: number = 1.0
+): { balancedKwitansi: KwitansiDocument[]; adjustedAmount: number } {
+  if (!kwitansiList || kwitansiList.length === 0 || !paguTotal || paguTotal <= 0) {
+    return { balancedKwitansi: kwitansiList, adjustedAmount: 0 };
+  }
+
+  const targetBudget = Math.round(paguTotal * targetRatio);
+  const currentTotal = kwitansiList.reduce((s, k) => s + (k.nominal || 0), 0);
+  const diff = currentTotal - targetBudget;
+
+  if (diff <= 0) {
+    return { balancedKwitansi: kwitansiList, adjustedAmount: 0 };
+  }
+
+  // Cari seluruh kwitansi belanja bahan material yang bukan manual/locked dan bukan pembayaran pasti
+  const candidateIndices: number[] = [];
+  kwitansiList.forEach((k, idx) => {
+    const isManual = isReceiptLocked(k);
+    const isFixed = isFixedNonSplitPayment(k);
+    if (k.tipe === 'MATERIAL' && !isFixed && !isManual && (k.nominal || 0) > 0) {
+      candidateIndices.push(idx);
+    }
+  });
+
+  if (candidateIndices.length === 0) {
+    return { balancedKwitansi: kwitansiList, adjustedAmount: 0 };
+  }
+
+  const resultList = [...kwitansiList];
+  let remainingDiff = diff;
+
+  // Mundur dari kwitansi material paling akhir (minggu terakhir)
+  for (let i = candidateIndices.length - 1; i >= 0 && remainingDiff > 0; i--) {
+    const kwIdx = candidateIndices[i];
+    const kw = resultList[kwIdx];
+    const deduct = Math.min(kw.nominal, remainingDiff);
+    const newNominal = Math.max(0, kw.nominal - deduct);
+
+    const items = [...(kw.items || [])];
+    if (items.length > 0) {
+      const sortedItemIndices = items
+        .map((item, idx) => ({ idx, jumlah: item.jumlah || 0 }))
+        .sort((a, b) => b.jumlah - a.jumlah);
+
+      let itemDeductRemaining = deduct;
+      for (const itemMeta of sortedItemIndices) {
+        if (itemDeductRemaining <= 0) break;
+        const curItem = items[itemMeta.idx];
+        const curDeduct = Math.min(curItem.jumlah || 0, itemDeductRemaining);
+        const newJml = Math.max(0, (curItem.jumlah || 0) - curDeduct);
+        const newVol = curItem.hargaSatuan > 0 ? Math.round((newJml / curItem.hargaSatuan) * 100) / 100 : curItem.volume;
+        items[itemMeta.idx] = {
+          ...curItem,
+          jumlah: newJml,
+          volume: newVol > 0 ? newVol : 1,
+        };
+        itemDeductRemaining -= curDeduct;
+      }
+    }
+
+    const isPpn = Boolean(kw.isPpn);
+    const isPph22 = Boolean(kw.isPph22);
+    const ppnAmount = isPpn ? Math.round((newNominal * 11) / 111) : 0;
+    const pph22Amount = isPph22 ? Math.round((newNominal * 1.5) / 100) : 0;
+
+    resultList[kwIdx] = {
+      ...kw,
+      nominal: newNominal,
+      items,
+      ppnAmount,
+      pph22Amount,
+    };
+
+    remainingDiff -= deduct;
+  }
+
+  const adjustedAmount = diff - remainingDiff;
+  return { balancedKwitansi: resultList, adjustedAmount };
+}
+
 export function calibrateAllTransactionsToCurrentProgress(params: {
   school: SchoolMasterData;
   kwitansiList: KwitansiDocument[];
@@ -6479,10 +6587,23 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
     targetYear
   );
 
-  const totalExpenditure = finalizedKwitansi.reduce((s, k) => s + (k.nominal || 0), 0);
+  // Opsi A: Sesuaikan belanja bahan material terakhir agar pengeluaran pas dengan pagu anggaran (saldo BKU/BKT Rp 0)
+  let balancedKwitansi = finalizedKwitansi;
+  const targetBudget = Math.round((paguTotal * Math.min(100, cumulativeBobot)) / 100);
+  const currentFinalExp = finalizedKwitansi.reduce((s, k) => s + (k.nominal || 0), 0);
+  if (currentFinalExp > targetBudget) {
+    const balRes = balanceFinalMaterialKwitansiToBudget(
+      finalizedKwitansi,
+      paguTotal,
+      cumulativeBobot >= 99.9 ? 1.0 : cumulativeBobot / 100
+    );
+    balancedKwitansi = balRes.balancedKwitansi;
+  }
+
+  const totalExpenditure = balancedKwitansi.reduce((s, k) => s + (k.nominal || 0), 0);
 
   return {
-    calibratedKwitansi: finalizedKwitansi,
+    calibratedKwitansi: balancedKwitansi,
     calibratedWageReports: currentWageReports.filter((w) => activeWeekNums.has(w.mingguKe)),
     calibratedBkb: (currentBkb && currentBkb.length > 0) ? currentBkb : (existingBkb || []),
     cumulativeBobot: Math.round(cumulativeBobot * 100) / 100,

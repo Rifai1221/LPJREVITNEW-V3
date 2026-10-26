@@ -58,6 +58,7 @@ interface KwitansiManagerProps {
   onFullResyncToBudget?: () => void;
   onCalibrateToRealProgress?: () => void;
   onCleanDuplicates?: () => void;
+  onAutoBalanceKwitansi?: () => void;
 }
 
 export const KwitansiManager: React.FC<KwitansiManagerProps> = ({
@@ -74,6 +75,7 @@ export const KwitansiManager: React.FC<KwitansiManagerProps> = ({
   onFullResyncToBudget,
   onCalibrateToRealProgress,
   onCleanDuplicates,
+  onAutoBalanceKwitansi,
 }) => {
   const [activeType, setActiveType] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
@@ -131,9 +133,14 @@ export const KwitansiManager: React.FC<KwitansiManagerProps> = ({
   }, [kwitansiList]);
 
   const paguAnggaran = school?.totalAnggaran || 552457000;
-  const isOverBudget = totalKwitansiNominal > paguAnggaran * 1.02; // > 2% over
+  const isOverBudget = totalKwitansiNominal > paguAnggaran;
 
   const handleCleanDuplicates = () => {
+    if (onAutoBalanceKwitansi && isOverBudget) {
+      onAutoBalanceKwitansi();
+      return;
+    }
+
     if (onCleanDuplicates) {
       onCleanDuplicates();
       return;
@@ -315,23 +322,24 @@ export const KwitansiManager: React.FC<KwitansiManagerProps> = ({
         <div className="bg-gradient-to-r from-rose-50 to-amber-50 border-2 border-rose-300 text-rose-950 p-4 rounded-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-3 shadow-xs animate-in fade-in">
           <div className="flex items-start gap-3">
             <div className="p-2 bg-rose-100 rounded-xl text-rose-700 shrink-0 mt-0.5 md:mt-0">
-              <Trash2 className="w-5 h-5" />
+              <Sparkles className="w-5 h-5" />
             </div>
             <div>
               <h4 className="font-extrabold text-sm text-rose-900">
-                ⚠️ Terdeteksi Akumulasi Belanja Ganda (Total Kwitansi: {formatRupiah(totalKwitansiNominal)})
+                ⚠️ Akumulasi Belanja Melebihi Pagu Anggaran (Total Kwitansi: {formatRupiah(totalKwitansiNominal)})
               </h4>
               <p className="text-xs text-rose-700 mt-0.5">
-                Total belanja melebihi pagu anggaran ({formatRupiah(paguAnggaran)}). Klik tombol bersihkan untuk merapikan kwitansi ganda dan memulihkan saldo BKU ke kondisi seimbang.
+                Total belanja tercatat melampaui pagu anggaran ({formatRupiah(paguAnggaran)}) sebesar {formatRupiah(totalKwitansiNominal - paguAnggaran)}. Klik tombol di samping untuk menyelaraskan belanja material terakhir (Opsi A) agar saldo BKU & BKT pas Rp 0.
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={handleCleanDuplicates}
-            className="shrink-0 bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold px-4 py-2.5 rounded-xl shadow-md transition cursor-pointer"
+            className="shrink-0 bg-gradient-to-r from-amber-600 to-emerald-600 hover:from-amber-700 hover:to-emerald-700 text-white text-xs font-extrabold px-4 py-2.5 rounded-xl shadow-md transition cursor-pointer flex items-center gap-1.5"
           >
-            🧹 Bersihkan Sekarang
+            <Sparkles className="w-4 h-4" />
+            <span>Terapkan Opsi A (Saldo Kas Rp 0)</span>
           </button>
         </div>
       )}
