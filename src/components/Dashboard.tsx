@@ -62,7 +62,6 @@ interface DashboardProps {
   isSyncing?: boolean;
   lastSyncedText?: string;
   onOpenGoogleSheetsSync?: () => void;
-  onAlignOptionB?: () => void;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
@@ -82,7 +81,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
   isSyncing = false,
   lastSyncedText = 'Tersimpan',
   onOpenGoogleSheetsSync,
-  onAlignOptionB,
 }) => {
   // Active week filtering for Dashboard realisasi calculation (Anti-accumulated phantom receipts)
   const activeWeeks = (progressWeeks || []).filter(
@@ -332,8 +330,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const pagu = recapMode === 'ADDENDUM' ? realisasi : paguMurni;
     const sisa = recapMode === 'ADDENDUM' ? 0 : (paguMurni > 0 ? paguMurni - realisasi : 0);
     
-    // Persentase terhadap total keseluruhan anggaran proyek (Rp 552.457.000)
+    // Persentase terhadap total keseluruhan anggaran proyek (Rp 552.457.000) berdasarkan realisasi
     const persenTotalProyek = totalAnggaran > 0 ? (realisasi / totalAnggaran) * 100 : 0;
+
+    // Persentase Alokasi Pagu terhadap total keseluruhan anggaran proyek (mengacu ke Pagu Murni/baseline)
+    const persenPaguProyek = totalAnggaran > 0 ? ((paguMurni > 0 ? paguMurni : pagu) / totalAnggaran) * 100 : 0;
     
     // Persentase penyerapan masing-masing pos pagu
     const persenPenyerapan = recapMode === 'ADDENDUM'
@@ -347,6 +348,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
       realisasi,
       sisa,
       persenTotalProyek,
+      persenPaguProyek,
       persenPenyerapan,
       jumlahTransaksi: matchingKwitansi.length,
     };
@@ -724,18 +726,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <ArrowLeftRight className="w-4 h-4 text-blue-200" />
                 <span>RPD Induk (Deviasi Riil)</span>
               </button>
-
-              {onAlignOptionB && (
-                <button
-                  type="button"
-                  onClick={onAlignOptionB}
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-md transition cursor-pointer"
-                  title="Selaraskan persentase kwitansi Konsultan Perencana (1,75%), Pengawas (2,16%), dan Pengelola SPJ (2,54%) persis dengan Bobot Laporan Mingguan"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-slate-950" />
-                  <span>Selaraskan Opsi B (1,75% | 2,16% | 2,54%)</span>
-                </button>
-              )}
             </div>
           </div>
 
@@ -921,10 +911,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       )}
                     </td>
 
-                    {/* % dari Pagu Total Proyek */}
+                    {/* % dari Pagu Proyek */}
                     <td className="py-3 px-3 text-center font-mono font-bold text-blue-700">
                       <span className="inline-block px-2 py-1 rounded bg-blue-50 text-blue-800 text-xs">
-                        {formatNumber(item.persenTotalProyek, 2)}%
+                        {formatNumber(item.persenPaguProyek, 2)}%
                       </span>
                     </td>
 
