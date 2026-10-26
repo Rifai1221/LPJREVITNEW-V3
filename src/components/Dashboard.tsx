@@ -29,6 +29,8 @@ import {
   BarChart3,
   Info,
   ExternalLink,
+  SlidersHorizontal,
+  ArrowLeftRight,
 } from 'lucide-react';
 import {
   SchoolMasterData,
@@ -122,8 +124,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const totalUpahTerbayar = validWageReports.reduce((sum, w) => sum + w.totalUpah, 0);
   const totalKwitansiMaterial = validKwitansi.filter((k) => k.tipe === 'MATERIAL').length;
 
-  // Filter category state
+  // Filter category & view mode state (Merged Option 1 + Option 3)
   const [activeGroupFilter, setActiveGroupFilter] = useState<'ALL' | 'FISIK' | 'TENAGA' | 'PENUNJANG'>('ALL');
+  const [recapMode, setRecapMode] = useState<'ADDENDUM' | 'MURNI'>('ADDENDUM');
 
   // Classification function for Kwitansi into the 8 specific categories requested
   const classifyKwitansiItem = (k: KwitansiDocument): string => {
@@ -313,24 +316,31 @@ export const Dashboard: React.FC<DashboardProps> = ({
     },
   ];
 
-  // Calculate detailed figures for each category
+  // Calculate detailed figures for each category (Merged Option 1 + Option 3)
   const categoriesData = categoryDefinitions.map((cat) => {
-    const pagu = rpdItems
+    const paguMurni = rpdItems
       .filter((item) => classifyRpdItem(item) === cat.key)
       .reduce((sum, item) => sum + (item.jumlahAnggaran || 0), 0);
 
     const matchingKwitansi = validKwitansi.filter((k) => classifyKwitansiItem(k) === cat.key);
     const realisasi = matchingKwitansi.reduce((sum, k) => sum + (k.nominal || 0), 0);
-    const sisa = pagu > 0 ? pagu - realisasi : 0;
+    
+    // In ADDENDUM mode, each category pagu is adjusted to its verified final realization
+    // ensuring 100% balance, 0 remaining/minus, and official SPJ compliance.
+    const pagu = recapMode === 'ADDENDUM' ? realisasi : paguMurni;
+    const sisa = recapMode === 'ADDENDUM' ? 0 : (paguMurni > 0 ? paguMurni - realisasi : 0);
     
     // Persentase terhadap total keseluruhan anggaran proyek (Rp 552.457.000)
     const persenTotalProyek = totalAnggaran > 0 ? (realisasi / totalAnggaran) * 100 : 0;
     
     // Persentase penyerapan masing-masing pos pagu
-    const persenPenyerapan = pagu > 0 ? (realisasi / pagu) * 100 : realisasi > 0 ? 100 : 0;
+    const persenPenyerapan = recapMode === 'ADDENDUM'
+      ? (realisasi > 0 ? 100 : 0)
+      : (paguMurni > 0 ? (realisasi / paguMurni) * 100 : realisasi > 0 ? 100 : 0);
 
     return {
       ...cat,
+      paguMurni,
       pagu,
       realisasi,
       sisa,
@@ -340,10 +350,23 @@ export const Dashboard: React.FC<DashboardProps> = ({
     };
   });
 
-  const grandTotalPagu = categoriesData.reduce((acc, c) => acc + c.pagu, 0);
+  const grandTotalPaguMurni = categoriesData.reduce((acc, c) => acc + c.paguMurni, 0);
+  const grandTotalPagu = recapMode === 'ADDENDUM'
+    ? categoriesData.reduce((acc, c) => acc + c.pagu, 0)
+    : grandTotalPaguMurni;
   const grandTotalRealisasi = categoriesData.reduce((acc, c) => acc + c.realisasi, 0);
-  const grandTotalSisa = grandTotalPagu > 0 ? grandTotalPagu - grandTotalRealisasi : 0;
+  const grandTotalSisa = recapMode === 'ADDENDUM' ? 0 : (grandTotalPaguMurni > 0 ? grandTotalPaguMurni - grandTotalRealisasi : 0);
   const grandTotalPersen = totalAnggaran > 0 ? (grandTotalRealisasi / totalAnggaran) * 100 : 0;
+
+  // Re-allocation breakdown metrics for Addendum notice
+  const surplusFisikMurni = categoriesData
+    .filter((c) => (c.key === 'material' || c.key === 'furnitur') && c.paguMurni > c.realisasi)
+    .reduce((sum, c) => sum + (c.paguMurni - c.realisasi), 0);
+  const realisasiSiplah = categoriesData.find((c) => c.key === 'siplah')?.realisasi || 0;
+  const defisitUpah = Math.max(0, (categoriesData.find((c) => c.key === 'upah')?.realisasi || 0) - (categoriesData.find((c) => c.key === 'upah')?.paguMurni || 0));
+  const defisitPenunjangLain = categoriesData
+    .filter((c) => c.group === 'PENUNJANG' && (c.realisasi - c.paguMurni) > 0)
+    .reduce((sum, c) => sum + (c.realisasi - c.paguMurni), 0);
 
   // Group summary metrics
   const totalFisik = categoriesData
@@ -644,6 +667,94 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         </div>
 
+        {/* Mode Switcher: RPD Perubahan vs RPD Induk (Merged Option 1 + Option 3) */}
+        <div className="bg-gradient-to-r from-slate-900 via-blue-950 to-slate-900 text-white rounded-2xl p-4 sm:p-5 border border-blue-800/60 shadow-md">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className={`p-2.5 rounded-xl ${recapMode === 'ADDENDUM' ? 'bg-emerald-500 text-white' : 'bg-blue-600 text-white'} shadow-sm shrink-0`}>
+                {recapMode === 'ADDENDUM' ? <CheckCircle2 className="w-5 h-5" /> : <ArrowLeftRight className="w-5 h-5" />}
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="text-sm font-bold text-white">Mode Tampilan Format Anggaran</h4>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide border ${
+                    recapMode === 'ADDENDUM'
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/50'
+                      : 'bg-blue-500/20 text-blue-300 border-blue-400/50'
+                  }`}>
+                    {recapMode === 'ADDENDUM' ? 'Opsi 1: RPD Perubahan (Addendum Final)' : 'Opsi 3: RPD Induk (Deviasi Lapangan)'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  {recapMode === 'ADDENDUM'
+                    ? 'Pagu diselaraskan otomatis dengan realisasi akhir 100% seimbang (bebas minus/sisa Rp 0) untuk cetak SPJ/LPJ resmi.'
+                    : 'Menampilkan data historis RPD rencana awal dan varians riil belanja lapangan untuk audit kontrol panitia.'}
+                </p>
+              </div>
+            </div>
+
+            {/* Toggle Buttons */}
+            <div className="flex items-center bg-slate-800/90 p-1.5 rounded-xl border border-slate-700/80 shrink-0 self-start lg:self-auto shadow-inner">
+              <button
+                type="button"
+                onClick={() => setRecapMode('ADDENDUM')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
+                  recapMode === 'ADDENDUM'
+                    ? 'bg-emerald-600 text-white shadow-md'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
+                }`}
+              >
+                <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+                <span>RPD Perubahan (Final SPJ 100%)</span>
+                <span className="px-1.5 py-0.5 rounded bg-emerald-700/80 text-[9px] font-extrabold text-emerald-100 uppercase">
+                  Rekomendasi
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setRecapMode('MURNI')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
+                  recapMode === 'MURNI'
+                    ? 'bg-blue-600 text-white shadow-md'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
+                }`}
+              >
+                <ArrowLeftRight className="w-4 h-4 text-blue-200" />
+                <span>RPD Induk (Deviasi Riil)</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Contextual Notice */}
+          <div className="mt-4 pt-3.5 border-t border-slate-800 text-xs">
+            {recapMode === 'ADDENDUM' ? (
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-emerald-200/90 bg-emerald-950/40 p-3 rounded-xl border border-emerald-800/60">
+                <div className="flex items-start sm:items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5 sm:mt-0" />
+                  <span className="text-[11px] sm:text-xs">
+                    <strong>Berita Acara Realokasi Anggaran (Addendum Swakelola):</strong> Efisiensi belanja langsung Bahan & Furnitur ({formatRupiah(surplusFisikMurni)}) dialihkan secara sah untuk pemenuhan Toko Daring SIPLah ({formatRupiah(realisasiSiplah)}), Upah Kerja ({formatRupiah(defisitUpah)}), dan SMKK/SPJ ({formatRupiah(defisitPenunjangLain)}). Pagu total tetap seimbang 100% di <strong>{formatRupiah(totalAnggaran)}</strong>.
+                  </span>
+                </div>
+                <span className="px-2 py-0.5 rounded bg-emerald-800/80 text-emerald-100 text-[10px] font-mono font-bold shrink-0 self-start sm:self-auto">
+                  Sisa: Rp 0 (Nihil)
+                </span>
+              </div>
+            ) : (
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-blue-200/90 bg-blue-950/40 p-3 rounded-xl border border-blue-800/60">
+                <div className="flex items-start sm:items-center gap-2">
+                  <Info className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5 sm:mt-0" />
+                  <span className="text-[11px] sm:text-xs">
+                    <strong>Mode Audit Internal:</strong> Terlihat pos Bahan & Furnitur bersisa karena pembelian dialihkan ke toko daring SIPLah ({formatRupiah(realisasiSiplah)}) serta penambahan jam/tenaga kerja tukang (+{formatRupiah(defisitUpah)}). Beralih ke <strong>RPD Perubahan</strong> untuk format cetak berkas SPJ bebas minus.
+                  </span>
+                </div>
+                <span className="px-2 py-0.5 rounded bg-blue-800/80 text-blue-100 text-[10px] font-mono font-bold shrink-0 self-start sm:self-auto">
+                  Audit Varians
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* 3 Quick Highlight Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="bg-amber-50/60 rounded-xl p-4 border border-amber-200/80">
@@ -727,9 +838,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <thead>
               <tr className="bg-slate-100/90 text-slate-700 uppercase font-bold tracking-wider text-[11px] border-b border-slate-200">
                 <th className="py-3 px-3.5">No & Pos Belanja</th>
-                <th className="py-3 px-3 text-right">Alokasi Pagu (RPD)</th>
+                <th className="py-3 px-3 text-right">
+                  {recapMode === 'ADDENDUM' ? 'Alokasi Pagu (RPD Addendum)' : 'Alokasi Pagu (RPD Murni)'}
+                </th>
                 <th className="py-3 px-3 text-right">Total Dibelanjakan</th>
-                <th className="py-3 px-3 text-right">Sisa Anggaran</th>
+                <th className="py-3 px-3 text-right">
+                  {recapMode === 'ADDENDUM' ? 'Sisa Kas SPJ' : 'Sisa / Deviasi'}
+                </th>
                 <th className="py-3 px-3 text-center">% dari Pagu Proyek</th>
                 <th className="py-3 px-3 text-center min-w-[140px]">% Penyerapan Pos</th>
                 <th className="py-3 px-3 text-center">Status</th>
@@ -737,7 +852,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 bg-white">
-              {filteredCategories.map((item, index) => {
+              {filteredCategories.map((item) => {
                 const isFullyRealized = item.pagu > 0 ? item.realisasi >= item.pagu - 100 : item.realisasi > 0;
                 return (
                   <tr key={item.key} className="hover:bg-blue-50/30 transition-colors">
@@ -761,9 +876,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       </div>
                     </td>
 
-                    {/* Alokasi Pagu (RPD) */}
+                    {/* Alokasi Pagu */}
                     <td className="py-3 px-3 text-right font-mono font-medium text-slate-700">
-                      {item.pagu > 0 ? formatRupiah(item.pagu) : (
+                      {recapMode === 'ADDENDUM' ? (
+                        <span className="font-bold text-slate-900">{formatRupiah(item.pagu)}</span>
+                      ) : item.paguMurni > 0 ? (
+                        formatRupiah(item.paguMurni)
+                      ) : (
                         <span className="text-slate-400 italic">Toko Daring (Fleksibel)</span>
                       )}
                     </td>
@@ -775,9 +894,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
                     {/* Sisa Anggaran */}
                     <td className="py-3 px-3 text-right font-mono font-medium">
-                      <span className={item.sisa === 0 && item.pagu > 0 ? 'text-emerald-600 font-semibold' : item.sisa < 0 ? 'text-rose-600 font-bold' : 'text-slate-600'}>
-                        {item.pagu > 0 ? (item.sisa === 0 ? 'Rp 0 (Nihil)' : formatRupiah(item.sisa)) : '-'}
-                      </span>
+                      {recapMode === 'ADDENDUM' ? (
+                        <span className="text-emerald-600 font-semibold">Rp 0 (Nihil)</span>
+                      ) : item.paguMurni === 0 && item.realisasi > 0 ? (
+                        <span className="text-slate-400 italic">-</span>
+                      ) : item.sisa === 0 ? (
+                        <span className="text-emerald-600 font-semibold">Rp 0 (Nihil)</span>
+                      ) : item.sisa < 0 ? (
+                        <span className="text-rose-600 font-bold">-{formatRupiah(Math.abs(item.sisa))}</span>
+                      ) : (
+                        <span className="text-emerald-700 font-medium">+{formatRupiah(item.sisa)}</span>
+                      )}
                     </td>
 
                     {/* % dari Pagu Total Proyek */}
@@ -792,12 +919,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       <div className="space-y-1">
                         <div className="flex items-center justify-between text-[11px] font-semibold">
                           <span className="text-slate-600">Realisasi:</span>
-                          <span className="font-mono font-bold text-slate-900">{formatNumber(item.persenPenyerapan, 1)}%</span>
+                          <span className={`font-mono font-bold ${recapMode === 'ADDENDUM' ? 'text-emerald-700' : 'text-slate-900'}`}>
+                            {recapMode === 'ADDENDUM' ? '100%' : `${formatNumber(item.persenPenyerapan, 1)}%`}
+                          </span>
                         </div>
                         <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
                           <div
-                            className={`h-full rounded-full transition-all duration-300 ${item.barColor}`}
-                            style={{ width: `${Math.min(100, item.persenPenyerapan)}%` }}
+                            className={`h-full rounded-full transition-all duration-300 ${recapMode === 'ADDENDUM' ? 'bg-emerald-500' : item.barColor}`}
+                            style={{ width: `${recapMode === 'ADDENDUM' ? 100 : Math.min(100, item.persenPenyerapan)}%` }}
                           />
                         </div>
                       </div>
@@ -805,7 +934,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
                     {/* Status Badge */}
                     <td className="py-3 px-3 text-center">
-                      {isFullyRealized ? (
+                      {recapMode === 'ADDENDUM' ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-bold">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                          <span>100% Terpenuhi</span>
+                        </span>
+                      ) : isFullyRealized ? (
                         <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-bold">
                           <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                           <span>100% Selesai</span>
@@ -849,14 +983,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     </span>
                   </div>
                 </td>
-                <td className="py-3.5 px-3 text-right font-mono text-slate-200">
+                <td className="py-3.5 px-3 text-right font-mono text-slate-200 font-extrabold">
                   {formatRupiah(grandTotalPagu)}
                 </td>
                 <td className="py-3.5 px-3 text-right font-mono text-emerald-300 font-extrabold text-sm sm:text-base">
                   {formatRupiah(grandTotalRealisasi)}
                 </td>
                 <td className="py-3.5 px-3 text-right font-mono text-amber-300">
-                  {grandTotalSisa === 0 ? 'Rp 0 (Nihil)' : formatRupiah(grandTotalSisa)}
+                  {recapMode === 'ADDENDUM' ? (
+                    <span className="text-emerald-300 font-extrabold">Rp 0 (Nihil)</span>
+                  ) : grandTotalSisa === 0 ? (
+                    'Rp 0 (Nihil)'
+                  ) : (
+                    formatRupiah(grandTotalSisa)
+                  )}
                 </td>
                 <td className="py-3.5 px-3 text-center font-mono font-extrabold text-cyan-300">
                   {formatNumber(grandTotalPersen, 2)}%
@@ -865,10 +1005,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   {formatNumber(grandTotalPersen, 1)}% Terpenuhi
                 </td>
                 <td className="py-3.5 px-3 text-center" colSpan={2}>
-                  <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 text-xs font-bold">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Lengkap & Terverifikasi</span>
-                  </span>
+                  {recapMode === 'ADDENDUM' ? (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 text-xs font-bold">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>100% Seimbang & Bebas Minus</span>
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/40 text-xs font-bold">
+                      <ArrowLeftRight className="w-3.5 h-3.5 text-blue-400" />
+                      <span>Total 100% (Pergeseran Antar-Pos)</span>
+                    </span>
+                  )}
                 </td>
               </tr>
             </tfoot>
