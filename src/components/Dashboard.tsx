@@ -62,6 +62,7 @@ interface DashboardProps {
   isSyncing?: boolean;
   lastSyncedText?: string;
   onOpenGoogleSheetsSync?: () => void;
+  onAlignOptionB?: () => void;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
@@ -81,6 +82,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   isSyncing = false,
   lastSyncedText = 'Tersimpan',
   onOpenGoogleSheetsSync,
+  onAlignOptionB,
 }) => {
   // Active week filtering for Dashboard realisasi calculation (Anti-accumulated phantom receipts)
   const activeWeeks = (progressWeeks || []).filter(
@@ -722,6 +724,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <ArrowLeftRight className="w-4 h-4 text-blue-200" />
                 <span>RPD Induk (Deviasi Riil)</span>
               </button>
+
+              {onAlignOptionB && (
+                <button
+                  type="button"
+                  onClick={onAlignOptionB}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-md transition cursor-pointer"
+                  title="Selaraskan persentase kwitansi Konsultan Perencana (1,75%), Pengawas (2,16%), dan Pengelola SPJ (2,54%) persis dengan Bobot Laporan Mingguan"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-slate-950" />
+                  <span>Selaraskan Opsi B (1,75% | 2,16% | 2,54%)</span>
+                </button>
+              )}
             </div>
           </div>
 

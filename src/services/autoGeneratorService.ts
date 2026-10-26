@@ -6638,3 +6638,187 @@ export function rebalanceAndResyncAllKwitansiToBudget(params: {
     rebalancedBkb: result.calibratedBkb,
   };
 }
+
+/**
+ * Opsi B: Menyelaraskan seluruh realisasi persentase konsultan perencana (1,75%),
+ * konsultan pengawas (2,16%), dan pengelola SPJ (2,54%) agar sama persis dengan
+ * bobot rencana awal di Laporan Mingguan & Bobot.
+ * Kelebihan belanja dialihkan ke belanja bahan material pokok, sehingga total belanja
+ * tetap tepat 100% klop dengan Pagu (Rp 552.457.000) dan saldo kas BKU & BKT Nihil (Rp 0).
+ */
+export function alignKwitansiToOptionB({
+  kwitansiList,
+  totalAnggaran,
+  progressWeeks,
+}: {
+  kwitansiList: KwitansiDocument[];
+  totalAnggaran: number;
+  progressWeeks?: ProjectProgressWeek[];
+}): {
+  alignedKwitansi: KwitansiDocument[];
+  adjustedPerencana: number;
+  adjustedPengawas: number;
+  adjustedPengelola: number;
+  adjustedMaterial: number;
+} {
+  if (!kwitansiList || kwitansiList.length === 0 || !totalAnggaran || totalAnggaran <= 0) {
+    return {
+      alignedKwitansi: kwitansiList || [],
+      adjustedPerencana: 0,
+      adjustedPengawas: 0,
+      adjustedPengelola: 0,
+      adjustedMaterial: 0,
+    };
+  }
+
+  // Dinamis ambil bobot dari Laporan Mingguan jika tersedia, default: 1.75%, 2.16%, 2.54%
+  const firstWeekDivs = progressWeeks?.[0]?.divisions || [];
+  const divP = firstWeekDivs.find((d) => d.id === 'div-m1' || /perencana/i.test(d.uraian));
+  const divW = firstWeekDivs.find((d) => d.id === 'div-m2' || /pengawas/i.test(d.uraian));
+  const divA = firstWeekDivs.find((d) => d.id === 'div-m3' || /pengelolaan|administrasi/i.test(d.uraian));
+
+  const targetP = divP?.bobotTotal && divP.bobotTotal > 0 ? divP.bobotTotal : 1.75;
+  const targetW = divW?.bobotTotal && divW.bobotTotal > 0 ? divW.bobotTotal : 2.16;
+  const targetA = divA?.bobotTotal && divA.bobotTotal > 0 ? divA.bobotTotal : 2.54;
+
+  const targetBudgetP = Math.round((totalAnggaran * targetP) / 100);
+  const targetBudgetW = Math.round((totalAnggaran * targetW) / 100);
+  const targetBudgetA = Math.round((totalAnggaran * targetA) / 100);
+
+  const isPerencana = (k: KwitansiDocument) => {
+    const c = `${k.noBukti || ''} ${k.uraian || ''} ${k.penerimaPekerjaan || ''} ${k.namaToko || ''}`.toLowerCase();
+    return ((k.tipe === 'KONSULTAN' || /kons-p/i.test(c)) && /perencana|perencanaan/i.test(c)) || (/kons-p/i.test(c) && !/pengawas/i.test(c));
+  };
+
+  const isPengawas = (k: KwitansiDocument) => {
+    const c = `${k.noBukti || ''} ${k.uraian || ''} ${k.penerimaPekerjaan || ''} ${k.namaToko || ''}`.toLowerCase();
+    return ((k.tipe === 'KONSULTAN' || /kons-w/i.test(c)) && /pengawas|pengawasan/i.test(c)) || (/kons-w/i.test(c) && !/perencana/i.test(c));
+  };
+
+  const isPengelola = (k: KwitansiDocument) => {
+    const c = `${k.noBukti || ''} ${k.uraian || ''} ${k.penerimaPekerjaan || ''} ${k.namaToko || ''}`.toLowerCase();
+    return (
+      (/pengelola|spj|administrasi|lpj|tim\s*teknis|tim\s*pelaksana|p2sp|cetak|percetakan|papan\s*nama|banner|penggandaan|\bctk\b/i.test(c) ||
+        k.tipe === 'OPERASIONAL' ||
+        k.tipe === 'CETAK') &&
+      !isPerencana(k) &&
+      !isPengawas(k)
+    );
+  };
+
+  const isMaterial = (k: KwitansiDocument) => {
+    if (isPerencana(k) || isPengawas(k) || isPengelola(k)) return false;
+    const c = `${k.noBukti || ''} ${k.uraian || ''}`.toLowerCase();
+    if (k.tipe === 'UPAH' || /^uk\/|upah/i.test(c)) return false;
+    if (k.tipe === 'SMKK' || /smkk|k3/i.test(c)) return false;
+    if ((k.tipe as string) === 'SIPLAH' || /siplah/i.test(c)) return false;
+    if (k.tipe === 'PINTU_JENDELA' || k.tipe === 'PERABOT' || /^fur\//i.test(c) || /pintu|jendela|kusen|mebel|perabot/i.test(c)) return false;
+    return true;
+  };
+
+  const resultList = kwitansiList.map((k) => ({
+    ...k,
+    items: (k.items || []).map((it) => ({ ...it })),
+  }));
+
+  // Helper scale group
+  const scaleGroup = (
+    predicate: (k: KwitansiDocument) => boolean,
+    targetBudget: number
+  ): number => {
+    const matchingIndices: number[] = [];
+    resultList.forEach((k, idx) => {
+      if (predicate(k)) matchingIndices.push(idx);
+    });
+
+    if (matchingIndices.length === 0) return 0;
+
+    const currentSum = matchingIndices.reduce((sum, idx) => sum + (resultList[idx].nominal || 0), 0);
+    if (currentSum <= 0) return 0;
+
+    let runningAllocated = 0;
+    matchingIndices.forEach((kwIdx, i) => {
+      const kw = resultList[kwIdx];
+      let newNom: number;
+      if (i === matchingIndices.length - 1) {
+        newNom = Math.max(0, targetBudget - runningAllocated);
+      } else {
+        newNom = Math.round(targetBudget * ((kw.nominal || 0) / currentSum));
+        runningAllocated += newNom;
+      }
+
+      const items = (kw.items || []).map((it, itIdx) => {
+        if (itIdx === 0) {
+          return { ...it, hargaSatuan: newNom, jumlah: newNom };
+        }
+        return { ...it, hargaSatuan: 0, jumlah: 0 };
+      });
+
+      resultList[kwIdx] = {
+        ...kw,
+        nominal: newNom,
+        items,
+      };
+    });
+
+    return currentSum - targetBudget;
+  };
+
+  const diffP = scaleGroup(isPerencana, targetBudgetP);
+  const diffW = scaleGroup(isPengawas, targetBudgetW);
+  const diffA = scaleGroup(isPengelola, targetBudgetA);
+
+  const totalFreedUp = diffP + diffW + diffA;
+
+  // Add freed up budget into candidate material receipt
+  let adjustedMaterial = 0;
+  if (totalFreedUp > 0) {
+    const matIndices: number[] = [];
+    resultList.forEach((k, idx) => {
+      if (isMaterial(k) && !isReceiptLocked(k)) {
+        matIndices.push(idx);
+      }
+    });
+
+    if (matIndices.length > 0) {
+      const targetMatIdx = matIndices[matIndices.length - 1];
+      const targetKw = resultList[targetMatIdx];
+      const newNom = (targetKw.nominal || 0) + totalFreedUp;
+
+      const items = (targetKw.items || []).map((it, itIdx) => {
+        if (itIdx === 0) {
+          const newJml = (it.jumlah || 0) + totalFreedUp;
+          const newVol = it.hargaSatuan > 0 ? Math.round((newJml / it.hargaSatuan) * 100) / 100 : it.volume;
+          return {
+            ...it,
+            jumlah: newJml,
+            volume: newVol > 0 ? newVol : 1,
+          };
+        }
+        return { ...it };
+      });
+
+      const isPpn = Boolean(targetKw.isPpn);
+      const isPph22 = Boolean(targetKw.isPph22);
+      const ppnAmount = isPpn ? Math.round((newNom * 11) / 111) : 0;
+      const pph22Amount = isPph22 ? Math.round((newNom * 1.5) / 100) : 0;
+
+      resultList[targetMatIdx] = {
+        ...targetKw,
+        nominal: newNom,
+        items,
+        ppnAmount,
+        pph22Amount,
+      };
+      adjustedMaterial = totalFreedUp;
+    }
+  }
+
+  return {
+    alignedKwitansi: resultList,
+    adjustedPerencana: diffP,
+    adjustedPengawas: diffW,
+    adjustedPengelola: diffA,
+    adjustedMaterial,
+  };
+}
