@@ -541,7 +541,7 @@ export const BkuManager: React.FC<BkuManagerProps> = ({
       return;
     }
 
-    if (formData.tanggal < minStartDateInfo.startDate) {
+    if (!editingTx && formData.tanggal < minStartDateInfo.startDate) {
       setFormError(
         `Tanggal transaksi (${formData.tanggal}) tidak boleh kurang dari tanggal mulai Laporan Mingguan & Bobot (${minStartDateInfo.startDateFormatted}).`
       );
@@ -1443,7 +1443,7 @@ export const BkuManager: React.FC<BkuManagerProps> = ({
                   <label className="block font-semibold text-slate-700 mb-1">Tanggal Transaksi</label>
                   <input
                     type="date"
-                    min={minStartDateInfo.startDate}
+                    min={editingTx ? `${schoolYear}-01-01` : minStartDateInfo.startDate}
                     value={formData.tanggal}
                     onChange={(e) => setFormData({ ...formData, tanggal: e.target.value })}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 bg-slate-50 focus:bg-white font-mono"

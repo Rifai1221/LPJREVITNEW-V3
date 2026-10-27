@@ -753,26 +753,52 @@ export default function App() {
 
   const handleUpdateBku = (updatedTx: BkuTransaction) => {
     isDirtyRef.current = true;
-    
-    // Define Immutable Anchor ID: Strip prefixes and ensure uniform bku- format
-    const baseId = updatedTx.id.replace(/^(bkt-|bku-|kw-|bku-kw-)+/g, '');
-    const anchorId = `bku-${baseId}`;
+
+    const rawId = (updatedTx.id || '').trim();
     const cleanBukti = (updatedTx.noBukti || '').trim().toUpperCase();
+    const rawKwRef = (updatedTx.kwitansiIdRef || '').trim();
+    const baseId = rawId.replace(/^(bkt-|bku-|kw-|bku-kw-)+/g, '');
+
+    // Check if non-cash / SIPLah or cash
+    const isSiplah =
+      /siplah/i.test(`${updatedTx.noBukti || ''} ${updatedTx.uraian || ''} ${updatedTx.kategoriBiaya || ''}`) ||
+      updatedTx.kategoriBiaya === 'Siplah' ||
+      updatedTx.metodeBayar === 'BANK';
 
     setAppState((prev) => {
-      let matchedKwId = updatedTx.kwitansiIdRef;
+      let matchedKwId = rawKwRef;
 
-      // 1. Update KwitansiList linked by ID, kwitansiIdRef, or noBukti
-      const updatedKwitansi = prev.kwitansiList.map((kw) => {
+      // 1. Update KwitansiList: sync date, proof number, description, and nominal
+      const updatedKwitansi = (prev.kwitansiList || []).map((kw) => {
         const kwBukti = (kw.noBukti || '').trim().toUpperCase();
+        const kwCleanId = (kw.id || '').replace(/^(bku-kw-|kw-)+/g, '');
         const isMatch =
-          (matchedKwId && kw.id === matchedKwId) ||
-          kw.id === baseId ||
+          (matchedKwId && (kw.id === matchedKwId || kw.id.replace(/-p[12]$/, '') === matchedKwId)) ||
+          kw.id === rawId ||
           kw.id === `kw-${baseId}` ||
+          kw.id === baseId ||
+          kwCleanId === baseId ||
           (cleanBukti && cleanBukti !== '-' && kwBukti === cleanBukti);
 
         if (isMatch) {
           if (!matchedKwId) matchedKwId = kw.id;
+          const newNominal = updatedTx.pengeluaran || updatedTx.penerimaan || kw.nominal;
+
+          // Scale receipt items proportionally if nominal changed
+          let updatedItems = kw.items || [];
+          if (newNominal > 0 && kw.nominal > 0 && Math.abs(newNominal - kw.nominal) > 1) {
+            const ratio = newNominal / kw.nominal;
+            updatedItems = updatedItems.map((item) => {
+              const vol = item.volume > 0 ? Math.max(1, Math.round(item.volume * ratio * 10) / 10) : 1;
+              const jumlah = Math.round(vol * item.hargaSatuan);
+              return {
+                ...item,
+                volume: vol,
+                jumlah,
+              };
+            });
+          }
+
           return {
             ...kw,
             tanggal: updatedTx.tanggal,
@@ -781,7 +807,10 @@ export default function App() {
             bulan: updatedTx.bulan,
             uraian: updatedTx.uraian,
             noBukti: updatedTx.noBukti,
-            nominal: updatedTx.pengeluaran || updatedTx.penerimaan || kw.nominal,
+            nominal: newNominal,
+            metodeBayar: isSiplah ? ('BANK' as const) : ('TUNAI' as const),
+            kategoriBiayaPajak: isSiplah ? ('Siplah' as const) : (updatedTx.kategoriBiaya as any || kw.kategoriBiayaPajak),
+            items: updatedItems,
             isLocked: true,
             isManual: true,
             isManualDate: true,
@@ -793,20 +822,21 @@ export default function App() {
       // 2. Prepare locked manual BKU transaction
       const manualItem: BkuTransaction = {
         ...updatedTx,
-        id: anchorId,
+        id: rawId.startsWith('bku-') ? rawId : `bku-${rawId}`,
         kwitansiIdRef: matchedKwId || updatedTx.kwitansiIdRef,
+        metodeBayar: isSiplah ? 'BANK' : 'TUNAI',
         isLocked: true,
         isManual: true,
         isManualDate: true,
       };
 
-      // 3. Update or upsert manual transactions using the same Immutable Anchor ID or noBukti
+      // 3. Upsert into manualBkuTransactions
       const existingManual = prev.manualBkuTransactions || [];
       const matchManualIndex = existingManual.findIndex((m) => {
         const mBukti = (m.noBukti || '').trim().toUpperCase();
         return (
-          m.id === anchorId ||
-          m.id === updatedTx.id ||
+          m.id === manualItem.id ||
+          m.id === rawId ||
           (matchedKwId && m.kwitansiIdRef === matchedKwId) ||
           (cleanBukti && cleanBukti !== '-' && mBukti === cleanBukti)
         );
@@ -820,12 +850,12 @@ export default function App() {
         updatedManual = [...existingManual, manualItem];
       }
 
-      // 4. If transaction is also present in BKB (Bank), sync it too
+      // 4. Sync BKB records if matching proof or id
       const updatedBkb = (prev.bkbRecords || []).map((b) => {
         const bBukti = (b.noBukti || '').trim().toUpperCase();
         if (
           b.id === baseId ||
-          b.id === updatedTx.id ||
+          b.id === rawId ||
           (cleanBukti && cleanBukti !== '-' && bBukti === cleanBukti)
         ) {
           return {
@@ -848,92 +878,129 @@ export default function App() {
       };
     });
 
-    // 5. Force Immediate persistence to Cloud / Local
     handleManualSaveNow();
+    setSwitchNotification(`✅ Transaksi ${updatedTx.noBukti || updatedTx.uraian} berhasil diupdate dan tersinkron ke Kwitansi & ${isSiplah ? 'BKU (Non-Tunai)' : 'BKT (Tunai)'}.`);
+    setTimeout(() => setSwitchNotification(null), 4000);
   };
 
-  const handleDeleteBku = (txToDelete: BkuTransaction) => {
+  // Dedicated Delete Handler for BKU Tab: Permanently deletes from BKU, BKT, and Kwitansi
+  const handleDeleteBkuTransaction = (txToDelete: BkuTransaction) => {
+    isDirtyRef.current = true;
+    setAppState((prev) => {
+      const rawId = (txToDelete.id || '').trim();
+      const rawBukti = (txToDelete.noBukti || '').trim().toUpperCase();
+      const kwRef = (txToDelete.kwitansiIdRef || '').trim();
+
+      const idsToRemove = new Set<string>();
+      if (rawId) {
+        idsToRemove.add(rawId);
+        const withoutBku = rawId.replace(/^bku-/, '');
+        const withoutBkt = rawId.replace(/^bkt-/, '');
+        const withoutBkuKw = rawId.replace(/^bku-kw-/, '');
+        const withoutKw = rawId.replace(/^kw-/, '');
+        idsToRemove.add(withoutBku);
+        idsToRemove.add(withoutBkt);
+        idsToRemove.add(withoutBkuKw);
+        idsToRemove.add(withoutKw);
+        idsToRemove.add(`kw-${withoutBkuKw}`);
+        idsToRemove.add(`bku-kw-${withoutBkuKw}`);
+      }
+      if (kwRef) {
+        idsToRemove.add(kwRef);
+        const cleanRef = kwRef.replace(/^kw-/, '').replace(/^bku-kw-/, '');
+        idsToRemove.add(cleanRef);
+        idsToRemove.add(`kw-${cleanRef}`);
+        idsToRemove.add(`bku-kw-${cleanRef}`);
+      }
+
+      // 1. Remove from kwitansiList
+      const updatedKwitansi = (prev.kwitansiList || []).filter((kw) => {
+        if (!kw) return false;
+        if (idsToRemove.has(kw.id)) return false;
+        if (kwRef && (kw.id === kwRef || kw.id.replace(/-p[12]$/, '') === kwRef)) return false;
+        if (rawBukti && rawBukti !== '-' && rawBukti !== 'MANUAL' && (kw.noBukti || '').trim().toUpperCase() === rawBukti) {
+          return false;
+        }
+        return true;
+      });
+
+      // 2. Remove from manualBkuTransactions
+      const updatedManual = (prev.manualBkuTransactions || []).filter((m) => {
+        if (!m) return false;
+        if (idsToRemove.has(m.id)) return false;
+        if (m.kwitansiIdRef && idsToRemove.has(m.kwitansiIdRef)) return false;
+        if (rawBukti && rawBukti !== '-' && rawBukti !== 'MANUAL' && (m.noBukti || '').trim().toUpperCase() === rawBukti) {
+          return false;
+        }
+        return true;
+      });
+
+      // 3. If Wage transaction, zero it out in wageReports
+      let updatedWageReports = prev.wageReports;
+      const isUpah = /uk\b|upah/i.test(`${rawBukti} ${txToDelete.uraian || ''}`);
+      if (isUpah) {
+        const matchW = (rawBukti || '').match(/uk\/0*(\d+)/i) || (txToDelete.uraian || '').match(/minggu\s*(?:ke[- ])?\s*(\d+)/i);
+        const wNum = matchW ? parseInt(matchW[1], 10) : null;
+        if (wNum !== null) {
+          updatedWageReports = (prev.wageReports || []).map((wr) => {
+            if (wr.mingguKe === wNum) {
+              return { ...wr, totalUpah: 0, items: [] };
+            }
+            return wr;
+          });
+        }
+      }
+
+      // 4. Record all ID variants and noBukti in deletedBkuIds
+      const newDeletedIds = new Set(prev.deletedBkuIds || []);
+      idsToRemove.forEach((id) => newDeletedIds.add(id));
+      if (rawBukti && rawBukti !== '-' && rawBukti !== 'MANUAL') {
+        newDeletedIds.add(rawBukti);
+      }
+
+      return {
+        ...prev,
+        kwitansiList: updatedKwitansi,
+        manualBkuTransactions: updatedManual,
+        wageReports: updatedWageReports,
+        deletedBkuIds: Array.from(newDeletedIds),
+      };
+    });
+
+    handleManualSaveNow();
+    setSwitchNotification(`✅ Transaksi ${txToDelete.noBukti || txToDelete.uraian} berhasil dihapus dari BKU, BKT, dan Kwitansi.`);
+    setTimeout(() => setSwitchNotification(null), 4000);
+  };
+
+  // Dedicated Delete Handler for BKT Tab: Hides from BKT by marking as Non-Tunai / Bank, keeping BKU and BKB intact
+  const handleDeleteBktTransaction = (txToDelete: BkuTransaction) => {
     isDirtyRef.current = true;
     setAppState((prev) => {
       const rawId = txToDelete.id || '';
       const cleanId = rawId.replace(/^bkt-/, '').replace(/^bku-/, '').replace(/-p[12]$/, '');
       const refId = (txToDelete.kwitansiIdRef || '').replace(/-p[12]$/, '');
 
-      // Case 1: Deleting from BKT specifically (metodeBayar === 'BANK')
-      // Convert payment method on Kwitansi to 'BANK' (Non-Tunai) so it disappears from BKT
-      // while remaining 100% intact in BKU (Kas Umum) and BKB (Kas Bank).
-      if (txToDelete.metodeBayar === 'BANK' && (txToDelete.kwitansiIdRef || refId)) {
-        const targetKwId = txToDelete.kwitansiIdRef || refId;
-        const updatedKwList = (prev.kwitansiList || []).map((kw) => {
-          if (kw.id === targetKwId || kw.id === refId || kw.id === cleanId) {
-            return {
-              ...kw,
-              metodeBayar: 'BANK' as const,
-              kategoriBiayaPajak: 'Siplah' as const,
-            };
-          }
-          return kw;
-        });
-
-        return {
-          ...prev,
-          kwitansiList: updatedKwList,
-        };
-      }
-
-      // Case 2: Permanent deletion from BKU or Master
-      let updatedKwitansi = prev.kwitansiList;
-      if (txToDelete.kwitansiIdRef || refId || cleanId) {
-        updatedKwitansi = prev.kwitansiList.filter(
-          (kw) =>
-            kw.id !== txToDelete.kwitansiIdRef &&
-            kw.id !== refId &&
-            kw.id !== cleanId &&
-            kw.id !== `kw-${cleanId}` &&
-            kw.id.replace(/-p[12]$/, '') !== refId
-        );
-      }
-
-      const updatedManual = (prev.manualBkuTransactions || []).filter((m) => {
-        if (!m) return false;
-        const mClean = m.id.replace(/^bku-/, '').replace(/^kw-/, '').replace(/-p[12]$/, '');
-        if (m.id === rawId || m.id === cleanId || mClean === cleanId) return false;
-        if (refId && (m.kwitansiIdRef === refId || m.kwitansiIdRef === txToDelete.kwitansiIdRef)) return false;
-        return true;
+      const targetKwId = txToDelete.kwitansiIdRef || refId;
+      const updatedKwList = (prev.kwitansiList || []).map((kw) => {
+        if (kw.id === targetKwId || kw.id === refId || kw.id === cleanId) {
+          return {
+            ...kw,
+            metodeBayar: 'BANK' as const,
+            kategoriBiayaPajak: 'Siplah' as const,
+          };
+        }
+        return kw;
       });
-
-      const isBkbInflow = rawId.includes('inflow-') || rawId.includes('bkb-');
-      let updatedBkb = prev.bkbRecords;
-      if (isBkbInflow) {
-        const bkbIdToDel = rawId.replace(/^bkt-inflow-/, '');
-        updatedBkb = (prev.bkbRecords || []).filter((b) => b.id !== bkbIdToDel && b.id !== rawId);
-      }
-
-      const updatedDeletedIds = Array.from(
-        new Set([
-          ...(prev.deletedBkuIds || []),
-          rawId,
-          cleanId,
-          `bku-${cleanId}`,
-          `bku-kw-${cleanId}`,
-          `kw-${cleanId}`,
-          txToDelete.kwitansiIdRef || '',
-          refId,
-          `kw-${refId}`,
-          `bku-kw-${refId}`,
-        ])
-      ).filter(Boolean);
 
       return {
         ...prev,
-        kwitansiList: updatedKwitansi,
-        manualBkuTransactions: updatedManual,
-        bkbRecords: updatedBkb,
-        deletedBkuIds: updatedDeletedIds as string[],
+        kwitansiList: updatedKwList,
       };
     });
 
     handleManualSaveNow();
+    setSwitchNotification(`✅ Transaksi berhasil dialihkan ke Non-Tunai (hilang dari BKT, aman di BKU & Bank).`);
+    setTimeout(() => setSwitchNotification(null), 4000);
   };
 
   const handleBulkDeleteBku = (txList: BkuTransaction[]) => {
@@ -2369,7 +2436,7 @@ Lanjutkan pengosongan data transaksi?`)
             }
             onAddTransaction={handleAddManualBku}
             onUpdateTransaction={handleUpdateBku}
-            onDeleteTransaction={handleDeleteBku}
+            onDeleteTransaction={handleDeleteBkuTransaction}
             onUpdateStores={handleUpdateStores}
             onUpdateKwitansi={(updatedKw) => {
               const exists = appState.kwitansiList.some((k) => k.id === updatedKw.id);
@@ -2405,7 +2472,7 @@ Lanjutkan pengosongan data transaksi?`)
             }
             onAddTransaction={handleAddManualBku}
             onUpdateTransaction={handleUpdateBku}
-            onDeleteTransaction={handleDeleteBku}
+            onDeleteTransaction={handleDeleteBktTransaction}
             onUpdateStores={handleUpdateStores}
             onUpdateKwitansi={(updatedKw) => {
               const exists = appState.kwitansiList.some((k) => k.id === updatedKw.id);
