@@ -2946,6 +2946,11 @@ export function calculateBkuFromTransactions(
       return;
     }
 
+    // Skip kwitansi dengan nominal Rp 0 (seperti upah minggu tanpa progres fisik)
+    if (!kw || (kw.nominal || 0) <= 0) {
+      return;
+    }
+
     // Check if user manually edited this transaction in BKU or BKT
     const cleanKwBukti = (kw.noBukti || '').trim().toUpperCase();
     const manualKwOverride = manualTransactions.find((m) => {

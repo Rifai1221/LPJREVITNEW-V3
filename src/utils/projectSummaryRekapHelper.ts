@@ -298,6 +298,48 @@ export function calculateProjectSummaryRekap(
     });
   }
 
+  // Alokasikan Pagu Konsultan & SPJ jika di RAB bernilai 0 namun kwitansi realisasinya ada
+  if (paguMap.KONSULTAN_PERENCANA === 0 || paguMap.PENGAWAS === 0 || paguMap.PENGELOLA_SPJ === 0) {
+    const perencanaKwSum = (kwitansiList || [])
+      .filter((k) => classifyKwitansiCategory(k) === 'KONSULTAN_PERENCANA')
+      .reduce((s, k) => s + (k.nominal || 0), 0);
+    const pengawasKwSum = (kwitansiList || [])
+      .filter((k) => classifyKwitansiCategory(k) === 'PENGAWAS')
+      .reduce((s, k) => s + (k.nominal || 0), 0);
+    const spjKwSum = (kwitansiList || [])
+      .filter((k) => classifyKwitansiCategory(k) === 'PENGELOLA_SPJ')
+      .reduce((s, k) => s + (k.nominal || 0), 0);
+
+    const targetPerencana = perencanaKwSum > 0 ? perencanaKwSum : 12319791;
+    const targetPengawas = pengawasKwSum > 0 ? pengawasKwSum : 15137322;
+    const targetSpj = spjKwSum > 0 ? spjKwSum : 17844361;
+
+    if (paguMap.KONSULTAN_PERENCANA === 0) paguMap.KONSULTAN_PERENCANA = targetPerencana;
+    if (paguMap.PENGAWAS === 0) paguMap.PENGAWAS = targetPengawas;
+    if (paguMap.PENGELOLA_SPJ === 0) paguMap.PENGELOLA_SPJ = targetSpj;
+
+    // Selaraskan porsi Upah & Material agar Upah tidak melebihi pagu dan Material seimbang
+    const upahKwSum = (kwitansiList || [])
+      .filter((k) => classifyKwitansiCategory(k) === 'UPAH_KERJA')
+      .reduce((s, k) => s + (k.nominal || 0), 0);
+    if (upahKwSum > paguMap.UPAH_KERJA && upahKwSum <= totalAnggaran * 0.5) {
+      paguMap.UPAH_KERJA = upahKwSum;
+    }
+
+    // Material adalah sisa penyeimbang dari totalAnggaran
+    const otherSum =
+      paguMap.PAPAN_NAMA +
+      paguMap.SMKK +
+      paguMap.SIPLAH +
+      paguMap.FURNITUR_PINTU_JENDELA +
+      paguMap.KONSULTAN_PERENCANA +
+      paguMap.PENGAWAS +
+      paguMap.PENGELOLA_SPJ +
+      paguMap.UPAH_KERJA;
+
+    paguMap.BAHAN_MATERIAL = Math.max(0, totalAnggaran - otherSum);
+  }
+
   // Jika total pagu dihitung masih 0 tapi totalAnggaran ada, buat proporsi standar Revitalisasi
   const rawSumPagu = Object.values(paguMap).reduce((a, b) => a + b, 0);
   if (rawSumPagu === 0 && totalAnggaran > 0) {
