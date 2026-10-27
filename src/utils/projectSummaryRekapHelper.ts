@@ -139,14 +139,17 @@ export function classifyKwitansiCategory(kw: KwitansiDocument): RekapCategoryKey
     return 'PENGELOLA_SPJ';
   }
 
-  // 8. Furnitur / Pintu & Jendela / Mebeler Pabrikasi (non-SipLah)
+  // 8. Furnitur / Pintu & Jendela / Mebeler Pabrikasi (non-SipLah) - Must not contain building materials
+  const hasMaterialItems = kw.items?.some((it) => /semen|pasir|bata|batu|keramik|paku|besi|kaso/i.test(it.namaBarang || '')) || /semen|pasir|bata|batu|keramik|paku|besi/i.test(uraian);
   if (
-    bukti.startsWith('FUR') ||
-    bukti.includes('/FUR/') ||
-    kw.tipe === 'PINTU_JENDELA' ||
-    kw.tipe === 'PERABOT' ||
-    (/pintu|jendela|kusen|aluminium/i.test(combined) && !bukti.includes('SIPLAH')) ||
-    (kw.items?.some((it) => it.isBarangPabrikasi || it.tag === 'FUR') && !bukti.includes('SIPLAH'))
+    !hasMaterialItems && (
+      bukti.startsWith('FUR') ||
+      bukti.includes('/FUR/') ||
+      kw.tipe === 'PINTU_JENDELA' ||
+      kw.tipe === 'PERABOT' ||
+      (/pintu|jendela|kusen|aluminium/i.test(combined) && !bukti.includes('SIPLAH')) ||
+      (kw.items?.some((it) => it.isBarangPabrikasi || it.tag === 'FUR') && !bukti.includes('SIPLAH'))
+    )
   ) {
     return 'FURNITUR_PINTU_JENDELA';
   }

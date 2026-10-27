@@ -219,8 +219,9 @@ export function renumberMaterialTransactionsChronologically<
     const uraian = cleanNaturalUraian(tx.uraian || '');
     const combined = `${bukti} ${uraian}`.toLowerCase();
 
-    // Kusen, Pintu & Jendela Aluminium (Fur)
-    const isFur = /fur\/|pintu|jendela|kusen|aluminium/i.test(combined);
+    // Kusen, Pintu & Jendela Aluminium (Fur) - Must be actual doors/windows/frames and NOT general building materials
+    const hasMaterialLeak = /semen|pasir|bata|batu|keramik|besi|paku|kayu kaso|kaso|galvalum|spandek/i.test(combined);
+    const isFur = (/fur\/|pintu|jendela|kusen|aluminium/i.test(combined) || /pintu|jendela|kusen/i.test(uraian)) && !hasMaterialLeak;
     if (isFur) {
       furSeq++;
       const padSeq = String(furSeq).padStart(2, '0');
