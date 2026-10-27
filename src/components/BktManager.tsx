@@ -425,6 +425,7 @@ export const BktManager: React.FC<BktManagerProps> = ({
           penerimaan: tx.pemasukan,
           pengeluaran: tx.pengeluaran,
           kwitansiIdRef: tx.kwitansiIdRef,
+          metodeBayar: 'BANK',
         });
       }
     }

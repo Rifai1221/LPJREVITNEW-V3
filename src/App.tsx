@@ -859,6 +859,29 @@ export default function App() {
       const cleanId = rawId.replace(/^bkt-/, '').replace(/^bku-/, '').replace(/-p[12]$/, '');
       const refId = (txToDelete.kwitansiIdRef || '').replace(/-p[12]$/, '');
 
+      // Case 1: Deleting from BKT specifically (metodeBayar === 'BANK')
+      // Convert payment method on Kwitansi to 'BANK' (Non-Tunai) so it disappears from BKT
+      // while remaining 100% intact in BKU (Kas Umum) and BKB (Kas Bank).
+      if (txToDelete.metodeBayar === 'BANK' && (txToDelete.kwitansiIdRef || refId)) {
+        const targetKwId = txToDelete.kwitansiIdRef || refId;
+        const updatedKwList = (prev.kwitansiList || []).map((kw) => {
+          if (kw.id === targetKwId || kw.id === refId || kw.id === cleanId) {
+            return {
+              ...kw,
+              metodeBayar: 'BANK' as const,
+              kategoriBiayaPajak: 'Siplah' as const,
+            };
+          }
+          return kw;
+        });
+
+        return {
+          ...prev,
+          kwitansiList: updatedKwList,
+        };
+      }
+
+      // Case 2: Permanent deletion from BKU or Master
       let updatedKwitansi = prev.kwitansiList;
       if (txToDelete.kwitansiIdRef || refId || cleanId) {
         updatedKwitansi = prev.kwitansiList.filter(
