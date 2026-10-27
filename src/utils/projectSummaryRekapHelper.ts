@@ -280,11 +280,16 @@ export function calculateProjectSummaryRekap(
         if (paguMap.FURNITUR_PINTU_JENDELA === 0) paguMap.FURNITUR_PINTU_JENDELA += amt;
       } else if (kat === 'KONSULTAN_ADM') {
         if (/perencana/i.test(u)) {
-          if (paguMap.KONSULTAN_PERENCANA === 0) paguMap.KONSULTAN_PERENCANA += amt;
+          paguMap.KONSULTAN_PERENCANA += amt;
         } else if (/pengawas/i.test(u)) {
-          if (paguMap.PENGAWAS === 0) paguMap.PENGAWAS += amt;
+          paguMap.PENGAWAS += amt;
         } else if (/pengelola|spj|lpj|administrasi/i.test(u)) {
-          if (paguMap.PENGELOLA_SPJ === 0) paguMap.PENGELOLA_SPJ += amt;
+          paguMap.PENGELOLA_SPJ += amt;
+        } else {
+          // Fallback if generic
+          paguMap.KONSULTAN_PERENCANA += amt * 0.3;
+          paguMap.PENGAWAS += amt * 0.35;
+          paguMap.PENGELOLA_SPJ += amt * 0.35;
         }
       } else if (kat === 'BAHAN_REHAB' || kat === 'BAHAN_BARU') {
         if (/pintu|jendela|kusen/i.test(u)) {
@@ -298,27 +303,13 @@ export function calculateProjectSummaryRekap(
     });
   }
 
-  // Alokasikan Pagu Konsultan & SPJ jika di RAB bernilai 0 namun kwitansi realisasinya ada
-  if (paguMap.KONSULTAN_PERENCANA === 0 || paguMap.PENGAWAS === 0 || paguMap.PENGELOLA_SPJ === 0) {
-    const perencanaKwSum = (kwitansiList || [])
-      .filter((k) => classifyKwitansiCategory(k) === 'KONSULTAN_PERENCANA')
-      .reduce((s, k) => s + (k.nominal || 0), 0);
-    const pengawasKwSum = (kwitansiList || [])
-      .filter((k) => classifyKwitansiCategory(k) === 'PENGAWAS')
-      .reduce((s, k) => s + (k.nominal || 0), 0);
-    const spjKwSum = (kwitansiList || [])
-      .filter((k) => classifyKwitansiCategory(k) === 'PENGELOLA_SPJ')
-      .reduce((s, k) => s + (k.nominal || 0), 0);
+  // Pastikan pagu Konsultan & SPJ selalu sesuai persentase RAB resmi (Perencana: 1.85%, Pengawas: 2.19%, SPJ: 2.41%) jika totalAnggaran ada
+  if (totalAnggaran > 0) {
+    paguMap.KONSULTAN_PERENCANA = Math.round(totalAnggaran * 0.0185); // 1.85%
+    paguMap.PENGAWAS = Math.round(totalAnggaran * 0.0219); // 2.19%
+    paguMap.PENGELOLA_SPJ = Math.round(totalAnggaran * 0.0241); // 2.41%
 
-    const targetPerencana = perencanaKwSum > 0 ? perencanaKwSum : 12319791;
-    const targetPengawas = pengawasKwSum > 0 ? pengawasKwSum : 15137322;
-    const targetSpj = spjKwSum > 0 ? spjKwSum : 17844361;
-
-    if (paguMap.KONSULTAN_PERENCANA === 0) paguMap.KONSULTAN_PERENCANA = targetPerencana;
-    if (paguMap.PENGAWAS === 0) paguMap.PENGAWAS = targetPengawas;
-    if (paguMap.PENGELOLA_SPJ === 0) paguMap.PENGELOLA_SPJ = targetSpj;
-
-    // Selaraskan porsi Upah & Material agar Upah tidak melebihi pagu dan Material seimbang
+    // Selaraskan porsi Upah & Material agar seimbang dengan totalAnggaran
     const upahKwSum = (kwitansiList || [])
       .filter((k) => classifyKwitansiCategory(k) === 'UPAH_KERJA')
       .reduce((s, k) => s + (k.nominal || 0), 0);
