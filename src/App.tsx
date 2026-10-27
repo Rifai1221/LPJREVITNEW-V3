@@ -61,6 +61,7 @@ import { getMonthFromPeriodString, resolveWeekDates } from './utils/monthHelper'
 import { syncProgressWeeksWithRealData, calculateSequentialWaterfallRpdItems } from './utils/divisionHelper';
 import { firestoreDatabaseId } from './services/firebase';
 import { initialProgressWeeks, initialWorkers, initialStores } from './data/initialData';
+import { syncAndReconcileAll9CategoriesToBudget } from './utils/projectSummaryRekapHelper';
 
 import { Header } from './components/Header';
 import { Dashboard } from './components/Dashboard';
@@ -1363,33 +1364,36 @@ export default function App() {
   };
 
   const handleAutoBalanceOptionA = () => {
-    const paguTotal = appState.school?.totalAnggaran || 552457000;
-    const currentTotalNominal = appState.kwitansiList.reduce((s, k) => s + (k.nominal || 0), 0);
-    const cumBobot = calculateCumulativeRealizedProgress(appState.progressWeeks || [], bkuWeekLimit);
-    const targetRatio = cumBobot >= 99.9 ? 1.0 : cumBobot / 100;
-    const { balancedKwitansi, adjustedAmount } = balanceFinalMaterialKwitansiToBudget(
-      appState.kwitansiList,
-      paguTotal,
-      targetRatio
-    );
+    const { updatedKwitansiList, updatedWageReports, messages, totalReconciledNominal } =
+      syncAndReconcileAll9CategoriesToBudget({
+        school: appState.school,
+        rpdItems: appState.rpdItems,
+        kwitansiList: appState.kwitansiList,
+        wageReports: appState.wageReports,
+        progressWeeks: appState.progressWeeks,
+        realSchoolData: appState.realSchoolData,
+        stores: appState.stores,
+        workers: appState.workers,
+      });
 
-    if (adjustedAmount > 0) {
-      isDirtyRef.current = true;
-      setAppState((prev) => ({
-        ...prev,
-        kwitansiList: balancedKwitansi,
-      }));
-      setSwitchNotification(
-        `⚡ Opsi A Berhasil Diterapkan: Belanja material terakhir disesuaikan sebesar Rp ${adjustedAmount.toLocaleString('id-ID')}. Total pengeluaran kini pas dengan Pagu (Rp ${paguTotal.toLocaleString('id-ID')}), Saldo Kas BKU & BKT Rp 0 (Nihil / Pas)!`
-      );
-      setTimeout(() => setSwitchNotification(null), 6000);
-      try {
-        confetti({ particleCount: 75, spread: 85, origin: { y: 0.6 } });
-      } catch {}
-    } else {
-      setSwitchNotification(`✅ Belanja material sudah pas dengan pagu anggaran (tidak ada selisih kas).`);
-      setTimeout(() => setSwitchNotification(null), 4000);
-    }
+    isDirtyRef.current = true;
+    setAppState((prev) => ({
+      ...prev,
+      kwitansiList: updatedKwitansiList,
+      wageReports: updatedWageReports.length > 0 ? updatedWageReports : prev.wageReports,
+    }));
+
+    const paguTotal = appState.school?.totalAnggaran || 0;
+    const diff = paguTotal - totalReconciledNominal;
+    const msg = Math.abs(diff) <= 1000
+      ? `⚡ Sinkronisasi 9 Komponen Berhasil! Seluruh komponen anggaran (Papan Nama, Material, SMKK, SipLah, Upah, Furnitur, Perencana, Pengawas, SPJ) kini 100% tepat pas sesuai pagu RAB (Rp ${paguTotal.toLocaleString('id-ID')}). Saldo kas Rp 0 (Nihil / Pas)!`
+      : `⚡ Penyelarasan Berhasil Dijalankan: Total penyerapan diselaraskan menjadi Rp ${totalReconciledNominal.toLocaleString('id-ID')} (${messages.length} item disinkronkan).`;
+
+    setSwitchNotification(msg);
+    setTimeout(() => setSwitchNotification(null), 7000);
+    try {
+      confetti({ particleCount: 90, spread: 90, origin: { y: 0.5 } });
+    } catch {}
   };
 
   // Auto-Balance Option A: Jika progres fisik sudah 100% dan akumulasi belanja melebihi pagu bantuan,
@@ -2075,6 +2079,8 @@ Lanjutkan pengosongan data transaksi?`)
             taxRecords={taxRecords}
             bkbList={effectiveBkbList}
             bktList={bktList}
+            realSchoolData={appState.realSchoolData}
+            stores={appState.stores}
             onNavigateTab={(tab) => setActiveTab(tab)}
             onOpenPrintModal={(type) => handleOpenPrint(type)}
             onOpenQuickReceipt={() => setIsQuickReceiptOpen(true)}
@@ -2083,6 +2089,7 @@ Lanjutkan pengosongan data transaksi?`)
             isSyncing={isSyncing}
             lastSyncedText={lastSyncedText}
             onOpenGoogleSheetsSync={() => setIsGoogleSheetsModalOpen(true)}
+            onAutoBalanceKwitansi={handleAutoBalanceOptionA}
           />
         )}
 
