@@ -127,17 +127,14 @@ export function classifyKwitansiCategory(kw: KwitansiDocument): RekapCategoryKey
   }
 
   // 7. Pengelola Administrasi & SPJ
-  // ATURAN KETAT: Hanya kwitansi dengan nomor bukti berbentuk ADM
+  // ATURAN KETAT: Hanya kwitansi dengan nomor bukti berbentuk ADM (misal ADM/01/2026, ADM-01, dsb.)
   if (
     bukti.startsWith('ADM/') ||
     bukti.startsWith('ADM-') ||
     bukti.includes('/ADM/') ||
+    bukti.includes('KW-ADM') ||
     bukti === 'ADM' ||
-    (/pengelola.*spj|administrasi.*spj|administrasi.*lpj/i.test(uraian) &&
-      !bukti.includes('SMKK') &&
-      !bukti.includes('SIPLAH') &&
-      !bukti.includes('CTK') &&
-      !bukti.includes('KONS'))
+    bukti.includes('ADM')
   ) {
     return 'PENGELOLA_SPJ';
   }
@@ -759,18 +756,23 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
       nextKwitansiList.push(newKw);
       messages.push(`Dibuat kwitansi baru untuk ${newKw.uraian.slice(0, 45)}... (Rp ${targetNominal.toLocaleString('id-ID')})`);
     } else {
-      // Jika kwitansi sudah ada (seperti SipLah/01 & SipLah/02, atau ADM/01..ADM/04, atau 01/KW-SMKK):
+      // Jika kwitansi sudah ada:
       // JANGAN PERNAH membuat kwitansi baru!
       const currentSum = existing.reduce((s, k) => s + (k.nominal || 0), 0);
       const diff = targetNominal - currentSum;
-      // Jika selisih kecil (< Rp 50.000 / toleransi pembulatan), pertahankan apa adanya tanpa merusak transaksi toko rekanan
-      if (Math.abs(diff) > 50000 && existing.length === 1 && !existing[0].isLocked) {
+      // Jika ada selisih pada kwitansi tunggal, selaraskan langsung pas sesuai pagu
+      if (Math.abs(diff) > 0.01 && existing.length === 1) {
         const targetKwId = existing[0].id;
         nextKwitansiList = nextKwitansiList.map((k) => {
           if (k.id === targetKwId) {
             return {
               ...k,
               nominal: targetNominal,
+              items: k.items && k.items.length === 1 ? [{
+                ...k.items[0],
+                hargaSatuan: targetNominal,
+                jumlah: targetNominal,
+              }] : k.items,
             };
           }
           return k;
@@ -815,38 +817,64 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
   });
 
   // 2. SMKK (K3 KONSTRUKSI)
-  ensureFixedCategoryReceipt('SMKK', paguMap.SMKK, {
-    noBukti: `KW-SMKK/01/${yearStr}`,
-    noSpb: `SPB-SMKK/01/${yearStr}`,
-    tipe: 'SMKK',
-    tanggal: `20/07/${yearStr}`,
-    tanggalFormatted: `20 Juli ${yearStr}`,
-    bulan: `Juli ${yearStr}`,
-    uraian: `Pembayaran Lunas Pengadaan Perlengkapan Penerapan SMKK & K3 Konstruksi (Helm, Rompi, Sepatu Boot, Kotak P3K, Rambu K3, Tali Keselamatan) Revitalisasi ${school?.namaSekolah || 'Sekolah'}, Tahun ${yearStr}.`,
-    penerimaNama: smkkStore.pemilikNama || 'Ridwan Hasan',
-    penerimaPekerjaan: smkkStore.pekerjaan || 'Penyedia Perlengkapan K3',
-    penerimaAlamat: smkkStore.alamat || school?.kabKota || '',
-    namaToko: smkkStore.namaToko,
-    items: [
-      {
-        namaBarang: 'Perlengkapan Penerapan SMKK (Helm Safety, Rompi Reflektor, Sepatu Boot, P3K, Rambu K3)',
-        volume: 1,
-        satuan: 'set',
-        hargaSatuan: paguMap.SMKK,
-        jumlah: paguMap.SMKK,
-        tag: 'SMKK',
-      },
-    ],
-    isPpn: paguMap.SMKK >= 2000000,
-    isPph22: paguMap.SMKK >= 2000000,
-    isPph23: false,
-    ppnAmount: paguMap.SMKK >= 2000000 ? Math.round((paguMap.SMKK / 1.11) * 0.11) : 0,
-    pph22Amount: paguMap.SMKK >= 2000000 ? Math.round((paguMap.SMKK / 1.11) * 0.015) : 0,
-    pph23Amount: 0,
-    kategoriBiayaPajak: 'Konstruksi',
-    mingguKeRef: 1,
-    isLocked: true,
-  });
+  const existingSmkkKw = getKwByCategory('SMKK');
+  if (existingSmkkKw.length === 0 && paguMap.SMKK > 0) {
+    ensureFixedCategoryReceipt('SMKK', paguMap.SMKK, {
+      noBukti: `KW-SMKK/01/${yearStr}`,
+      noSpb: `SPB-SMKK/01/${yearStr}`,
+      tipe: 'SMKK',
+      tanggal: `20/07/${yearStr}`,
+      tanggalFormatted: `20 Juli ${yearStr}`,
+      bulan: `Juli ${yearStr}`,
+      uraian: `Pembayaran Lunas Pengadaan Perlengkapan Penerapan SMKK & K3 Konstruksi (Helm, Rompi, Sepatu Boot, Kotak P3K, Rambu K3, Tali Keselamatan) Revitalisasi ${school?.namaSekolah || 'Sekolah'}, Tahun ${yearStr}.`,
+      penerimaNama: smkkStore.pemilikNama || 'Ridwan Hasan',
+      penerimaPekerjaan: smkkStore.pekerjaan || 'Penyedia Perlengkapan K3',
+      penerimaAlamat: smkkStore.alamat || school?.kabKota || '',
+      namaToko: smkkStore.namaToko,
+      items: [
+        {
+          namaBarang: 'Perlengkapan Penerapan SMKK (Helm Safety, Rompi Reflektor, Sepatu Boot, P3K, Rambu K3)',
+          volume: 1,
+          satuan: 'set',
+          hargaSatuan: paguMap.SMKK,
+          jumlah: paguMap.SMKK,
+          tag: 'SMKK',
+        },
+      ],
+      isPpn: paguMap.SMKK >= 2000000,
+      isPph22: paguMap.SMKK >= 2000000,
+      isPph23: false,
+      ppnAmount: paguMap.SMKK >= 2000000 ? Math.round((paguMap.SMKK / 1.11) * 0.11) : 0,
+      pph22Amount: paguMap.SMKK >= 2000000 ? Math.round((paguMap.SMKK / 1.11) * 0.015) : 0,
+      pph23Amount: 0,
+      kategoriBiayaPajak: 'Konstruksi',
+      mingguKeRef: 1,
+      isLocked: true,
+    });
+  } else if (existingSmkkKw.length > 0 && paguMap.SMKK > 0) {
+    const sumSmkk = existingSmkkKw.reduce((s, k) => s + (k.nominal || 0), 0);
+    const diffSmkk = paguMap.SMKK - sumSmkk;
+    if (Math.abs(diffSmkk) > 0.01) {
+      const lastSmkk = existingSmkkKw[existingSmkkKw.length - 1];
+      const targetId = lastSmkk.id;
+      const targetNewNominal = Math.max(0, (lastSmkk.nominal || 0) + diffSmkk);
+      nextKwitansiList = nextKwitansiList.map((k) => {
+        if (k.id === targetId) {
+          return {
+            ...k,
+            nominal: targetNewNominal,
+            items: k.items && k.items.length === 1 ? [{
+              ...k.items[0],
+              hargaSatuan: targetNewNominal,
+              jumlah: targetNewNominal,
+            }] : k.items,
+          };
+        }
+        return k;
+      });
+      messages.push(`Diselaraskan kwitansi SMKK ${lastSmkk.noBukti} menjadi Rp ${targetNewNominal.toLocaleString('id-ID')} pas sesuai pagu.`);
+    }
+  }
 
   // 3. KONSULTAN PERENCANA
   ensureFixedCategoryReceipt('KONSULTAN_PERENCANA', paguMap.KONSULTAN_PERENCANA, {
@@ -917,41 +945,84 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
   });
 
   // 5. PENGELOLA ADMINISTRASI SPJ
-  ensureFixedCategoryReceipt('PENGELOLA_SPJ', paguMap.PENGELOLA_SPJ, {
-    noBukti: `ADM/01/${yearStr}`,
-    noSpb: `SPB-ADM/01/${yearStr}`,
-    tipe: 'OPERASIONAL',
-    tanggal: `28/08/${yearStr}`,
-    tanggalFormatted: `28 Agustus ${yearStr}`,
-    bulan: `Agustus ${yearStr}`,
-    uraian: `Pembayaran Lunas Biaya Pengelolaan Administrasi, Penyusunan Dokumen SPJ/LPJ dan ATK Tim P2SP Revitalisasi ${school?.namaSekolah || 'Sekolah'}, Tahun ${yearStr}.`,
-    penerimaNama: spjStore.pemilikNama || school?.namaKetuaP2SP || 'IRWAN YUSUF',
-    penerimaPekerjaan: spjStore.pekerjaan || 'Pengelola Administrasi SPJ',
-    penerimaAlamat: spjStore.alamat || school?.namaSekolah || '',
-    namaToko: spjStore.namaToko,
-    items: [
-      {
-        namaBarang: 'Biaya Pengelolaan Administrasi, Penggandaan Dokumen SPJ/LPJ & ATK Panitia P2SP',
-        volume: 1,
-        satuan: 'ls',
-        hargaSatuan: paguMap.PENGELOLA_SPJ,
-        jumlah: paguMap.PENGELOLA_SPJ,
-        tag: 'SPJ',
-      },
-    ],
-    isPpn: false,
-    isPph22: false,
-    isPph23: false,
-    ppnAmount: 0,
-    pph22Amount: 0,
-    pph23Amount: 0,
-    kategoriBiayaPajak: 'Perencanaan_Pengelolaan',
-    mingguKeRef: 5,
-    isLocked: true,
-  });
+  // ATURAN KHUSUS: Mengalokasikan sisa kekurangan pagu ke ADM/04 (Pelunasan Akhir) agar tepat 100% pas
+  const existingSpjKw = getKwByCategory('PENGELOLA_SPJ');
+  if (existingSpjKw.length === 0 && paguMap.PENGELOLA_SPJ > 0) {
+    ensureFixedCategoryReceipt('PENGELOLA_SPJ', paguMap.PENGELOLA_SPJ, {
+      noBukti: `ADM/01/${yearStr}`,
+      noSpb: `SPB-ADM/01/${yearStr}`,
+      tipe: 'OPERASIONAL',
+      tanggal: `28/08/${yearStr}`,
+      tanggalFormatted: `28 Agustus ${yearStr}`,
+      bulan: `Agustus ${yearStr}`,
+      uraian: `Pembayaran Lunas Biaya Pengelolaan Administrasi, Penyusunan Dokumen SPJ/LPJ dan ATK Tim P2SP Revitalisasi ${school?.namaSekolah || 'Sekolah'}, Tahun ${yearStr}.`,
+      penerimaNama: spjStore.pemilikNama || school?.namaKetuaP2SP || 'IRWAN YUSUF',
+      penerimaPekerjaan: spjStore.pekerjaan || 'Pengelola Administrasi SPJ',
+      penerimaAlamat: spjStore.alamat || school?.namaSekolah || '',
+      namaToko: spjStore.namaToko,
+      items: [
+        {
+          namaBarang: 'Biaya Pengelolaan Administrasi, Penggandaan Dokumen SPJ/LPJ & ATK Panitia P2SP',
+          volume: 1,
+          satuan: 'ls',
+          hargaSatuan: paguMap.PENGELOLA_SPJ,
+          jumlah: paguMap.PENGELOLA_SPJ,
+          tag: 'SPJ',
+        },
+      ],
+      isPpn: false,
+      isPph22: false,
+      isPph23: false,
+      ppnAmount: 0,
+      pph22Amount: 0,
+      pph23Amount: 0,
+      kategoriBiayaPajak: 'Perencanaan_Pengelolaan',
+      mingguKeRef: 5,
+      isLocked: true,
+    });
+  } else if (existingSpjKw.length > 0 && paguMap.PENGELOLA_SPJ > 0) {
+    const sumSpj = existingSpjKw.reduce((s, k) => s + (k.nominal || 0), 0);
+    const diffSpj = paguMap.PENGELOLA_SPJ - sumSpj;
+    if (Math.abs(diffSpj) > 0.01) {
+      // Prioritaskan kwitansi ADM/04 (Pelunasan Akhir) atau yang bernominal 0
+      const targetSpj =
+        existingSpjKw.find((k) => (k.nominal || 0) === 0 || /pelunasan/i.test(k.uraian || '') || (k.noBukti || '').includes('04')) ||
+        existingSpjKw[existingSpjKw.length - 1];
+
+      if (targetSpj) {
+        const targetId = targetSpj.id;
+        const targetNewNominal = Math.max(0, (targetSpj.nominal || 0) + diffSpj);
+        nextKwitansiList = nextKwitansiList.map((k) => {
+          if (k.id === targetId) {
+            const defaultItemName =
+              k.items?.[0]?.namaBarang ||
+              k.uraian ||
+              'Pembayaran Lunas (Pelunasan Akhir) Biaya Pengelolaan Administrasi SPJ & LPJ Kegiatan';
+            return {
+              ...k,
+              nominal: targetNewNominal,
+              items: [
+                {
+                  namaBarang: defaultItemName,
+                  volume: 1,
+                  satuan: 'ls',
+                  hargaSatuan: targetNewNominal,
+                  jumlah: targetNewNominal,
+                  tag: 'SPJ',
+                },
+              ],
+            };
+          }
+          return k;
+        });
+        messages.push(`Diselaraskan kwitansi pelunasan ${targetSpj.noBukti} (Pengelola SPJ) menjadi Rp ${targetNewNominal.toLocaleString('id-ID')} pas sesuai pagu.`);
+      }
+    }
+  }
 
   // 6. BELANJA SIPLAH
-  if (paguMap.SIPLAH > 0) {
+  const existingSiplahKw = getKwByCategory('SIPLAH');
+  if (existingSiplahKw.length === 0 && paguMap.SIPLAH > 0) {
     ensureFixedCategoryReceipt('SIPLAH', paguMap.SIPLAH, {
       noBukti: `KW-SIPLAH/01/${yearStr}`,
       noSpb: `SPB-SIPLAH/01/${yearStr}`,
@@ -984,6 +1055,24 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
       mingguKeRef: 6,
       isLocked: true,
     });
+  } else if (existingSiplahKw.length > 0 && paguMap.SIPLAH > 0) {
+    const sumSiplah = existingSiplahKw.reduce((s, k) => s + (k.nominal || 0), 0);
+    const diffSiplah = paguMap.SIPLAH - sumSiplah;
+    if (Math.abs(diffSiplah) > 0.01 && Math.abs(diffSiplah) < 50000) {
+      const lastSiplah = existingSiplahKw[existingSiplahKw.length - 1];
+      const targetId = lastSiplah.id;
+      const targetNewNominal = Math.max(0, (lastSiplah.nominal || 0) + diffSiplah);
+      nextKwitansiList = nextKwitansiList.map((k) => {
+        if (k.id === targetId) {
+          return {
+            ...k,
+            nominal: targetNewNominal,
+          };
+        }
+        return k;
+      });
+      messages.push(`Diselaraskan belanja SipLah ${lastSiplah.noBukti} pas sesuai pagu.`);
+    }
   }
 
   // 7. FURNITUR (PINTU, JENDELA & MEBELER PABRIKASI)
@@ -1062,7 +1151,7 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
   } else if (existingUpahKw.length > 0 && paguMap.UPAH_KERJA > 0) {
     const sumUpah = existingUpahKw.reduce((s, k) => s + (k.nominal || 0), 0);
     const diffUpah = paguMap.UPAH_KERJA - sumUpah;
-    if (Math.abs(diffUpah) > 1000) {
+    if (Math.abs(diffUpah) > 0.01) {
       const lastUpahId = existingUpahKw[existingUpahKw.length - 1].id;
       nextKwitansiList = nextKwitansiList.map((k) => {
         if (k.id === lastUpahId) {
@@ -1131,7 +1220,7 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
   } else if (materialKws.length > 0 && targetMaterialFinal > 0) {
     const currentMatTotal = materialKws.reduce((s, k) => s + (k.nominal || 0), 0);
     const diffMat = targetMaterialFinal - currentMatTotal;
-    if (Math.abs(diffMat) > 500) {
+    if (Math.abs(diffMat) > 0.01) {
       const lastMatId = materialKws[materialKws.length - 1].id;
       nextKwitansiList = nextKwitansiList.map((k) => {
         if (k.id === lastMatId) {

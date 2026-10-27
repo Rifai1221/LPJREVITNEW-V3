@@ -1377,11 +1377,39 @@ export default function App() {
       });
 
     isDirtyRef.current = true;
-    setAppState((prev) => ({
-      ...prev,
-      kwitansiList: updatedKwitansiList,
-      wageReports: updatedWageReports.length > 0 ? updatedWageReports : prev.wageReports,
-    }));
+    setAppState((prev) => {
+      const kwMap = new Map(updatedKwitansiList.map((k) => [k.id, k]));
+      const kwNoBuktiMap = new Map(
+        updatedKwitansiList.map((k) => [(k.noBukti || '').trim().toUpperCase(), k])
+      );
+
+      const updatedManualBku = (prev.manualBkuTransactions || []).map((m) => {
+        const kw =
+          (m.kwitansiIdRef && kwMap.get(m.kwitansiIdRef)) ||
+          kwMap.get(m.id) ||
+          (m.noBukti ? kwNoBuktiMap.get(m.noBukti.trim().toUpperCase()) : undefined);
+
+        if (kw) {
+          return {
+            ...m,
+            noBukti: kw.noBukti,
+            tanggal: kw.tanggal,
+            bulan: kw.bulan || m.bulan,
+            uraian: kw.uraian ? (kw.uraian.startsWith('Pembayaran Lunas Biaya ') ? kw.uraian.replace('Pembayaran Lunas Biaya ', 'Bayar ') : kw.uraian) : m.uraian,
+            pengeluaran: kw.nominal,
+            kategoriBiaya: kw.kategoriBiayaPajak || m.kategoriBiaya,
+          };
+        }
+        return m;
+      });
+
+      return {
+        ...prev,
+        kwitansiList: updatedKwitansiList,
+        manualBkuTransactions: updatedManualBku,
+        wageReports: updatedWageReports.length > 0 ? updatedWageReports : prev.wageReports,
+      };
+    });
 
     const paguTotal = appState.school?.totalAnggaran || 0;
     const diff = paguTotal - totalReconciledNominal;
