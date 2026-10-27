@@ -62,78 +62,94 @@ export interface RekapProjectSummaryResult {
  * Mendeteksi kategori dari suatu Kwitansi / Transaksi
  */
 export function classifyKwitansiCategory(kw: KwitansiDocument): RekapCategoryKey {
-  const combined = `${kw.noBukti || ''} ${kw.uraian || ''} ${kw.namaToko || ''} ${kw.tipe || ''}`.toLowerCase();
+  const bukti = (kw.noBukti || '').toUpperCase().trim();
+  const uraian = (kw.uraian || '').toLowerCase();
+  const namaToko = (kw.namaToko || '').toLowerCase();
+  const combined = `${bukti} ${uraian} ${namaToko} ${kw.tipe || ''}`.toLowerCase();
 
-  // 1. Konsultan Perencana Teknis
+  // 1. Belanja SipLah (Daring) - Prioritas Utama
+  // Tangkap semua bukti yang berawalan/mengandung SipLah atau KW-SIPLAH atau item berlabel SipLah
   if (
-    kw.tipe === 'KONSULTAN' &&
-    (/perencana|kons-p|jasa.*perencanaan|honor.*perencana/i.test(combined) ||
-      kw.noBukti?.toUpperCase().includes('KONS-P'))
-  ) {
-    return 'KONSULTAN_PERENCANA';
-  }
-
-  // 2. Konsultan Pengawas Lapangan
-  if (
-    kw.tipe === 'KONSULTAN' &&
-    (/pengawas|kons-w|jasa.*pengawasan|honor.*pengawas/i.test(combined) ||
-      kw.noBukti?.toUpperCase().includes('KONS-W'))
-  ) {
-    return 'PENGAWAS';
-  }
-
-  // 3. Pengelola SPJ / LPJ / Administrasi
-  if (
-    kw.tipe === 'OPERASIONAL' ||
-    /pengelola|spj|lpj|administrasi|tim\s*teknis|tim\s*pelaksana|p2sp|\badm\b/i.test(combined) ||
-    kw.noBukti?.toUpperCase().startsWith('ADM')
-  ) {
-    return 'PENGELOLA_SPJ';
-  }
-
-  // 4. Belanja SMKK / K3 Konstruksi
-  if (
-    kw.tipe === 'SMKK' ||
-    /smkk|k3|keselamatan|helm|rompi|boot|p3k|rambu/i.test(combined) ||
-    kw.noBukti?.toUpperCase().includes('SMKK')
-  ) {
-    return 'SMKK';
-  }
-
-  // 5. Belanja SipLah (Daring)
-  if (
-    /siplah|toko\s*daring|mitra\s*siplah|blibli|eureka|telkom/i.test(combined) ||
-    kw.noBukti?.toUpperCase().includes('SIPLAH')
+    bukti.startsWith('SIPLAH') ||
+    bukti.includes('/SIPLAH') ||
+    bukti.includes('KW-SIPLAH') ||
+    /siplah/i.test(combined) ||
+    kw.items?.some((it) => it.tag === 'SipLah' || /siplah/i.test(it.namaBarang || ''))
   ) {
     return 'SIPLAH';
   }
 
-  // 6. Cetak / Papan Nama Proyek / Percetakan
+  // 2. SMKK (K3 Konstruksi) - Prioritas Utama
+  // Tangkap kwitansi 01/KW-SMKK/2026, KW-SMKK, SMKK, dst.
   if (
+    bukti.includes('SMKK') ||
+    kw.tipe === 'SMKK' ||
+    /smkk|k3\b|tali keselamatan|rompi reflektor|helm safety|sepatu boot|sepatu safety|p3k|rambu k3/i.test(combined)
+  ) {
+    return 'SMKK';
+  }
+
+  // 3. Papan Nama Proyek (Cetak)
+  if (
+    bukti.startsWith('CTK') ||
+    bukti.includes('/CTK') ||
     kw.tipe === 'CETAK' ||
-    /papan\s*nama|prasasti|banner|baliho|cetak|percetakan|penggandaan|\bctk\b/i.test(combined) ||
-    kw.noBukti?.toUpperCase().startsWith('CTK')
+    /papan\s*nama|prasasti|banner\s*proyek|\bctk\b/i.test(combined)
   ) {
     return 'PAPAN_NAMA';
   }
 
-  // 7. Upah Tukang / Pekerja
+  // 4. Konsultan Perencana Teknis
   if (
+    bukti.includes('KONS-P') ||
+    (kw.tipe === 'KONSULTAN' && /perencana/i.test(combined))
+  ) {
+    return 'KONSULTAN_PERENCANA';
+  }
+
+  // 5. Konsultan Pengawas Lapangan
+  if (
+    bukti.includes('KONS-W') ||
+    (kw.tipe === 'KONSULTAN' && /pengawas/i.test(combined))
+  ) {
+    return 'PENGAWAS';
+  }
+
+  // 6. Upah Tukang / Pekerja
+  if (
+    bukti.startsWith('UK/') ||
+    bukti.includes('/UK/') ||
+    bukti.includes('KW-UPAH') ||
     kw.tipe === 'UPAH' ||
-    /upah|tukang|pekerja|mandor|hok|\buk\b/i.test(combined) ||
-    kw.noBukti?.toUpperCase().startsWith('UK') ||
-    kw.noBukti?.toUpperCase().includes('UPAH')
+    /daftar\s*upah|upah\s*tukang|upah\s*pekerja|borongan\s*upah/i.test(combined)
   ) {
     return 'UPAH_KERJA';
   }
 
-  // 8. Furnitur / Pintu & Jendela / Mebeler Pabrikasi
+  // 7. Pengelola Administrasi & SPJ
+  // ATURAN KETAT: Hanya kwitansi dengan nomor bukti berbentuk ADM
   if (
+    bukti.startsWith('ADM/') ||
+    bukti.startsWith('ADM-') ||
+    bukti.includes('/ADM/') ||
+    bukti === 'ADM' ||
+    (/pengelola.*spj|administrasi.*spj|administrasi.*lpj/i.test(uraian) &&
+      !bukti.includes('SMKK') &&
+      !bukti.includes('SIPLAH') &&
+      !bukti.includes('CTK') &&
+      !bukti.includes('KONS'))
+  ) {
+    return 'PENGELOLA_SPJ';
+  }
+
+  // 8. Furnitur / Pintu & Jendela / Mebeler Pabrikasi (non-SipLah)
+  if (
+    bukti.startsWith('FUR') ||
+    bukti.includes('/FUR/') ||
     kw.tipe === 'PINTU_JENDELA' ||
     kw.tipe === 'PERABOT' ||
-    /pintu|jendela|kusen|aluminium|mebeler|meja|kursi|loker|rak|perabot|\bfur\b/i.test(combined) ||
-    kw.noBukti?.toUpperCase().startsWith('FUR') ||
-    kw.items?.some((it) => it.isBarangPabrikasi || it.tag === 'FUR')
+    (/pintu|jendela|kusen|aluminium/i.test(combined) && !bukti.includes('SIPLAH')) ||
+    (kw.items?.some((it) => it.isBarangPabrikasi || it.tag === 'FUR') && !bukti.includes('SIPLAH'))
   ) {
     return 'FURNITUR_PINTU_JENDELA';
   }
@@ -695,6 +711,31 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
   let nextKwitansiList: KwitansiDocument[] = [...kwitansiList];
   let nextWageReports: WeeklyWageReport[] = [...wageReports];
 
+  // 1. Pembersihan Otomatis Kwitansi Duplikat SipLah & SMKK jika Kwitansi Asli Toko Rekanan Sudah Ada
+  const authenticSiplahList = nextKwitansiList.filter(
+    (k) =>
+      (k.noBukti?.toUpperCase().startsWith('SIPLAH/') || k.noBukti?.toUpperCase().includes('/SIPLAH')) &&
+      !k.id.startsWith('kw-sync-') &&
+      k.noBukti !== `KW-SIPLAH/01/${yearStr}`
+  );
+  if (authenticSiplahList.length > 0) {
+    // Hapus kwitansi dummy KW-SIPLAH/01/2026 jika kwitansi asli SipLah/01, SipLah/02 toko rekanan sudah ada
+    nextKwitansiList = nextKwitansiList.filter(
+      (k) => !(k.id.startsWith('kw-sync-siplah') || k.noBukti === `KW-SIPLAH/01/${yearStr}`)
+    );
+  }
+
+  const authenticSmkkList = nextKwitansiList.filter(
+    (k) =>
+      (k.noBukti?.includes('/KW-SMKK/') || k.noBukti?.startsWith('01/KW-SMKK')) &&
+      !k.id.startsWith('kw-sync-')
+  );
+  if (authenticSmkkList.length > 0) {
+    nextKwitansiList = nextKwitansiList.filter(
+      (k) => !(k.id.startsWith('kw-sync-smkk') && k.noBukti === `KW-SMKK/01/${yearStr}`)
+    );
+  }
+
   // Helper untuk mencari kwitansi berdasarkan kategori
   const getKwByCategory = (catKey: RekapCategoryKey) => {
     return nextKwitansiList.filter((k) => classifyKwitansiCategory(k) === catKey);
@@ -718,29 +759,18 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
       nextKwitansiList.push(newKw);
       messages.push(`Dibuat kwitansi baru untuk ${newKw.uraian.slice(0, 45)}... (Rp ${targetNominal.toLocaleString('id-ID')})`);
     } else {
-      // Jika sudah ada, sesuaikan kwitansi pertama agar total kategori pas dengan targetNominal
+      // Jika kwitansi sudah ada (seperti SipLah/01 & SipLah/02, atau ADM/01..ADM/04, atau 01/KW-SMKK):
+      // JANGAN PERNAH membuat kwitansi baru!
       const currentSum = existing.reduce((s, k) => s + (k.nominal || 0), 0);
       const diff = targetNominal - currentSum;
-      if (Math.abs(diff) > 500) {
-        const targetKwId = existing[existing.length - 1].id;
+      // Jika selisih kecil (< Rp 50.000 / toleransi pembulatan), pertahankan apa adanya tanpa merusak transaksi toko rekanan
+      if (Math.abs(diff) > 50000 && existing.length === 1 && !existing[0].isLocked) {
+        const targetKwId = existing[0].id;
         nextKwitansiList = nextKwitansiList.map((k) => {
           if (k.id === targetKwId) {
-            const adjustedNominal = Math.max(0, (k.nominal || 0) + diff);
-            const scale = k.nominal > 0 ? adjustedNominal / k.nominal : 1;
-            const updatedItems = (k.items || []).map((it) => ({
-              ...it,
-              jumlah: Math.round(it.jumlah * scale),
-            }));
             return {
               ...k,
-              nominal: adjustedNominal,
-              items: updatedItems.length > 0 ? updatedItems : [{
-                namaBarang: k.uraian,
-                volume: 1,
-                satuan: 'ls',
-                hargaSatuan: adjustedNominal,
-                jumlah: adjustedNominal,
-              }],
+              nominal: targetNominal,
             };
           }
           return k;

@@ -109,12 +109,24 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const hasActiveProgress = activeWeekNums.size > 0;
 
   const targetYear = school?.tahunAnggaran?.trim() || '2026';
+
+  // Deduplikasi otomatis: jika kwitansi asli SipLah dari toko rekanan sudah ada, jangan pakai kwitansi dummy KW-SIPLAH/01/2026
+  const authenticSiplahExists = kwitansiList.some(
+    (k) =>
+      k.noBukti?.toUpperCase().startsWith('SIPLAH/') &&
+      !k.id.startsWith('kw-sync-') &&
+      k.noBukti !== `KW-SIPLAH/01/${targetYear}`
+  );
+  const cleanKwitansiList = authenticSiplahExists
+    ? kwitansiList.filter((k) => !(k.id.startsWith('kw-sync-siplah') || k.noBukti === `KW-SIPLAH/01/${targetYear}`))
+    : kwitansiList;
+
   const validKwitansi = hasActiveProgress
-    ? kwitansiList.filter((k) => {
+    ? cleanKwitansiList.filter((k) => {
         const wNum = extractWeekNumberFromKwitansi(k, progressWeeks, targetYear);
         return wNum === null || activeWeekNums.has(wNum);
       })
-    : kwitansiList.filter((k) => k.tipe === 'KONSULTAN' || (k.tipe === 'OPERASIONAL' && !extractWeekNumberFromKwitansi(k, progressWeeks, targetYear)));
+    : cleanKwitansiList.filter((k) => k.tipe === 'KONSULTAN' || (k.tipe === 'OPERASIONAL' && !extractWeekNumberFromKwitansi(k, progressWeeks, targetYear)));
 
   // Calculations
   const totalAnggaran = school.totalAnggaran || 0;
