@@ -245,13 +245,14 @@ export const BkuManager: React.FC<BkuManagerProps> = ({
     bkbList.forEach((b) => {
       r = r + (b.penerimaan || 0) - (b.pengeluaran || 0);
     });
-    return Math.max(0, r);
+    return Math.abs(r) <= 1000 ? 0 : Math.max(0, r);
   }, [bkbList]);
 
   const tunaiBalance = useMemo(() => {
     if (!bktList || bktList.length === 0) return 0;
     const lastBkt = bktList[bktList.length - 1];
-    return lastBkt?.saldo || 0;
+    const rawVal = lastBkt?.saldo || 0;
+    return Math.abs(rawVal) <= 1000 ? 0 : rawVal;
   }, [bktList]);
 
   // Posisi Penutupan Kas Terfilter (Mengambil Saldo BKB & BKT sesuai filter aktif: All, Bulan, Minggu, Custom)

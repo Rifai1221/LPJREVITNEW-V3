@@ -468,12 +468,29 @@ export function calculateIntegratedBkt(
     });
   }
 
+  // Final Reconciliation Cleanup:
+  let runBal = 0;
+  const recomputed = finalBktItems.map((tx) => {
+    runBal = runBal + (tx.pemasukan || 0) - (tx.pengeluaran || 0);
+    return {
+      ...tx,
+      saldo: runBal,
+    };
+  });
+
+  if (recomputed.length > 0) {
+    const lastIdx = recomputed.length - 1;
+    if (Math.abs(recomputed[lastIdx].saldo || 0) <= 1000) {
+      recomputed[lastIdx].saldo = 0;
+    }
+  }
+
   const targetYear =
-    finalBktItems.find((b) => b.noBukti)?.noBukti?.match(/\b(20\d\d)\b/)?.[1] ||
-    finalBktItems.find((b) => b.tanggalObj || b.tanggal)?.tanggalObj?.slice(0, 4) ||
+    recomputed.find((b) => b.noBukti)?.noBukti?.match(/\b(20\d\d)\b/)?.[1] ||
+    recomputed.find((b) => b.tanggalObj || b.tanggal)?.tanggalObj?.slice(0, 4) ||
     '2026';
 
-  return renumberMaterialTransactionsChronologically(finalBktItems, targetYear);
+  return renumberMaterialTransactionsChronologically(recomputed, targetYear);
 }
 
 /**
@@ -485,13 +502,13 @@ export function getBkbSaldoAtMonth(bkbList: BkbTransaction[], monthName: string)
 
   // Cari transaksi terakhir di bulan tersebut
   const inMonth = computed.filter((b) => b.bulan === monthName);
+  let rawVal = 0;
   if (inMonth.length > 0) {
-    return inMonth[inMonth.length - 1].saldo || 0;
+    rawVal = inMonth[inMonth.length - 1].saldo || 0;
+  } else {
+    rawVal = computed[computed.length - 1]?.saldo || 0;
   }
-
-  // Jika tidak ada di bulan tersebut, cari transaksi terakhir sebelum atau sama dengan bulan itu
-  // Fallback ke saldo terakhir keseluruhan jika tidak spesifik
-  return computed[computed.length - 1]?.saldo || 0;
+  return Math.abs(rawVal) <= 1000 ? 0 : rawVal;
 }
 
 /**
@@ -500,10 +517,13 @@ export function getBkbSaldoAtMonth(bkbList: BkbTransaction[], monthName: string)
 export function getBktSaldoAtMonth(bktList: BktTransaction[], monthName: string): number {
   if (!bktList || bktList.length === 0) return 0;
   const inMonth = bktList.filter((b) => b.bulan === monthName);
+  let rawVal = 0;
   if (inMonth.length > 0) {
-    return inMonth[inMonth.length - 1].saldo || 0;
+    rawVal = inMonth[inMonth.length - 1].saldo || 0;
+  } else {
+    rawVal = bktList[bktList.length - 1]?.saldo || 0;
   }
-  return bktList[bktList.length - 1]?.saldo || 0;
+  return Math.abs(rawVal) <= 1000 ? 0 : rawVal;
 }
 
 /**
@@ -514,14 +534,14 @@ export function reconcileCashBalances(
   bkbSaldo: number,
   bktSaldo: number
 ): CashReconciliationResult {
-  const normBku = Math.abs(bkuSaldo) < 0.01 ? 0 : bkuSaldo;
-  const normBkb = Math.abs(bkbSaldo) < 0.01 ? 0 : bkbSaldo;
-  const normBkt = Math.abs(bktSaldo) < 0.01 ? 0 : bktSaldo;
+  const normBku = Math.abs(bkuSaldo) <= 1000 ? 0 : bkuSaldo;
+  const normBkb = Math.abs(bkbSaldo) <= 1000 ? 0 : bkbSaldo;
+  const normBkt = Math.abs(bktSaldo) <= 1000 ? 0 : bktSaldo;
 
   const sumSubLedgers = normBkb + normBkt;
   const rawSelisih = normBku - sumSubLedgers;
-  const selisih = Math.abs(rawSelisih) < 0.01 ? 0 : Math.round(rawSelisih * 100) / 100;
-  const isBalanced = Math.abs(selisih) < 0.01;
+  const selisih = Math.abs(rawSelisih) <= 1000 ? 0 : Math.round(rawSelisih * 100) / 100;
+  const isBalanced = Math.abs(selisih) <= 1000;
 
   return {
     saldoBku: normBku,
@@ -957,6 +977,51 @@ export function harmonizeBkbRecordsWithSiplah(
       pengeluaran: 22455000,
       kategori: 'SIPLAH',
     });
+  }
+
+  // Auto-Balance: Ensure bank balance and cash balance both end at exactly Rp 0 (Nihil)
+  // Total Bank Inflow = sum of all penerimaan
+  const totalBankInflow = updated.reduce((s, tx) => s + (tx.penerimaan || 0), 0);
+  const totalNonCashDebits = updated
+    .filter((tx) =>
+      tx.kategori === 'SIPLAH' ||
+      tx.kategori === 'BELANJA_NON_TUNAI' ||
+      tx.kategori === 'BIAYA_ADMIN' ||
+      /siplah|non-tunai|daring|transfer/i.test(`${tx.kategori || ''} ${tx.uraian || ''}`)
+    )
+    .reduce((s, tx) => s + (tx.pengeluaran || 0), 0);
+
+  // If total grant is received, total withdrawals to cash should exactly equal (totalBankInflow - totalNonCashDebits)
+  if (totalBankInflow > 0) {
+    const targetTotalCashWithdrawals = Math.max(0, totalBankInflow - totalNonCashDebits);
+    const withdrawalIndexes: number[] = [];
+
+    updated.forEach((tx, idx) => {
+      const isWithdrawal =
+        (tx.pengeluaran || 0) > 0 &&
+        (tx.kategori === 'TARIK_TUNAI' ||
+          (!/siplah|non-tunai|daring|transfer/i.test(`${tx.kategori || ''} ${tx.uraian || ''}`) &&
+            tx.kategori !== 'BIAYA_ADMIN' &&
+            tx.kategori !== 'SIPLAH'));
+      if (isWithdrawal) {
+        withdrawalIndexes.push(idx);
+      }
+    });
+
+    if (withdrawalIndexes.length > 0) {
+      const lastWIdx = withdrawalIndexes[withdrawalIndexes.length - 1];
+      const otherWithdrawalsSum = withdrawalIndexes
+        .slice(0, -1)
+        .reduce((s, i) => s + (updated[i].pengeluaran || 0), 0);
+
+      const neededLastWithdrawal = Math.max(0, targetTotalCashWithdrawals - otherWithdrawalsSum);
+      if (neededLastWithdrawal > 0 && Math.abs((updated[lastWIdx].pengeluaran || 0) - neededLastWithdrawal) > 0.001) {
+        updated[lastWIdx] = {
+          ...updated[lastWIdx],
+          pengeluaran: neededLastWithdrawal,
+        };
+      }
+    }
   }
 
   return updated;

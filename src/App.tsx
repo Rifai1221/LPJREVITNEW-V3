@@ -1468,11 +1468,14 @@ export default function App() {
         return m;
       });
 
+      const harmonizedBkb = harmonizeBkbRecordsWithSiplah(prev.bkbRecords || [], prev.school);
+
       return {
         ...prev,
         kwitansiList: updatedKwitansiList,
         manualBkuTransactions: updatedManualBku,
         wageReports: updatedWageReports.length > 0 ? updatedWageReports : prev.wageReports,
+        bkbRecords: harmonizedBkb,
       };
     });
 
