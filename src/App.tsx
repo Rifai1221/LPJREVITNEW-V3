@@ -1985,18 +1985,36 @@ export default function App() {
 
   const handleUpdateBkbRecord = (updatedTx: BkbTransaction) => {
     isDirtyRef.current = true;
-    setAppState((prev) => ({
-      ...prev,
-      bkbRecords: (prev.bkbRecords || []).map((b) => (b.id === updatedTx.id ? updatedTx : b)),
-    }));
+    setAppState((prev) => {
+      const currentList = (prev.bkbRecords && prev.bkbRecords.length > 0)
+        ? prev.bkbRecords
+        : effectiveBkbList;
+      return {
+        ...prev,
+        bkbRecords: currentList.map((b) =>
+          b.id === updatedTx.id || (b.noBukti && b.noBukti !== '-' && b.noBukti === updatedTx.noBukti)
+            ? updatedTx
+            : b
+        ),
+      };
+    });
   };
 
   const handleDeleteBkbRecord = (txToDelete: BkbTransaction) => {
     isDirtyRef.current = true;
-    setAppState((prev) => ({
-      ...prev,
-      bkbRecords: (prev.bkbRecords || []).filter((b) => b.id !== txToDelete.id),
-    }));
+    setAppState((prev) => {
+      const currentList = (prev.bkbRecords && prev.bkbRecords.length > 0)
+        ? prev.bkbRecords
+        : effectiveBkbList;
+      return {
+        ...prev,
+        bkbRecords: currentList.filter(
+          (b) =>
+            b.id !== txToDelete.id &&
+            (b.noBukti === '-' || b.noBukti !== txToDelete.noBukti)
+        ),
+      };
+    });
   };
 
   const handleBulkDeleteBkb = (recordsToDelete: BkbTransaction[]) => {
