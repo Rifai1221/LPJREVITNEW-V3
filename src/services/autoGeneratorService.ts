@@ -2969,7 +2969,6 @@ export function calculateBkuFromTransactions(
         noBukti: manualKwOverride.noBukti || kw.noBukti,
         pengeluaran: manualKwOverride.pengeluaran || kw.nominal,
         kwitansiIdRef: kw.id,
-        metodeBayar: manualKwOverride.metodeBayar || kw.metodeBayar || (/siplah/i.test(`${manualKwOverride.noBukti || kw.noBukti || ''} ${manualKwOverride.uraian || kw.uraian || ''}`) ? 'BANK' : 'TUNAI'),
         isLocked: true,
         isManualDate: true,
       });
@@ -3071,7 +3070,6 @@ export function calculateBkuFromTransactions(
       pengeluaran: finalPengeluaran,
       kategoriBiaya: kw.kategoriBiayaPajak,
       kwitansiIdRef: kw.id,
-      metodeBayar: kw.metodeBayar || (/siplah/i.test(`${kw.noBukti || ''} ${bkuUraian}`) ? 'BANK' : 'TUNAI'),
     });
   });
 

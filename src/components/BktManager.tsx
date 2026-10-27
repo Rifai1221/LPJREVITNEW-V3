@@ -212,12 +212,7 @@ export const BktManager: React.FC<BktManagerProps> = ({
   const totalDebet = useMemo(() => filteredBkt.reduce((sum, tx) => sum + tx.pemasukan, 0), [filteredBkt]);
   const totalKredit = useMemo(() => filteredBkt.reduce((sum, tx) => sum + tx.pengeluaran, 0), [filteredBkt]);
   const lastItem = filteredBkt[filteredBkt.length - 1];
-  const saldoAkhir = useMemo(() => {
-    if (!lastItem) return 0;
-    const raw = lastItem.saldo !== undefined && lastItem.saldo !== null ? lastItem.saldo : totalDebet - totalKredit;
-    if (Math.abs(raw) < 1) return 0;
-    return Math.max(0, raw);
-  }, [lastItem, totalDebet, totalKredit]);
+  const saldoAkhir = lastItem ? lastItem.saldo || (totalDebet - totalKredit) : 0;
 
   // Active filter readable description label
   const activeFilterLabel = useMemo(() => {
@@ -856,22 +851,12 @@ export const BktManager: React.FC<BktManagerProps> = ({
           <p className="text-lg font-bold text-rose-700 mt-1">{formatRupiah(totalKredit)}</p>
           <span className="text-[10px] text-slate-400 block mt-0.5">Pengeluaran belanja BKT</span>
         </div>
-        <div className={`p-4 rounded-xl border shadow-xs ${
-          saldoAkhir === 0
-            ? 'bg-gradient-to-br from-emerald-50 to-teal-50 border-emerald-300'
-            : 'bg-gradient-to-br from-amber-50 to-emerald-50 border-amber-300'
-        }`}>
+        <div className="bg-gradient-to-br from-amber-50 to-emerald-50 p-4 rounded-xl border border-amber-300 shadow-xs">
           <div className="flex items-center justify-between">
-            <span className={`text-[11px] font-extrabold uppercase tracking-wider ${
-              saldoAkhir === 0 ? 'text-emerald-950' : 'text-amber-900'
-            }`}>
-              Saldo Cash Riil (Sisa Tunai)
-            </span>
+            <span className="text-[11px] font-extrabold text-amber-900 uppercase tracking-wider">Saldo Cash Riil (Sisa Tunai)</span>
             <span className="bg-emerald-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow-2xs">Fisik di Tangan</span>
           </div>
-          <p className={`text-lg font-black mt-1 ${
-            saldoAkhir === 0 ? 'text-emerald-800' : 'text-amber-900'
-          }`}>{formatRupiah(saldoAkhir)}</p>
+          <p className="text-lg font-black text-amber-900 mt-1">{formatRupiah(saldoAkhir)}</p>
           <span className="text-[10px] font-medium text-slate-600 block mt-0.5">Uang tunai bendahara siap pakai (diluar bank)</span>
         </div>
       </div>
