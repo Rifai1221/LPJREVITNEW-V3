@@ -1,10 +1,10 @@
 export function formatRupiah(amount: number | null | undefined, withPrefix = true): string {
-  if (amount === null || amount === undefined || isNaN(amount)) {
-    return withPrefix ? 'Rp 0,00' : '0,00';
+  if (amount === null || amount === undefined || isNaN(amount) || Math.abs(amount) < 0.001) {
+    return withPrefix ? 'Rp 0' : '0';
   }
   
   // Format with standard Indonesian numbering (dots for thousands, comma for decimals)
-  const isNegative = amount < 0;
+  const isNegative = amount < -0.001;
   const absAmount = Math.abs(amount);
   
   const parts = absAmount.toFixed(2).split('.');

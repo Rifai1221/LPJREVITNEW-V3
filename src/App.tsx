@@ -855,23 +855,62 @@ export default function App() {
   const handleDeleteBku = (txToDelete: BkuTransaction) => {
     isDirtyRef.current = true;
     setAppState((prev) => {
+      const rawId = txToDelete.id || '';
+      const cleanId = rawId.replace(/^bkt-/, '').replace(/^bku-/, '').replace(/-p[12]$/, '');
+      const refId = (txToDelete.kwitansiIdRef || '').replace(/-p[12]$/, '');
+
       let updatedKwitansi = prev.kwitansiList;
-      if (txToDelete.kwitansiIdRef) {
-        updatedKwitansi = prev.kwitansiList.filter((kw) => kw.id !== txToDelete.kwitansiIdRef);
+      if (txToDelete.kwitansiIdRef || refId || cleanId) {
+        updatedKwitansi = prev.kwitansiList.filter(
+          (kw) =>
+            kw.id !== txToDelete.kwitansiIdRef &&
+            kw.id !== refId &&
+            kw.id !== cleanId &&
+            kw.id !== `kw-${cleanId}` &&
+            kw.id.replace(/-p[12]$/, '') !== refId
+        );
       }
 
-      const updatedManual = (prev.manualBkuTransactions || []).filter((m) => m.id !== txToDelete.id);
+      const updatedManual = (prev.manualBkuTransactions || []).filter((m) => {
+        if (!m) return false;
+        const mClean = m.id.replace(/^bku-/, '').replace(/^kw-/, '').replace(/-p[12]$/, '');
+        if (m.id === rawId || m.id === cleanId || mClean === cleanId) return false;
+        if (refId && (m.kwitansiIdRef === refId || m.kwitansiIdRef === txToDelete.kwitansiIdRef)) return false;
+        return true;
+      });
+
+      const isBkbInflow = rawId.includes('inflow-') || rawId.includes('bkb-');
+      let updatedBkb = prev.bkbRecords;
+      if (isBkbInflow) {
+        const bkbIdToDel = rawId.replace(/^bkt-inflow-/, '');
+        updatedBkb = (prev.bkbRecords || []).filter((b) => b.id !== bkbIdToDel && b.id !== rawId);
+      }
+
       const updatedDeletedIds = Array.from(
-        new Set([...(prev.deletedBkuIds || []), txToDelete.id, txToDelete.kwitansiIdRef || ''])
+        new Set([
+          ...(prev.deletedBkuIds || []),
+          rawId,
+          cleanId,
+          `bku-${cleanId}`,
+          `bku-kw-${cleanId}`,
+          `kw-${cleanId}`,
+          txToDelete.kwitansiIdRef || '',
+          refId,
+          `kw-${refId}`,
+          `bku-kw-${refId}`,
+        ])
       ).filter(Boolean);
 
       return {
         ...prev,
         kwitansiList: updatedKwitansi,
         manualBkuTransactions: updatedManual,
-        deletedBkuIds: updatedDeletedIds,
+        bkbRecords: updatedBkb,
+        deletedBkuIds: updatedDeletedIds as string[],
       };
     });
+
+    handleManualSaveNow();
   };
 
   const handleBulkDeleteBku = (txList: BkuTransaction[]) => {

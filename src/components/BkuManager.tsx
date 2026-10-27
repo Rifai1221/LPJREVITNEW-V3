@@ -1030,7 +1030,7 @@ export const BkuManager: React.FC<BkuManagerProps> = ({
       </div>
 
       {/* Saldo Minus Anti-Deficit Alert Banner */}
-      {saldoAkhir < -0.01 && (
+      {saldoAkhir < -0.99 && (
         <div className="bg-gradient-to-r from-amber-50 to-rose-50 border-2 border-rose-300 text-rose-950 p-4 rounded-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-3 shadow-xs animate-in fade-in">
           <div className="flex items-start gap-3">
             <div className="p-2 bg-rose-100 rounded-xl text-rose-700 shrink-0 mt-0.5 md:mt-0">

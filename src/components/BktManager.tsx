@@ -424,6 +424,7 @@ export const BktManager: React.FC<BktManagerProps> = ({
           noBukti: tx.noBukti,
           penerimaan: tx.pemasukan,
           pengeluaran: tx.pengeluaran,
+          kwitansiIdRef: tx.kwitansiIdRef,
         });
       }
     }

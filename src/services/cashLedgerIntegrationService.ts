@@ -205,8 +205,14 @@ export function calculateIntegratedBkt(
   if (hasBkbWithdrawals) {
     bkbList.forEach((bkbTx, idx) => {
       if ((bkbTx.pengeluaran || 0) > 0) {
-        // Lewati biaya administrasi bank langsung jika bukan penarikan tunai
-        if (bkbTx.kategori === 'BIAYA_ADMIN') return;
+        // Lewati biaya administrasi bank & belanja non-tunai SIPLah (karena SIPLah langsung transfer dari bank ke toko, bukan tarik tunai ke bendahara)
+        const isNonCashBankDebit =
+          bkbTx.kategori === 'BIAYA_ADMIN' ||
+          bkbTx.kategori === 'SIPLAH' ||
+          bkbTx.kategori === 'BELANJA_NON_TUNAI' ||
+          /siplah|non-tunai|non tunai|daring|transfer/i.test(`${bkbTx.kategori || ''} ${bkbTx.uraian || ''} ${bkbTx.noBukti || ''}`);
+
+        if (isNonCashBankDebit) return;
 
         bktItems.push({
           id: `bkt-inflow-${bkbTx.id || idx}`,
@@ -254,8 +260,14 @@ export function calculateIntegratedBkt(
       return;
     }
 
-    // Lewati jika transaksi ditandai transfer bank langsung non-tunai
-    if (item.metodeBayar === 'BANK') {
+    // Lewati jika transaksi ditandai transfer bank langsung non-tunai atau belanja SIPLah Daring
+    const isNonCashOrSiplah =
+      item.metodeBayar === 'BANK' ||
+      item.kategoriBiaya === 'Siplah' ||
+      item.kategoriBiaya === 'SIPLAH' ||
+      /siplah|daring/i.test(`${item.noBukti || ''} ${item.uraian || ''} ${item.kategoriBiaya || ''}`);
+
+    if (isNonCashOrSiplah) {
       return;
     }
 
@@ -498,14 +510,19 @@ export function reconcileCashBalances(
   bkbSaldo: number,
   bktSaldo: number
 ): CashReconciliationResult {
-  const sumSubLedgers = bkbSaldo + bktSaldo;
-  const selisih = Math.round((bkuSaldo - sumSubLedgers) * 100) / 100;
+  const normBku = Math.abs(bkuSaldo) < 0.01 ? 0 : bkuSaldo;
+  const normBkb = Math.abs(bkbSaldo) < 0.01 ? 0 : bkbSaldo;
+  const normBkt = Math.abs(bktSaldo) < 0.01 ? 0 : bktSaldo;
+
+  const sumSubLedgers = normBkb + normBkt;
+  const rawSelisih = normBku - sumSubLedgers;
+  const selisih = Math.abs(rawSelisih) < 0.01 ? 0 : Math.round(rawSelisih * 100) / 100;
   const isBalanced = Math.abs(selisih) < 0.01;
 
   return {
-    saldoBku: bkuSaldo,
-    saldoBank: bkbSaldo,
-    saldoTunai: bktSaldo,
+    saldoBku: normBku,
+    saldoBank: normBkb,
+    saldoTunai: normBkt,
     selisih: isBalanced ? 0 : selisih,
     isBalanced,
     statusText: isBalanced

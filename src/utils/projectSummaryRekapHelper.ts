@@ -757,27 +757,110 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
       messages.push(`Dibuat kwitansi baru untuk ${newKw.uraian.slice(0, 45)}... (Rp ${targetNominal.toLocaleString('id-ID')})`);
     } else {
       // Jika kwitansi sudah ada:
-      // JANGAN PERNAH membuat kwitansi baru!
+      // JANGAN PERNAH membuat kwitansi baru! Selaraskan kwitansi yang ada tepat ke pagu target
       const currentSum = existing.reduce((s, k) => s + (k.nominal || 0), 0);
       const diff = targetNominal - currentSum;
-      // Jika ada selisih pada kwitansi tunggal, selaraskan langsung pas sesuai pagu
-      if (Math.abs(diff) > 0.01 && existing.length === 1) {
-        const targetKwId = existing[0].id;
-        nextKwitansiList = nextKwitansiList.map((k) => {
-          if (k.id === targetKwId) {
-            return {
-              ...k,
-              nominal: targetNominal,
-              items: k.items && k.items.length === 1 ? [{
-                ...k.items[0],
-                hargaSatuan: targetNominal,
-                jumlah: targetNominal,
-              }] : k.items,
-            };
+
+      if (Math.abs(diff) > 0.01) {
+        if (existing.length === 1) {
+          const targetKwId = existing[0].id;
+          nextKwitansiList = nextKwitansiList.map((k) => {
+            if (k.id === targetKwId) {
+              return {
+                ...k,
+                nominal: targetNominal,
+                items: k.items && k.items.length === 1 ? [{
+                  ...k.items[0],
+                  hargaSatuan: targetNominal,
+                  jumlah: targetNominal,
+                }] : k.items,
+                pph23Amount: k.isPph23 ? Math.round(targetNominal * 0.02) : k.pph23Amount,
+              };
+            }
+            return k;
+          });
+          messages.push(`Diselaraskan kwitansi ${existing[0].noBukti} sebesar Rp ${targetNominal.toLocaleString('id-ID')} pas sesuai pagu.`);
+        } else {
+          // Multi-kwitansi (misal 3 termin Konsultan Perencana atau 4 termin Konsultan Pengawas)
+          // Prioritaskan penyesuaian pada termin pelunasan akhir
+          const targetLastKw =
+            existing.find((k) => /pelunasan|akhir/i.test(k.uraian || '') || (k.noBukti || '').includes('03') || (k.noBukti || '').includes('04')) ||
+            existing[existing.length - 1];
+
+          const newLastNominal = (targetLastKw.nominal || 0) + diff;
+          if (newLastNominal >= 1000) {
+            // Termin akhir mampu menampung selisih
+            nextKwitansiList = nextKwitansiList.map((k) => {
+              if (k.id === targetLastKw.id) {
+                const updatedItems = (k.items || []).map((it, idx, arr) => {
+                  if (idx === arr.length - 1) {
+                    const otherItemsSum = arr.slice(0, -1).reduce((s, x) => s + (x.jumlah || 0), 0);
+                    const itemJml = Math.max(0, newLastNominal - otherItemsSum);
+                    return { ...it, hargaSatuan: itemJml, jumlah: itemJml };
+                  }
+                  return it;
+                });
+
+                return {
+                  ...k,
+                  nominal: newLastNominal,
+                  items: updatedItems.length > 0 ? updatedItems : [{
+                    namaBarang: k.uraian,
+                    volume: 1,
+                    satuan: 'ls',
+                    hargaSatuan: newLastNominal,
+                    jumlah: newLastNominal,
+                    tag: k.items?.[0]?.tag || catKey,
+                  }],
+                  pph23Amount: k.isPph23 ? Math.round(newLastNominal * 0.02) : k.pph23Amount,
+                };
+              }
+              return k;
+            });
+            messages.push(`Diselaraskan kwitansi termin pelunasan ${targetLastKw.noBukti} (${catKey}) menjadi Rp ${newLastNominal.toLocaleString('id-ID')} pas sesuai pagu.`);
+          } else {
+            // Jika selisih lebih besar dari nominal termin akhir, lakukan scaling proporsional ke semua termin
+            const scale = currentSum > 0 ? targetNominal / currentSum : 1;
+            let runningTotal = 0;
+            const updatedNominals = new Map<string, number>();
+
+            existing.forEach((k, idx) => {
+              if (idx === existing.length - 1) {
+                const finalRemaining = Math.max(0, targetNominal - runningTotal);
+                updatedNominals.set(k.id, finalRemaining);
+              } else {
+                const scaledVal = Math.round((k.nominal || 0) * scale);
+                runningTotal += scaledVal;
+                updatedNominals.set(k.id, scaledVal);
+              }
+            });
+
+            nextKwitansiList = nextKwitansiList.map((k) => {
+              if (updatedNominals.has(k.id)) {
+                const newNom = updatedNominals.get(k.id)!;
+                return {
+                  ...k,
+                  nominal: newNom,
+                  items: k.items && k.items.length === 1 ? [{
+                    ...k.items[0],
+                    hargaSatuan: newNom,
+                    jumlah: newNom,
+                  }] : [{
+                    namaBarang: k.uraian,
+                    volume: 1,
+                    satuan: 'ls',
+                    hargaSatuan: newNom,
+                    jumlah: newNom,
+                    tag: k.items?.[0]?.tag || catKey,
+                  }],
+                  pph23Amount: k.isPph23 ? Math.round(newNom * 0.02) : k.pph23Amount,
+                };
+              }
+              return k;
+            });
+            messages.push(`Diselaraskan seluruh ${existing.length} kwitansi ${catKey} secara proporsional tepat pas sesuai pagu.`);
           }
-          return k;
-        });
-        messages.push(`Diselaraskan kwitansi ${existing[0].noBukti} sebesar Rp ${targetNominal.toLocaleString('id-ID')} pas sesuai pagu.`);
+        }
       }
     }
   };
@@ -1229,27 +1312,42 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
   } else if (materialKws.length > 0 && targetMaterialFinal > 0) {
     const currentMatTotal = materialKws.reduce((s, k) => s + (k.nominal || 0), 0);
     const diffMat = targetMaterialFinal - currentMatTotal;
-    if (Math.abs(diffMat) > 0.01) {
+    if (Math.abs(diffMat) > 0.001) {
       const lastMatId = materialKws[materialKws.length - 1].id;
       nextKwitansiList = nextKwitansiList.map((k) => {
         if (k.id === lastMatId) {
           const adjustedNominal = Math.max(1000, (k.nominal || 0) + diffMat);
-          const scale = k.nominal > 0 ? adjustedNominal / k.nominal : 1;
-          const updatedItems = (k.items || []).map((it) => ({
-            ...it,
-            jumlah: Math.round(it.jumlah * scale),
-          }));
+          let updatedItems = (k.items && k.items.length > 0)
+            ? k.items.map((it) => ({ ...it }))
+            : [{
+                namaBarang: k.uraian || 'Bahan Material Bangunan',
+                volume: 1,
+                satuan: 'ls',
+                hargaSatuan: adjustedNominal,
+                jumlah: adjustedNominal,
+                tag: 'MAT',
+              }];
+
+          if (updatedItems.length === 1) {
+            updatedItems[0].jumlah = adjustedNominal;
+            updatedItems[0].hargaSatuan = updatedItems[0].volume > 0 ? Math.round((adjustedNominal / updatedItems[0].volume) * 100) / 100 : adjustedNominal;
+          } else {
+            const scale = k.nominal > 0 ? adjustedNominal / k.nominal : 1;
+            updatedItems = updatedItems.map((it) => ({
+              ...it,
+              jumlah: Math.round(it.jumlah * scale),
+            }));
+            const otherSum = updatedItems.slice(0, -1).reduce((s, x) => s + (x.jumlah || 0), 0);
+            const lastJml = Math.max(0, adjustedNominal - otherSum);
+            const lastIdx = updatedItems.length - 1;
+            updatedItems[lastIdx].jumlah = lastJml;
+            updatedItems[lastIdx].hargaSatuan = updatedItems[lastIdx].volume > 0 ? Math.round((lastJml / updatedItems[lastIdx].volume) * 100) / 100 : lastJml;
+          }
+
           return {
             ...k,
             nominal: adjustedNominal,
-            items: updatedItems.length > 0 ? updatedItems : [{
-              namaBarang: k.uraian,
-              volume: 1,
-              satuan: 'ls',
-              hargaSatuan: adjustedNominal,
-              jumlah: adjustedNominal,
-              tag: 'MAT',
-            }],
+            items: updatedItems,
           };
         }
         return k;
