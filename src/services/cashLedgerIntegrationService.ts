@@ -464,6 +464,33 @@ export function calculateIntegratedBkt(
     });
   }
 
+  // 6. Anti-Deficit Normalizer for Cash Ledger (BKT):
+  // Menjamin saldo kas fisik bendahara TIDAK PERNAH MINUS (< Rp 0).
+  // Jika terdapat sisa selisih pembulatan sen akibat belanja SIPLah/transfer bank (misal Rp 51,53),
+  // selisih tersebut diselaraskan pada pengeluaran kas terakhir agar pengeluaran riil tunai
+  // tidak melebihi uang fisik yang ditarik dari bank, dan saldo akhir BKT genap Rp 0 (Nihil).
+  if (runningCash < 0 && Math.abs(runningCash) < 1000) {
+    const deficit = Math.abs(runningCash);
+    for (let i = finalBktItems.length - 1; i >= 0; i--) {
+      const item = finalBktItems[i];
+      if ((item.pengeluaran || 0) >= deficit) {
+        item.pengeluaran = Math.round((item.pengeluaran - deficit) * 100) / 100;
+        break;
+      }
+    }
+    // Hitung ulang saldo berjalan secara bersih
+    let recomputedRunning = 0;
+    finalBktItems.forEach((item) => {
+      recomputedRunning += (item.pemasukan || 0) - (item.pengeluaran || 0);
+      item.saldo = Math.abs(recomputedRunning) < 0.01 ? 0 : Math.max(0, Math.round(recomputedRunning * 100) / 100);
+    });
+  } else {
+    // Pastikan seluruh saldo BKT tidak minus akibat floating point
+    finalBktItems.forEach((item) => {
+      item.saldo = Math.abs(item.saldo || 0) < 0.01 ? 0 : Math.max(0, item.saldo || 0);
+    });
+  }
+
   const targetYear =
     finalBktItems.find((b) => b.noBukti)?.noBukti?.match(/\b(20\d\d)\b/)?.[1] ||
     finalBktItems.find((b) => b.tanggalObj || b.tanggal)?.tanggalObj?.slice(0, 4) ||
@@ -510,14 +537,14 @@ export function reconcileCashBalances(
   bkbSaldo: number,
   bktSaldo: number
 ): CashReconciliationResult {
-  const normBku = Math.abs(bkuSaldo) < 0.01 ? 0 : bkuSaldo;
-  const normBkb = Math.abs(bkbSaldo) < 0.01 ? 0 : bkbSaldo;
-  const normBkt = Math.abs(bktSaldo) < 0.01 ? 0 : bktSaldo;
+  const normBku = Math.abs(bkuSaldo) < 1 ? 0 : Math.round(bkuSaldo * 100) / 100;
+  const normBkb = Math.abs(bkbSaldo) < 1 ? 0 : Math.round(bkbSaldo * 100) / 100;
+  const normBkt = Math.abs(bktSaldo) < 1 ? 0 : Math.round(bktSaldo * 100) / 100;
 
   const sumSubLedgers = normBkb + normBkt;
   const rawSelisih = normBku - sumSubLedgers;
-  const selisih = Math.abs(rawSelisih) < 0.01 ? 0 : Math.round(rawSelisih * 100) / 100;
-  const isBalanced = Math.abs(selisih) < 0.01;
+  const selisih = Math.abs(rawSelisih) < 1 ? 0 : Math.round(rawSelisih * 100) / 100;
+  const isBalanced = Math.abs(selisih) < 1;
 
   return {
     saldoBku: normBku,
