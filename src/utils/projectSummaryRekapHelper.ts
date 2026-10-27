@@ -1058,15 +1058,24 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
   } else if (existingSiplahKw.length > 0 && paguMap.SIPLAH > 0) {
     const sumSiplah = existingSiplahKw.reduce((s, k) => s + (k.nominal || 0), 0);
     const diffSiplah = paguMap.SIPLAH - sumSiplah;
-    if (Math.abs(diffSiplah) > 0.01 && Math.abs(diffSiplah) < 50000) {
+    if (Math.abs(diffSiplah) > 0.001) {
       const lastSiplah = existingSiplahKw[existingSiplahKw.length - 1];
       const targetId = lastSiplah.id;
       const targetNewNominal = Math.max(0, (lastSiplah.nominal || 0) + diffSiplah);
       nextKwitansiList = nextKwitansiList.map((k) => {
         if (k.id === targetId) {
+          const updatedItems = (k.items || []).map((it, idx, arr) => {
+            if (idx === arr.length - 1) {
+              const otherSum = arr.slice(0, -1).reduce((s, x) => s + (x.jumlah || 0), 0);
+              const lastJml = Math.max(0, targetNewNominal - otherSum);
+              return { ...it, jumlah: lastJml, hargaSatuan: lastJml };
+            }
+            return it;
+          });
           return {
             ...k,
             nominal: targetNewNominal,
+            items: updatedItems.length > 0 ? updatedItems : k.items,
           };
         }
         return k;

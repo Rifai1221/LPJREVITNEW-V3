@@ -499,14 +499,14 @@ export function reconcileCashBalances(
   bktSaldo: number
 ): CashReconciliationResult {
   const sumSubLedgers = bkbSaldo + bktSaldo;
-  const selisih = bkuSaldo - sumSubLedgers;
-  const isBalanced = Math.abs(selisih) === 0;
+  const selisih = Math.round((bkuSaldo - sumSubLedgers) * 100) / 100;
+  const isBalanced = Math.abs(selisih) < 0.01;
 
   return {
     saldoBku: bkuSaldo,
     saldoBank: bkbSaldo,
     saldoTunai: bktSaldo,
-    selisih,
+    selisih: isBalanced ? 0 : selisih,
     isBalanced,
     statusText: isBalanced
       ? 'Seimbang & Terintegrasi Penuh (BKU = Bank + Tunai)'

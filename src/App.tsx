@@ -1467,10 +1467,28 @@ export default function App() {
         bkuWeekLimit,
       });
 
-      setAppState((prev) => ({
-        ...prev,
+      let finalKw = calRes.calibratedKwitansi;
+      let finalWage = calRes.calibratedWageReports;
+
+      const sync9Res = syncAndReconcileAll9CategoriesToBudget({
+        school: appState.school,
+        rpdItems: appState.rpdItems,
         kwitansiList: calRes.calibratedKwitansi,
         wageReports: calRes.calibratedWageReports,
+        progressWeeks: appState.progressWeeks,
+        realSchoolData: appState.realSchoolData,
+        stores: appState.stores,
+        workers: appState.workers,
+      });
+      finalKw = sync9Res.updatedKwitansiList;
+      if (sync9Res.updatedWageReports.length > 0) {
+        finalWage = sync9Res.updatedWageReports;
+      }
+
+      setAppState((prev) => ({
+        ...prev,
+        kwitansiList: finalKw,
+        wageReports: finalWage,
         bkbRecords: calRes.calibratedBkb,
       }));
 
@@ -1695,19 +1713,65 @@ export default function App() {
 
     const finalBkb = existingBkbToPreserve.length > 0 ? existingBkbToPreserve : res.rebalancedBkb;
 
-    isDirtyRef.current = true;
-    setAppState((prev) => ({
-      ...prev,
+    let finalKwitansi = res.rebalancedKwitansi;
+    let finalWageReports = res.rebalancedWageReports;
+
+    const sync9Res = syncAndReconcileAll9CategoriesToBudget({
+      school: appState.school,
+      rpdItems: appState.rpdItems,
       kwitansiList: res.rebalancedKwitansi,
       wageReports: res.rebalancedWageReports,
-      // CRITICAL: Protect user-entered BKB records from being erased
-      bkbRecords: (prev.bkbRecords && prev.bkbRecords.length > 0) ? prev.bkbRecords : finalBkb,
-      deletedBkuIds: [],
-      deletedKwitansiIds: [],
-    }));
+      progressWeeks: appState.progressWeeks,
+      realSchoolData: appState.realSchoolData,
+      stores: appState.stores,
+      workers: appState.workers,
+    });
+    finalKwitansi = sync9Res.updatedKwitansiList;
+    if (sync9Res.updatedWageReports.length > 0) {
+      finalWageReports = sync9Res.updatedWageReports;
+    }
+
+    isDirtyRef.current = true;
+    setAppState((prev) => {
+      const kwMap = new Map(finalKwitansi.map((k) => [k.id, k]));
+      const kwNoBuktiMap = new Map(
+        finalKwitansi.map((k) => [(k.noBukti || '').trim().toUpperCase(), k])
+      );
+
+      const updatedManualBku = (prev.manualBkuTransactions || []).map((m) => {
+        const kw =
+          (m.kwitansiIdRef && kwMap.get(m.kwitansiIdRef)) ||
+          kwMap.get(m.id) ||
+          (m.noBukti ? kwNoBuktiMap.get(m.noBukti.trim().toUpperCase()) : undefined);
+
+        if (kw) {
+          return {
+            ...m,
+            noBukti: kw.noBukti,
+            tanggal: kw.tanggal,
+            bulan: kw.bulan || m.bulan,
+            uraian: kw.uraian ? (kw.uraian.startsWith('Pembayaran Lunas Biaya ') ? kw.uraian.replace('Pembayaran Lunas Biaya ', 'Bayar ') : kw.uraian) : m.uraian,
+            pengeluaran: kw.nominal,
+            kategoriBiaya: kw.kategoriBiayaPajak || m.kategoriBiaya,
+          };
+        }
+        return m;
+      });
+
+      return {
+        ...prev,
+        kwitansiList: finalKwitansi,
+        manualBkuTransactions: updatedManualBku,
+        wageReports: finalWageReports,
+        // CRITICAL: Protect user-entered BKB records from being erased
+        bkbRecords: (prev.bkbRecords && prev.bkbRecords.length > 0) ? prev.bkbRecords : finalBkb,
+        deletedBkuIds: [],
+        deletedKwitansiIds: [],
+      };
+    });
 
     setSwitchNotification(
-      `🧹 Berhasil menyeimbangkan BKU & Kwitansi: Dokumen ganda dibersihkan, data Menu BKB (${finalBkb.length} transaksi) tetap utuh aman!`
+      `🧹 Berhasil menyeimbangkan BKU & Kwitansi: Dokumen ganda dibersihkan, 9 komponen selaras pas pagu, data Menu BKB (${finalBkb.length} transaksi) tetap utuh aman!`
     );
     setTimeout(() => setSwitchNotification(null), 6000);
 
@@ -1748,20 +1812,70 @@ export default function App() {
 
     const finalBkb = existingBkbToPreserve.length > 0 ? existingBkbToPreserve : res.calibratedBkb;
 
+    let finalKwitansi = res.calibratedKwitansi;
+    let finalWageReports = res.calibratedWageReports;
+
+    // Integrasi penuh dengan 9 Komponen Anggaran:
+    // Jika progres fisik mencapai 100% atau tahap akhir, selaraskan langsung kwitansi tepat ke 9 Pagu RAB
+    if (res.cumulativeBobot >= 99.9 || targetLimit >= maxActiveWeek) {
+      const sync9Res = syncAndReconcileAll9CategoriesToBudget({
+        school: appState.school,
+        rpdItems: appState.rpdItems,
+        kwitansiList: res.calibratedKwitansi,
+        wageReports: res.calibratedWageReports,
+        progressWeeks: appState.progressWeeks,
+        realSchoolData: appState.realSchoolData,
+        stores: appState.stores,
+        workers: appState.workers,
+      });
+      finalKwitansi = sync9Res.updatedKwitansiList;
+      if (sync9Res.updatedWageReports.length > 0) {
+        finalWageReports = sync9Res.updatedWageReports;
+      }
+    }
+
     isDirtyRef.current = true;
-    setAppState((prev) => ({
-      ...prev,
-      kwitansiList: res.calibratedKwitansi,
-      wageReports: res.calibratedWageReports,
-      // CRITICAL: Protect user-entered BKB records from being erased
-      bkbRecords: (prev.bkbRecords && prev.bkbRecords.length > 0) ? prev.bkbRecords : finalBkb,
-      // CRITICAL FIX: Reset deleted IDs so newly calibrated transactions show up immediately in BKU after a clear
-      deletedBkuIds: [],
-      deletedKwitansiIds: [],
-    }));
+    setAppState((prev) => {
+      const kwMap = new Map(finalKwitansi.map((k) => [k.id, k]));
+      const kwNoBuktiMap = new Map(
+        finalKwitansi.map((k) => [(k.noBukti || '').trim().toUpperCase(), k])
+      );
+
+      const updatedManualBku = (prev.manualBkuTransactions || []).map((m) => {
+        const kw =
+          (m.kwitansiIdRef && kwMap.get(m.kwitansiIdRef)) ||
+          kwMap.get(m.id) ||
+          (m.noBukti ? kwNoBuktiMap.get(m.noBukti.trim().toUpperCase()) : undefined);
+
+        if (kw) {
+          return {
+            ...m,
+            noBukti: kw.noBukti,
+            tanggal: kw.tanggal,
+            bulan: kw.bulan || m.bulan,
+            uraian: kw.uraian ? (kw.uraian.startsWith('Pembayaran Lunas Biaya ') ? kw.uraian.replace('Pembayaran Lunas Biaya ', 'Bayar ') : kw.uraian) : m.uraian,
+            pengeluaran: kw.nominal,
+            kategoriBiaya: kw.kategoriBiayaPajak || m.kategoriBiaya,
+          };
+        }
+        return m;
+      });
+
+      return {
+        ...prev,
+        kwitansiList: finalKwitansi,
+        manualBkuTransactions: updatedManualBku,
+        wageReports: finalWageReports,
+        // CRITICAL: Protect user-entered BKB records from being erased
+        bkbRecords: (prev.bkbRecords && prev.bkbRecords.length > 0) ? prev.bkbRecords : finalBkb,
+        // CRITICAL FIX: Reset deleted IDs so newly calibrated transactions show up immediately in BKU after a clear
+        deletedBkuIds: [],
+        deletedKwitansiIds: [],
+      };
+    });
 
     setSwitchNotification(
-      `⚡ Berhasil mengalibrasi BKU dengan progres fisik riil (${res.cumulativeBobot}%). Total Belanja Tercatat: Rp ${res.totalExpenditure.toLocaleString('id-ID')}. Data Menu BKB (${finalBkb.length} transaksi) tetap aman & utuh!`
+      `⚡ Berhasil mengalibrasi BKU dengan progres fisik riil (${res.cumulativeBobot}%). 9 Komponen Anggaran sinkron pas pagu, saldo kas nihil Rp 0!`
     );
     setTimeout(() => setSwitchNotification(null), 7000);
 

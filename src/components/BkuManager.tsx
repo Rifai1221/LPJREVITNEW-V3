@@ -1030,7 +1030,7 @@ export const BkuManager: React.FC<BkuManagerProps> = ({
       </div>
 
       {/* Saldo Minus Anti-Deficit Alert Banner */}
-      {saldoAkhir < 0 && (
+      {saldoAkhir < -0.01 && (
         <div className="bg-gradient-to-r from-amber-50 to-rose-50 border-2 border-rose-300 text-rose-950 p-4 rounded-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-3 shadow-xs animate-in fade-in">
           <div className="flex items-start gap-3">
             <div className="p-2 bg-rose-100 rounded-xl text-rose-700 shrink-0 mt-0.5 md:mt-0">
@@ -1377,8 +1377,8 @@ export const BkuManager: React.FC<BkuManagerProps> = ({
             </div>
             <div className="flex justify-between border-t border-slate-100 pt-1.5 font-bold text-slate-900">
               <span>Perbedaan / Selisih:</span>
-              <span className={`font-mono ${Math.abs(closingSelisih) === 0 ? 'text-emerald-600' : 'text-rose-600 font-black'}`}>
-                {Math.abs(closingSelisih) === 0
+              <span className={`font-mono ${Math.abs(closingSelisih) < 0.01 ? 'text-emerald-600' : 'text-rose-600 font-black'}`}>
+                {Math.abs(closingSelisih) < 0.01
                   ? 'Rp 0,00 (Cocok / Seimbang)'
                   : `${formatRupiah(Math.abs(closingSelisih))} (${closingSelisih > 0 ? 'Kurang Catat' : 'Lebih Catat'})`}
               </span>
@@ -1388,7 +1388,7 @@ export const BkuManager: React.FC<BkuManagerProps> = ({
               <span>* Data Tunai diambil dari Buku Tunai (BKT)</span>
             </div>
 
-            {saldoAkhir < 0 && (onAutoBalanceKwitansi || onCleanDuplicates) && (
+            {saldoAkhir < -0.01 && (onAutoBalanceKwitansi || onCleanDuplicates) && (
               <div className="mt-3 pt-2.5 border-t border-rose-200">
                 <button
                   type="button"
