@@ -39,6 +39,7 @@ import {
   calculateIntegratedBkt,
   reconcileCashBalances,
   migrateAndTransformAppState,
+  harmonizeBkbRecordsWithSiplah,
 } from './services/cashLedgerIntegrationService';
 import {
   SchoolTenant,
@@ -521,10 +522,12 @@ export default function App() {
   // Derived calculations
   const effectiveBkbList = useMemo(() => {
     if (appState.bkbRecords && appState.bkbRecords.length > 0) {
-      return calculateRunningBkb(appState.bkbRecords);
+      const harmonized = harmonizeBkbRecordsWithSiplah(appState.bkbRecords, appState.school);
+      return calculateRunningBkb(harmonized);
     }
     const standard = generateStandardBkbRecords(appState.school, appState.progressWeeks, bkuWeekLimit);
-    return calculateRunningBkb(standard);
+    const harmonized = harmonizeBkbRecordsWithSiplah(standard, appState.school);
+    return calculateRunningBkb(harmonized);
   }, [appState.bkbRecords, appState.school, appState.progressWeeks, bkuWeekLimit]);
 
   const bkuList = useMemo(() => {

@@ -60,6 +60,7 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
   const [formData, setFormData] = useState({
     tanggal: minStartDateInfo.startDate,
     jenis: 'KREDIT' as 'DEBIT' | 'KREDIT', // DEBIT = Penerimaan Bank, KREDIT = Penarikan/Pengeluaran Bank
+    kategori: 'TARIK_TUNAI' as 'TARIK_TUNAI' | 'SIPLAH' | 'BELANJA_NON_TUNAI' | 'BIAYA_ADMIN' | 'PENERIMAAN_TERMIN',
     uraian: '',
     noBukti: '',
     nominal: 0,
@@ -97,6 +98,7 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
     setFormData({
       tanggal: minStartDateInfo.startDate,
       jenis: 'KREDIT',
+      kategori: 'TARIK_TUNAI',
       uraian: '',
       noBukti: `BB-${String(bkbList.length + 1).padStart(2, '0')}/${schoolYear}`,
       nominal: 0,
@@ -116,9 +118,12 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
       dateInput = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
     }
 
+    const defaultKat = tx.kategori || (/siplah|non-tunai|daring/i.test(tx.uraian) ? 'SIPLAH' : tx.penerimaan > 0 ? 'PENERIMAAN_TERMIN' : 'TARIK_TUNAI');
+
     setFormData({
       tanggal: dateInput,
       jenis: tx.penerimaan > 0 ? 'DEBIT' : 'KREDIT',
+      kategori: defaultKat as any,
       uraian: tx.uraian,
       noBukti: tx.noBukti === '-' ? '' : tx.noBukti,
       nominal: tx.penerimaan > 0 ? tx.penerimaan : tx.pengeluaran,
@@ -156,6 +161,8 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
     const bulanStr = `${indMonths[parseInt(m, 10) - 1]} ${y}`;
     const displayTanggal = `${d}/${m}/${y}`;
 
+    const finalKat = formData.jenis === 'DEBIT' ? 'PENERIMAAN_TERMIN' : formData.kategori;
+
     if (editingTx) {
       if (onUpdateBkbRecord) {
         onUpdateBkbRecord({
@@ -167,6 +174,7 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
           noBukti: formData.noBukti.trim() || '-',
           penerimaan: formData.jenis === 'DEBIT' ? formData.nominal : 0,
           pengeluaran: formData.jenis === 'KREDIT' ? formData.nominal : 0,
+          kategori: finalKat as any,
         });
       }
     } else {
@@ -179,6 +187,7 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
           noBukti: formData.noBukti.trim() || '-',
           penerimaan: formData.jenis === 'DEBIT' ? formData.nominal : 0,
           pengeluaran: formData.jenis === 'KREDIT' ? formData.nominal : 0,
+          kategori: finalKat as any,
         });
       }
     }
@@ -454,7 +463,49 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
                     </td>
                     <td className="py-2.5 px-3 text-center text-slate-500 font-mono">{idx + 1}</td>
                     <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap font-mono">{tx.tanggal}</td>
-                    <td className="py-2.5 px-4 font-medium text-slate-900">{tx.uraian}</td>
+                    <td className="py-2.5 px-4 font-medium text-slate-900">
+                      <div className="flex flex-col gap-1">
+                        <span>{tx.uraian}</span>
+                        {(() => {
+                          const isSiplah =
+                            tx.kategori === 'SIPLAH' ||
+                            tx.kategori === 'BELANJA_NON_TUNAI' ||
+                            /siplah|non-tunai|daring|transfer/i.test(`${tx.kategori || ''} ${tx.uraian || ''}`);
+                          const isTarik =
+                            tx.kategori === 'TARIK_TUNAI' ||
+                            (!isSiplah && tx.pengeluaran > 0 && /tarik|penarikan/i.test(tx.uraian));
+                          const isAdmin = tx.kategori === 'BIAYA_ADMIN' || /admin|adm bank/i.test(tx.uraian);
+
+                          if (isSiplah) {
+                            return (
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="px-2 py-0.5 rounded text-[10px] bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                                  🛒 Non-Tunai SIPLah (Bank Langsung)
+                                </span>
+                                <span className="text-[10px] text-emerald-700 font-semibold">✓ Tercatat di BKB & BKU (Tidak Masuk BKT)</span>
+                              </div>
+                            );
+                          }
+                          if (isTarik) {
+                            return (
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-100 text-emerald-900 border border-emerald-300 font-bold">
+                                  💵 Tarik Tunai Kas (Masuk ke BKT)
+                                </span>
+                              </div>
+                            );
+                          }
+                          if (isAdmin) {
+                            return (
+                              <span className="px-2 py-0.5 rounded text-[10px] bg-slate-100 text-slate-700 border border-slate-300 font-bold w-fit">
+                                🏛️ Biaya Admin Bank
+                              </span>
+                            );
+                          }
+                          return null;
+                        })()}
+                      </div>
+                    </td>
                     <td className="py-2.5 px-3 text-center font-mono text-[11px] text-slate-600 bg-slate-50 rounded">
                       {tx.noBukti || '-'}
                     </td>
@@ -562,7 +613,7 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
-                    onClick={() => setFormData({ ...formData, jenis: 'DEBIT' })}
+                    onClick={() => setFormData({ ...formData, jenis: 'DEBIT', kategori: 'PENERIMAAN_TERMIN' })}
                     className={`py-2 px-3 rounded-lg text-xs font-bold border transition cursor-pointer flex items-center justify-center gap-1.5 ${
                       formData.jenis === 'DEBIT'
                         ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
@@ -580,10 +631,119 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
                         : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
                     }`}
                   >
-                    <span>Kredit (Penarikan Tunai Kas)</span>
+                    <span>Kredit (Pengeluaran / Penarikan)</span>
                   </button>
                 </div>
               </div>
+
+              {/* Kategori Pengeluaran Bank (Hanya jika KREDIT) */}
+              {formData.jenis === 'KREDIT' && (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider">
+                      Klasifikasi Pengeluaran Bank:
+                    </label>
+                    <span className="text-[10px] text-slate-500 font-medium">Pilih agar pembukuan BKT tepat</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, kategori: 'TARIK_TUNAI' })}
+                      className={`py-1.5 px-2.5 rounded-lg text-xs font-bold border text-left transition cursor-pointer ${
+                        formData.kategori === 'TARIK_TUNAI'
+                          ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      <span>💵 Tarik Tunai Kas (Masuk ke BKT)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newUraian = formData.uraian.toLowerCase().includes('penarikan') ? '' : formData.uraian;
+                        setFormData({ ...formData, kategori: 'SIPLAH', uraian: newUraian });
+                      }}
+                      className={`py-1.5 px-2.5 rounded-lg text-xs font-bold border text-left transition cursor-pointer ${
+                        formData.kategori === 'SIPLAH'
+                          ? 'bg-amber-600 text-white border-amber-600 shadow-2xs'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      <span>🛒 Belanja SIPLah (Non-Tunai / Daring)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, kategori: 'BIAYA_ADMIN' })}
+                      className={`py-1.5 px-2.5 rounded-lg text-xs font-bold border text-left transition cursor-pointer ${
+                        formData.kategori === 'BIAYA_ADMIN'
+                          ? 'bg-slate-700 text-white border-slate-700 shadow-2xs'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      <span>🏛️ Biaya Administrasi Bank</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, kategori: 'BELANJA_NON_TUNAI' })}
+                      className={`py-1.5 px-2.5 rounded-lg text-xs font-bold border text-left transition cursor-pointer ${
+                        formData.kategori === 'BELANJA_NON_TUNAI'
+                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      <span>💳 Belanja Non-Tunai Lainnya</span>
+                    </button>
+                  </div>
+
+                  {/* Template Cepat SIPLah */}
+                  {formData.kategori === 'SIPLAH' && (
+                    <div className="pt-2 border-t border-slate-200 mt-2 space-y-1.5">
+                      <span className="text-[10px] font-bold text-amber-900 block">
+                        ⚡ Klik Template Belanja Non-Tunai SIPLah Resmi:
+                      </span>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFormData({
+                              ...formData,
+                              jenis: 'KREDIT',
+                              kategori: 'SIPLAH',
+                              uraian: 'Pembayaran Non-Tunai Belanja SIPLah - HANIMO',
+                              nominal: 19650000,
+                              noBukti: formData.noBukti || `BB-09/${schoolYear}`,
+                            });
+                          }}
+                          className="p-2 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 text-left text-[11px] font-semibold transition cursor-pointer"
+                        >
+                          <span className="block font-bold">🛒 Toko HANIMO</span>
+                          <span className="font-mono text-emerald-800 text-[10px]">Rp 19.650.000</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFormData({
+                              ...formData,
+                              jenis: 'KREDIT',
+                              kategori: 'SIPLAH',
+                              uraian: 'Pembayaran Non-Tunai Belanja SIPLah - N&N STATIONARY',
+                              nominal: 22455000,
+                              noBukti: formData.noBukti || `BB-10/${schoolYear}`,
+                            });
+                          }}
+                          className="p-2 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 text-left text-[11px] font-semibold transition cursor-pointer"
+                        >
+                          <span className="block font-bold">🛒 Toko N&N STATIONARY</span>
+                          <span className="font-mono text-emerald-800 text-[10px]">Rp 22.455.000</span>
+                        </button>
+                      </div>
+                      <p className="text-[10px] text-emerald-700 font-medium">
+                        ✓ Transaksi ini otomatis dicatat di BKB & BKU, dan <strong>tidak akan pernah muncul di BKT</strong>.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Tanggal & No Bukti */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

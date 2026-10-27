@@ -232,6 +232,7 @@ export interface KwitansiDocument {
   isManualDate?: boolean;
   linkedRabDivisions?: string[];
   linkedRabItemIds?: string[];
+  metodeBayar?: 'TUNAI' | 'BANK';
 }
 
 export interface BkuTransaction {
