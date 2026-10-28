@@ -696,19 +696,18 @@ export function normalizeMaterialItems<T extends { namaBarang: string; volume: n
       return;
     }
 
-    // D. Bata Ringan Hebel (m3 -> bh @ Rp 8.500 - 10.500)
+    // D. Bata Ringan Hebel (m3 -> bh @ Rp 9.500)
     if (/bata ringan|hebel|celcon|aerated/i.test(rawName)) {
       let unitP = sampleItem.hargaSatuan || 0;
       if (unitP <= 0 || unitP < 5000 || unitP > 25000) unitP = 9500;
-      let finalVol = Math.max(1, Math.round(totalRawJml / unitP));
-      let reconciledPrice = Math.round((totalRawJml / finalVol) * 100) / 100;
+      let finalVol = Math.max(1, Math.round(totalRawVol > 0 && totalRawVol < 500 ? totalRawVol : (totalRawJml / unitP)));
       result.push({
         ...sampleItem,
         namaBarang: group.namaBarang,
         volume: finalVol,
         satuan: 'bh',
-        hargaSatuan: reconciledPrice,
-        jumlah: totalRawJml,
+        hargaSatuan: unitP,
+        jumlah: finalVol * unitP,
       });
       return;
     }
@@ -716,50 +715,43 @@ export function normalizeMaterialItems<T extends { namaBarang: string; volume: n
     // E. Batako & Bata Merah -> bh
     if (/batako/i.test(rawName)) {
       let unitP = sampleItem.hargaSatuan > 0 && sampleItem.hargaSatuan <= 15000 ? sampleItem.hargaSatuan : 3500;
-      let finalVol = Math.max(1, Math.round(totalRawJml / unitP));
-      let reconciledPrice = Math.round((totalRawJml / finalVol) * 100) / 100;
+      let finalVol = Math.max(1, Math.round(totalRawVol > 0 && totalRawVol < 1000 ? totalRawVol : (totalRawJml / unitP)));
       result.push({
         ...sampleItem,
         namaBarang: group.namaBarang,
         volume: finalVol,
         satuan: 'bh',
-        hargaSatuan: reconciledPrice,
-        jumlah: totalRawJml,
+        hargaSatuan: unitP,
+        jumlah: finalVol * unitP,
       });
       return;
     }
     if (/bata merah/i.test(rawName)) {
       let unitP = sampleItem.hargaSatuan > 0 && sampleItem.hargaSatuan <= 3500 ? sampleItem.hargaSatuan : 950;
-      let finalVol = Math.max(1, Math.round(totalRawJml / unitP));
-      let reconciledPrice = Math.round((totalRawJml / finalVol) * 100) / 100;
+      let finalVol = Math.max(1, Math.round(totalRawVol > 0 && totalRawVol < 2000 ? totalRawVol : (totalRawJml / unitP)));
       result.push({
         ...sampleItem,
         namaBarang: group.namaBarang,
         volume: finalVol,
         satuan: 'bh',
-        hargaSatuan: reconciledPrice,
-        jumlah: totalRawJml,
+        hargaSatuan: unitP,
+        jumlah: finalVol * unitP,
       });
       return;
     }
 
-    // F. Kerikil / Split / Batu Pecah (m3 dengan harga pasar wajar Rp 280k - 360k / m3)
+    // F. Kerikil / Split / Batu Pecah (m3 dengan harga pasar wajar Rp 310k / m3)
     if (/kerikil|split|batu pecah|koral/i.test(rawName)) {
       const samplePrice = sampleItem.hargaSatuan || 0;
       const stdPrice = samplePrice >= 150000 && samplePrice <= 500000 ? samplePrice : 310000;
-      let finalVol = Math.max(1, Math.round(totalRawJml / stdPrice));
-      if (totalRawVol > 0 && totalRawVol <= 300 && (totalRawJml / totalRawVol) >= 150000) {
-        finalVol = Math.round(totalRawVol);
-      }
-      if (finalVol <= 0) finalVol = 1;
-      let reconciledPrice = Math.round((totalRawJml / finalVol) * 100) / 100;
+      let finalVol = Math.max(1, Math.round(totalRawVol > 0 && totalRawVol <= 300 ? totalRawVol : (totalRawJml / stdPrice)));
       result.push({
         ...sampleItem,
         namaBarang: group.namaBarang,
         volume: finalVol,
         satuan: 'm³',
-        hargaSatuan: reconciledPrice,
-        jumlah: totalRawJml,
+        hargaSatuan: stdPrice,
+        jumlah: finalVol * stdPrice,
       });
       return;
     }
@@ -772,19 +764,14 @@ export function normalizeMaterialItems<T extends { namaBarang: string; volume: n
       const stdPrice = samplePrice >= 100000 && samplePrice <= 450000
         ? samplePrice
         : isPasir ? 250000 : isSirtu ? 180000 : 260000;
-      let finalVol = Math.max(1, Math.round(totalRawJml / stdPrice));
-      if (totalRawVol > 0 && totalRawVol <= 300 && (totalRawJml / totalRawVol) >= 80000) {
-        finalVol = Math.round(totalRawVol);
-      }
-      if (finalVol <= 0) finalVol = 1;
-      let reconciledPrice = Math.round((totalRawJml / finalVol) * 100) / 100;
+      let finalVol = Math.max(1, Math.round(totalRawVol > 0 && totalRawVol <= 300 ? totalRawVol : (totalRawJml / stdPrice)));
       result.push({
         ...sampleItem,
         namaBarang: group.namaBarang,
         volume: finalVol,
         satuan: 'm³',
-        hargaSatuan: reconciledPrice,
-        jumlah: totalRawJml,
+        hargaSatuan: stdPrice,
+        jumlah: finalVol * stdPrice,
       });
       return;
     }
@@ -829,16 +816,35 @@ export function normalizeMaterialItems<T extends { namaBarang: string; volume: n
       realisticVolume = totalRawVol < 1 ? 1 : Math.round(totalRawVol);
     }
 
-    // Price Balancing: Reconcile hargaSatuan agar realisticVolume * hargaSatuan = totalRawJml
-    const reconciledHargaSatuan = Math.max(1, Math.round((totalRawJml / realisticVolume) * 100) / 100);
+    // Price Balancing: Use realistic standard market store prices and compute jumlah = volume * hargaSatuan
+    let unitPrice = 25000;
+    if (/paku|kawat|bendrat/i.test(rawName)) {
+      unitPrice = /kawat|bendrat/i.test(rawName) ? 24000 : 21500;
+      if (!/kg/i.test(realisticSatuan)) realisticSatuan = 'Kg';
+    } else if (/keramik|granit|ubin/i.test(rawName)) {
+      unitPrice = 95000;
+      if (!/dus|box/i.test(realisticSatuan)) realisticSatuan = 'Dus';
+    } else if (/cat|sealer|alkali/i.test(rawName)) {
+      unitPrice = 75000;
+    } else if (/gypsum|grc|kalsiboard/i.test(rawName)) {
+      unitPrice = 65000;
+      if (!/lembar|lbr/i.test(realisticSatuan)) realisticSatuan = 'Lembar';
+    } else if (/hollow/i.test(rawName)) {
+      unitPrice = 55000;
+      if (!/btg|batang/i.test(realisticSatuan)) realisticSatuan = 'btg';
+    } else if (sampleItem.hargaSatuan > 0 && sampleItem.hargaSatuan <= 150000) {
+      unitPrice = sampleItem.hargaSatuan;
+    }
+
+    const finalJumlah = realisticVolume * unitPrice;
 
     result.push({
       ...sampleItem,
       namaBarang: group.namaBarang,
       volume: realisticVolume,
       satuan: realisticSatuan,
-      hargaSatuan: reconciledHargaSatuan,
-      jumlah: totalRawJml, // TOTAL NOMINAL PERSIS SAMA DENGAN RAB!
+      hargaSatuan: unitPrice,
+      jumlah: finalJumlah,
     });
   });
 
