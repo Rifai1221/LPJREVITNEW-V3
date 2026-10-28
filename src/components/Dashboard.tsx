@@ -48,6 +48,7 @@ import { extractWeekNumberFromKwitansi } from '../services/autoGeneratorService'
 import {
   calculateProjectSummaryRekap,
   RekapCategoryItem,
+  isKwitansiAllowedByProgressBobot,
 } from '../utils/projectSummaryRekapHelper';
 
 interface DashboardProps {
@@ -123,10 +124,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const validKwitansi = hasActiveProgress
     ? cleanKwitansiList.filter((k) => {
+        if (!isKwitansiAllowedByProgressBobot(k, progressWeeks)) return false;
         const wNum = extractWeekNumberFromKwitansi(k, progressWeeks, targetYear);
         return wNum === null || activeWeekNums.has(wNum);
       })
-    : cleanKwitansiList.filter((k) => k.tipe === 'KONSULTAN' || (k.tipe === 'OPERASIONAL' && !extractWeekNumberFromKwitansi(k, progressWeeks, targetYear)));
+    : cleanKwitansiList.filter((k) => {
+        if (!isKwitansiAllowedByProgressBobot(k, progressWeeks)) return false;
+        return k.tipe === 'KONSULTAN' || (k.tipe === 'OPERASIONAL' && !extractWeekNumberFromKwitansi(k, progressWeeks, targetYear));
+      });
 
   // Calculations
   const totalAnggaran = school.totalAnggaran || 0;

@@ -16,6 +16,7 @@ import {
 } from '../types';
 import { resolveWeekDates, parseTxDateToIso, indonesianMonths, monthOrderMap } from '../utils/monthHelper';
 import { getAhspWageRateForRole } from '../utils/divisionHelper';
+import { isKwitansiAllowedByProgressBobot } from '../utils/projectSummaryRekapHelper';
 
 /**
  * Menghitung Cadangan Upah Terkunci (Labor Reserve) untuk minggu berjalan.
@@ -2925,6 +2926,9 @@ export function calculateBkuFromTransactions(
   const cleanSourceKwitansi = deduplicateKwitansiList(kwitansiList);
 
   cleanSourceKwitansi.forEach((kw) => {
+    if (!isKwitansiAllowedByProgressBobot(kw, progressWeeks)) {
+      return;
+    }
     const cleanKwId = (kw.id || '').replace(/^(bku-kw-)+/, '');
     const kwBkuId = `bku-kw-${cleanKwId}`;
     if (

@@ -159,6 +159,69 @@ export function classifyKwitansiCategory(kw: KwitansiDocument): RekapCategoryKey
 }
 
 /**
+ * Memeriksa apakah suatu transaksi / kwitansi SipLah, Furnitur, atau Meubeler
+ * diizinkan untuk dibelanjakan (masuk BKU/BKT/Realisasi) berdasarkan apakah
+ * bobot pada divisi laporan mingguan yang bersangkutan sudah terisi (> 0).
+ */
+export function isKwitansiAllowedByProgressBobot(
+  kw: KwitansiDocument,
+  progressWeeks: ProjectProgressWeek[] = []
+): boolean {
+  if (!progressWeeks || progressWeeks.length === 0) return true;
+
+  const cat = classifyKwitansiCategory(kw);
+  const uraian = (kw.uraian || '').toLowerCase();
+  const bukti = (kw.noBukti || '').toUpperCase();
+  const hasItemsSiplah = kw.items?.some(
+    (it) => it.tag === 'SipLah' || /siplah|mainan|rak mainan/i.test(it.namaBarang || '')
+  );
+
+  // 1. SipLah / Mainan Anak
+  if (cat === 'SIPLAH' || hasItemsSiplah || /siplah|mainan/i.test(`${bukti} ${uraian}`)) {
+    const hasBobot = progressWeeks.some((w) =>
+      (w.divisions || []).some((d) => {
+        const u = `${d.uraian || ''} ${d.kode || ''}`.toLowerCase();
+        return (
+          /siplah|mainan|rak\s*mainan/i.test(u) &&
+          ((d.prestasiMingguIni || 0) > 0 || (d.prestasiSdMingguIni || 0) > 0)
+        );
+      })
+    );
+    return hasBobot;
+  }
+
+  // 2. Furnitur (Pintu & Jendela / Kayu Kaca Besi)
+  if (cat === 'FURNITUR_PINTU_JENDELA' && !/mebel|meubeler|perabot|kursi|meja/i.test(`${bukti} ${uraian}`)) {
+    const hasBobot = progressWeeks.some((w) =>
+      (w.divisions || []).some((d) => {
+        const u = `${d.uraian || ''} ${d.kode || ''}`.toLowerCase();
+        return (
+          /furnitur|pintu|jendela|kayu|kaca|besi/i.test(u) &&
+          ((d.prestasiMingguIni || 0) > 0 || (d.prestasiSdMingguIni || 0) > 0)
+        );
+      })
+    );
+    return hasBobot;
+  }
+
+  // 3. Meubeler / Perabot
+  if (cat === 'FURNITUR_PINTU_JENDELA' && /mebel|meubeler|perabot|kursi|meja/i.test(`${bukti} ${uraian}`)) {
+    const hasBobot = progressWeeks.some((w) =>
+      (w.divisions || []).some((d) => {
+        const u = `${d.uraian || ''} ${d.kode || ''}`.toLowerCase();
+        return (
+          /mebel|meubilair|meubeler|perabot/i.test(u) &&
+          ((d.prestasiMingguIni || 0) > 0 || (d.prestasiSdMingguIni || 0) > 0)
+        );
+      })
+    );
+    return hasBobot;
+  }
+
+  return true;
+}
+
+/**
  * Menghitung rekapitulasi 9 kategori dari Pagu (RAB / RPD) dan Realisasi (Kwitansi & Upah)
  */
 export function calculateProjectSummaryRekap(
@@ -381,8 +444,11 @@ export function calculateProjectSummaryRekap(
     PENGELOLA_SPJ: [],
   };
 
-  // Iterasi Kwitansi yang ada
+  // Iterasi Kwitansi yang ada (dengan validasi bobot laporan mingguan untuk SipLah, Furnitur, dan Meubeler)
   (kwitansiList || []).forEach((kw) => {
+    if (!isKwitansiAllowedByProgressBobot(kw, progressWeeks)) {
+      return;
+    }
     const cat = classifyKwitansiCategory(kw);
     realisasiMap[cat] += kw.nominal || 0;
     kwListMap[cat].push(kw);
