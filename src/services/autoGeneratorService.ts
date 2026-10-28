@@ -1361,12 +1361,15 @@ export function getAutoHealedKwitansiItems<
     return consolidateAndStandardizeReceiptItems(kw.items || [], nom) as unknown as T[];
   }
 
-  // 7. PINTU & JENDELA / KUSEN / FURNITUR JADI (FUR)
+  // 7. PINTU & JENDELA / KUSEN / FURNITUR JADI (FUR) - Must not contain mebeler or building materials
+  const hasMebelerOrMat = /mebeler|mebel|perabot|kursi|meja|rak|loker|karpet|semen|pasir|bata|batu|keramik|paku|besi/i.test(uraianStr) || (kw.items && kw.items.some((it) => /mebeler|mebel|perabot|kursi|meja|rak|loker|karpet|semen|pasir|bata|batu|keramik|paku|besi/i.test(it.namaBarang || '')));
   const isPintuJendelaKw =
-    kw.tipe === 'PINTU_JENDELA' ||
-    /fur[\/\-_]|kw[\/\-_]?fur|kw[\/\-_]?kusen|kw[\/\-_]?alum/i.test(noBuktiStr) ||
-    /kusen|daun pintu|jendela alum|pintu utama|p1j1|pj1\b|j1\b|ventilasi.*boven/i.test(uraianStr) ||
-    (kw.items && kw.items.length > 0 && kw.items.some((it) => isPreservedUnitItem(it.namaBarang, it.satuan)));
+    !hasMebelerOrMat && (
+      kw.tipe === 'PINTU_JENDELA' ||
+      /fur[\/\-_]|kw[\/\-_]?fur|kw[\/\-_]?kusen|kw[\/\-_]?alum/i.test(noBuktiStr) ||
+      /kusen|daun pintu|jendela alum|pintu utama|p1j1|pj1\b|j1\b|ventilasi.*boven/i.test(uraianStr) ||
+      (kw.items && kw.items.length > 0 && kw.items.some((it) => isPreservedUnitItem(it.namaBarang, it.satuan)))
+    );
 
   if (isPintuJendelaKw) {
     if (kw.items && kw.items.length > 0) {
@@ -2108,12 +2111,12 @@ export function renumberKwitansiChronologically<
     ) {
       ctkList.push(kw);
     } else if (
-      tipe === 'PINTU_JENDELA' ||
+      (tipe === 'PINTU_JENDELA' ||
       tipe === 'PINTU_JENDELA_ALUMINIUM' ||
       /^FUR\//i.test(bukti) ||
-      /alumunium|aluminium/i.test(uraian) ||
-      /alumunium|aluminium/i.test(store) ||
-      (/pintu|jendela/i.test(uraian) && !/engsel|kunci/i.test(uraian))
+      (/pintu|jendela|kusen|aluminium/i.test(uraian) && !/engsel|kunci/i.test(uraian))) &&
+      !/mebeler|mebel|perabot|kursi|meja|rak|loker|karpet|semen|pasir|bata|batu|keramik|paku|besi/i.test(uraian) &&
+      !kw.items?.some((i: any) => /mebeler|mebel|perabot|kursi|meja|rak|loker|karpet|semen|pasir|bata|batu|keramik|paku|besi/i.test(i.namaBarang || ''))
     ) {
       furList.push(kw);
     } else if (tipe === 'UPAH' || /^UK\//i.test(bukti) || /upah borongan|upah tukang|daftar hadir/i.test(uraian)) {
