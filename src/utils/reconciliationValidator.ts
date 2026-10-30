@@ -6,6 +6,7 @@ import {
   BkbTransaction,
 } from '../types';
 import { toRupiah, addRupiah, subRupiah } from './money';
+import { calculateAhspSplit } from './ahspHelper';
 
 export interface ReconciliationAlert {
   id: string;
@@ -189,7 +190,15 @@ export function validateFinancialReconciliation(
         const kat = (it.kategoriBiaya || '').toUpperCase();
         const u = (it.uraian || '').toLowerCase();
 
-        if (tags.includes('CTK') || kat === 'CETAK' || /papan\s*nama|prasasti/i.test(u)) {
+        const isUpahBahan = kat === 'UPAH_BAHAN' || kat === 'UPAH & BAHAN' || (tags.includes('MAT') && tags.includes('UPAH')) || /upah.*bahan|bahan.*upah/i.test(u);
+
+        if (isUpahBahan) {
+          const split = it.allocationSplit && it.allocationSplit.isConfirmed
+            ? { materialValue: toRupiah(it.allocationSplit.materialValue), laborValue: toRupiah(it.allocationSplit.laborValue) }
+            : calculateAhspSplit(it, appState.realSchoolData?.ahspList || []);
+          categoryMap.BAHAN += split.materialValue;
+          categoryMap.UPAH += split.laborValue;
+        } else if (tags.includes('CTK') || kat === 'CETAK' || /papan\s*nama|prasasti/i.test(u)) {
           categoryMap.CETAK += amt;
         } else if (tags.includes('SMKK') || kat === 'SMKK' || /smkk|k3|helm/i.test(u)) {
           categoryMap.SMKK += amt;
@@ -212,6 +221,14 @@ export function validateFinancialReconciliation(
     });
   }
 
+  // Ensure total sum matches total RAB exactly via distributeRupiah check / normalization if needed
+  const totalRabNominal = toRupiah(appState.realSchoolData?.totalNilaiRab || appState.school?.totalAnggaran);
+  const sumCatPagu = Object.values(categoryMap).reduce((s, v) => s + v, 0);
+  if (totalRabNominal > 0 && sumCatPagu > 0 && sumCatPagu !== totalRabNominal) {
+    const diff = totalRabNominal - sumCatPagu;
+    categoryMap.BAHAN += diff; // absorb into BAHAN bucket
+  }
+
   const kwCategoryMap: Record<string, number> = {
     BAHAN: 0,
     UPAH: 0,
@@ -224,21 +241,35 @@ export function validateFinancialReconciliation(
     PENGELOLA: 0,
   };
 
+  const categoryKwDetails: Record<string, Array<{ noBukti: string; toko: string; nominal: number }>> = {
+    BAHAN: [],
+    UPAH: [],
+    SMKK: [],
+    SIPLAH: [],
+    CETAK: [],
+    FURNITUR: [],
+    KONSULTAN: [],
+    PENGAWAS: [],
+    PENGELOLA: [],
+  };
+
   (appState.kwitansiList || []).forEach((kw) => {
     const nom = toRupiah(kw.nominal);
     const tipe = (kw.tipe || '').toUpperCase();
     const bukti = (kw.noBukti || '').toUpperCase();
     const uraian = (kw.uraian || '').toLowerCase();
+    const toko = kw.namaToko || kw.penerimaNama || 'Kasir/Penyedia';
 
-    // Check (b) kwitansi nominal == sum items
+    // Check (b) kwitansi nominal == sum items with item name detail
     const itemsSum = (kw.items || []).reduce((s, it) => s + toRupiah(it.jumlah), 0);
     if (itemsSum > 0 && itemsSum !== nom) {
+      const mismatchedItems = (kw.items || []).map((it) => it.namaBarang).join(', ');
       alerts.push({
         id: `alert_kw_items_mismatch_${kw.id}`,
         category: 'BUDGET_OVERSPEND',
         severity: 'WARNING',
         title: `Selisih Jumlah Item Kwitansi (${kw.noBukti})`,
-        description: `Nominal kwitansi Rp ${nom.toLocaleString('id-ID')} berbeda dengan total jumlah item Rp ${itemsSum.toLocaleString('id-ID')}.`,
+        description: `Nominal kwitansi Rp ${nom.toLocaleString('id-ID')} berbeda dengan total jumlah item Rp ${itemsSum.toLocaleString('id-ID')} pada item: ${mismatchedItems}.`,
         expectedValue: nom,
         actualValue: itemsSum,
         difference: subRupiah(nom, itemsSum),
@@ -246,43 +277,53 @@ export function validateFinancialReconciliation(
       });
     }
 
+    let assignedCat = 'BAHAN';
     if (tipe === 'UPAH' || /^UK\//i.test(bukti)) {
-      kwCategoryMap.UPAH += nom;
+      assignedCat = 'UPAH';
     } else if (tipe === 'PERABOT' || /^FUR\//i.test(bukti) || /pintu|jendela|mebeler/i.test(uraian)) {
-      kwCategoryMap.FURNITUR += nom;
+      assignedCat = 'FURNITUR';
     } else if (tipe === 'CETAK' || /^CTK\//i.test(bukti) || /papan nama/i.test(uraian)) {
-      kwCategoryMap.CETAK += nom;
+      assignedCat = 'CETAK';
     } else if (tipe === 'SMKK' || /SMKK/i.test(bukti) || /smkk|k3/i.test(uraian)) {
-      kwCategoryMap.SMKK += nom;
+      assignedCat = 'SMKK';
     } else if (/SIPLAH/i.test(bukti) || /siplah/i.test(uraian)) {
-      kwCategoryMap.SIPLAH += nom;
+      assignedCat = 'SIPLAH';
     } else if (/KONS-P/i.test(bukti) || /perencana/i.test(uraian)) {
-      kwCategoryMap.KONSULTAN += nom;
+      assignedCat = 'KONSULTAN';
     } else if (/KONS-W/i.test(bukti) || /pengawas/i.test(uraian)) {
-      kwCategoryMap.PENGAWAS += nom;
+      assignedCat = 'PENGAWAS';
     } else if (/ADM/i.test(bukti) || /pengelola/i.test(uraian)) {
-      kwCategoryMap.PENGELOLA += nom;
-    } else {
-      kwCategoryMap.BAHAN += nom;
+      assignedCat = 'PENGELOLA';
     }
+
+    kwCategoryMap[assignedCat] += nom;
+    categoryKwDetails[assignedCat].push({ noBukti: kw.noBukti || '-', toko, nominal: nom });
   });
 
-  // Check (a) kwitansi per category vs pagu RAB per category
+  // Check (a) & (3) & (4) kwitansi per category vs pagu RAB per category with duplicate details
   Object.keys(categoryMap).forEach((cat) => {
     const pagu = categoryMap[cat];
     const real = kwCategoryMap[cat];
+    const detailsList = categoryKwDetails[cat] || [];
+
     if (pagu > 0 && real > pagu) {
       const diff = subRupiah(real, pagu);
+      const isFixedCat = cat !== 'BAHAN' && cat !== 'UPAH';
+      const detailStrs = detailsList.map((d) => `${d.noBukti} (${d.toko}): Rp ${d.nominal.toLocaleString('id-ID')}`);
+
       alerts.push({
         id: `alert_cat_overspend_${cat}`,
         category: 'BUDGET_OVERSPEND',
         severity: 'WARNING',
-        title: `Realisasi Kategori ${cat} Melampaui Pagu`,
-        description: `Realisasi kwitansi kategori ${cat} (Rp ${real.toLocaleString('id-ID')}) melebihi pagu RAB (Rp ${pagu.toLocaleString('id-ID')}) sebesar Rp ${diff.toLocaleString('id-ID')}.`,
+        title: isFixedCat ? `Kemungkinan Kwitansi Ganda Kategori ${cat}` : `Realisasi Kategori ${cat} Melampaui Pagu`,
+        description: isFixedCat
+          ? `Total realisasi kwitansi ${cat} (Rp ${real.toLocaleString('id-ID')}) melebihi pagu (Rp ${pagu.toLocaleString('id-ID')}). Kemungkinan terdapat duplikasi kwitansi dengan toko atau nominal yang sama.`
+          : `Realisasi kwitansi kategori ${cat} (Rp ${real.toLocaleString('id-ID')}) melebihi pagu RAB (Rp ${pagu.toLocaleString('id-ID')}) sebesar Rp ${diff.toLocaleString('id-ID')}.`,
         expectedValue: pagu,
         actualValue: real,
         difference: diff,
         targetTab: 'kwitansi',
+        details: detailStrs,
       });
     }
   });
