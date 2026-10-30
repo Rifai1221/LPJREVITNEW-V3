@@ -123,6 +123,8 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
       let msg = err?.message || 'Gagal autentikasi.';
       if (err?.code === 'auth/user-not-found' || err?.code === 'auth/wrong-password' || err?.code === 'auth/invalid-credential') {
         msg = 'Email atau password salah. Silakan periksa kembali.';
+      } else if (err?.code === 'auth/operation-not-allowed') {
+        msg = 'Metode autentikasi Email/Password belum diaktifkan di konsol Firebase proyek ini. Silakan aktifkan Sign-in method Email/Password di Firebase Console -> Authentication -> Sign-in method.';
       } else if (err?.code === 'auth/email-already-in-use') {
         msg = 'Email sudah terdaftar. Silakan masuk menggunakan password Anda.';
       } else if (err?.code === 'auth/weak-password') {
