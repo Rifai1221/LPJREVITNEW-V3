@@ -14,6 +14,8 @@ import {
   FolderDown,
   Layers,
   ArrowRight,
+  Lock,
+  Key,
 } from 'lucide-react';
 import {
   SchoolMasterData,
@@ -29,6 +31,7 @@ import {
   exportBkuToCsv,
 } from '../utils/excelExportUtils';
 import { formatRupiah } from '../utils/formatters';
+import { encryptJsonData, decryptJsonData } from '../utils/cryptoHelper';
 
 interface BackupRestoreModalProps {
   isOpen: boolean;
@@ -51,6 +54,14 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
   const [parseError, setParseError] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Password Encryption/Decryption States
+  const [useEncryption, setUseEncryption] = useState(false);
+  const [exportPassword, setExportPassword] = useState('');
+  const [importPassword, setImportPassword] = useState('');
+  const [isEncryptedFile, setIsEncryptedFile] = useState(false);
+  const [rawFileText, setRawFileText] = useState<string | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   if (!isOpen) return null;
@@ -62,10 +73,26 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
   const totalAnggaran = school.totalAnggaran || 0;
 
   // Handlers for Backup
-  const handleDownloadJsonBackup = () => {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const filename = `BACKUP_LPJ_${school.npsn || 'Sekolah'}_${(school.namaSekolah || 'Sekolah').replace(/\s+/g, '_')}_${timestamp}.json`;
-    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(appState, null, 2));
+  const handleDownloadJsonBackup = async () => {
+    if (useEncryption && !exportPassword.trim()) {
+      alert('Masukkan kata sandi enkripsi terlebih dahulu.');
+      return;
+    }
+
+    const now = new Date();
+    const dateStr = now.toISOString().split('T')[0];
+    const cleanSchoolName = (school.namaSekolah || 'Sekolah').replace(/[^a-zA-Z0-9]/g, '_');
+    const prefix = useEncryption ? 'BACKUP_ENCRYPTED_LPJ' : 'Backup_LPJ';
+    const filename = `${prefix}_${cleanSchoolName}_${dateStr}.json`;
+
+    let outputContent = '';
+    if (useEncryption) {
+      outputContent = await encryptJsonData(appState, exportPassword.trim());
+    } else {
+      outputContent = JSON.stringify(appState, null, 2);
+    }
+
+    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(outputContent);
     const downloadAnchor = document.createElement('a');
     downloadAnchor.setAttribute('href', dataStr);
     downloadAnchor.setAttribute('download', filename);
@@ -73,7 +100,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     downloadAnchor.click();
     downloadAnchor.remove();
 
-    setSuccessMessage(`File cadangan JSON berhasil diunduh: ${filename}`);
+    setSuccessMessage(`File cadangan ${useEncryption ? 'Terenkripsi AES-256' : 'JSON'} berhasil diunduh: ${filename}`);
     setTimeout(() => setSuccessMessage(null), 4000);
   };
 
@@ -115,11 +142,21 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     setSelectedFile(file);
     setParseError(null);
     setParsedPreview(null);
+    setIsEncryptedFile(false);
+    setImportPassword('');
 
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
-        const text = event.target?.result as string;
+        const text = (event.target?.result as string) || '';
+        setRawFileText(text);
+
+        if (text.startsWith('ENC_AES_') || text.startsWith('ENC_LGT_')) {
+          setIsEncryptedFile(true);
+          setParseError('File ini terenkripsi. Silakan masukkan kata sandi enkripsi untuk dekripsi.');
+          return;
+        }
+
         const parsed = JSON.parse(text);
 
         if (!parsed || typeof parsed !== 'object') {
@@ -136,6 +173,27 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
       }
     };
     reader.readAsText(file);
+  };
+
+  const handleDecryptFile = async () => {
+    if (!rawFileText || !importPassword.trim()) {
+      setParseError('Masukkan kata sandi enkripsi.');
+      return;
+    }
+
+    try {
+      setParseError(null);
+      const decrypted = await decryptJsonData(rawFileText.trim(), importPassword.trim());
+      if (!decrypted.school && !decrypted.rpdItems && !decrypted.kwitansiList) {
+        throw new Error('Hasil dekripsi tidak memiliki skema LPJ valid.');
+      }
+      setParsedPreview(decrypted);
+      setIsEncryptedFile(false);
+      setSuccessMessage('File terenkripsi berhasil didekripsi!');
+      setTimeout(() => setSuccessMessage(null), 3000);
+    } catch (err: any) {
+      setParseError('Kata sandi enkripsi salah atau file rusak.');
+    }
   };
 
   const handleExecuteRestore = () => {
@@ -286,7 +344,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
                     className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white px-3.5 py-2 rounded-xl text-xs font-bold shadow-xs transition cursor-pointer shrink-0"
                   >
                     <Download className="w-4 h-4" />
-                    <span>Unduh .JSON</span>
+                    <span>Unduh Cadangan (JSON)</span>
                   </button>
                 </div>
               </div>

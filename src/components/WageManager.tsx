@@ -25,7 +25,8 @@ import {
 import { WeeklyWageReport, WorkerItem, SchoolMasterData } from '../types';
 import { formatRupiah, formatNumber } from '../utils/formatters';
 import { getAhspWageRatesMap, getAhspWageRateForRole } from '../utils/divisionHelper';
-import { getBalancedBoronganAttendance, DEFAULT_BORONGAN_CORE_TEAM } from '../utils/boronganHelper';
+import { getBalancedBoronganAttendance } from '../utils/boronganHelper';
+import { useCan } from '../hooks/useCan';
 
 interface WageManagerProps {
   wageReports: WeeklyWageReport[];
@@ -54,6 +55,8 @@ export const WageManager: React.FC<WageManagerProps> = ({
   onUpdateKwitansiList,
   onOpenPrintModal,
 }) => {
+  const { can } = useCan();
+  const canEditWages = can('edit:wages');
   const [selectedWeekNum, setSelectedWeekNum] = useState<number>(1);
   const [activeTab, setActiveTab] = useState<'absensi' | 'borongan' | 'master'>('absensi');
   const [masterFilter, setMasterFilter] = useState<'ALL' | 'HARIAN' | 'BORONGAN'>('ALL');

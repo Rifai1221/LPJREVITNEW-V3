@@ -323,7 +323,7 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
       ? school.totalAnggaran
       : currentTotalRab > 0 
         ? currentTotalRab 
-        : 552457000;
+        : 0;
   const sisaPagu = activePagu - currentTotalRab;
   const biayaPerM2 = realData.luasBangunanM2 > 0 ? currentTotalRab / realData.luasBangunanM2 : 0;
   const totalBobotTerkini = realData.divisions.reduce((s, d) => s + (d.bobotPersen || 0), 0);
@@ -560,7 +560,7 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
       ...realData,
       divisions: updatedDivisions,
       totalNilaiRab: newTotal,
-      paguAnggaran: 552457000,
+      paguAnggaran: school?.totalAnggaran || newTotal,
       biayaPerM2: realData.luasBangunanM2 > 0 ? newTotal / realData.luasBangunanM2 : 0,
     });
 

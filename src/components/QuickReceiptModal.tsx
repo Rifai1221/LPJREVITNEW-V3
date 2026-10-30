@@ -3,6 +3,9 @@ import { X, Plus, Trash2, Receipt, Sparkles, Store, Layers, Lock, ShieldCheck, T
 import { KwitansiDocument, TokoItem, StoreVendor, RealSchoolData, SchoolMasterData, ProjectProgressWeek } from '../types';
 import { formatRupiah } from '../utils/formatters';
 import { getBulanFromTanggal, formatIndonesianDateLong, getAllMonthOptions, getAvailableMonthsForSchool, getMonthFromPeriodString, sanitizeYear } from '../utils/monthHelper';
+import { calcDppAndPpn, calcPph22, calcPph23 } from '../utils/money';
+import { getFiscalConfig } from '../data/fiscalTaxParameters';
+import { generateSecureId } from '../utils/idAndVoucherHelper';
 
 interface QuickReceiptModalProps {
   isOpen: boolean;
@@ -33,8 +36,8 @@ export const QuickReceiptModal: React.FC<QuickReceiptModalProps> = ({
   }, [school, progressWeeks, effYear]);
 
   const [tipe, setTipe] = useState<'MATERIAL' | 'PINTU_JENDELA' | 'UPAH' | 'KONSULTAN' | 'PERABOT' | 'OPERASIONAL'>('MATERIAL');
-  const [noBukti, setNoBukti] = useState(`KW/${Math.floor(Math.random() * 900 + 100)}/${effYear}`);
-  const [noSpb, setNoSpb] = useState(`SPB/${Math.floor(Math.random() * 900 + 100)}/${effYear}`);
+  const [noBukti, setNoBukti] = useState(`KW/01/${effYear}`);
+  const [noSpb, setNoSpb] = useState(`SPB/01/${effYear}`);
   const [tanggal, setTanggal] = useState(`01/08/${effYear}`);
   const [tanggalFormatted, setTanggalFormatted] = useState(`1 Agustus ${effYear}`);
   const [bulan, setBulan] = useState(`Agustus ${effYear}`);
@@ -101,7 +104,7 @@ export const QuickReceiptModal: React.FC<QuickReceiptModalProps> = ({
       realSchoolData.ahspList.forEach((ah) => {
         (ah.komponen || []).forEach((c) => {
           list.push({
-            id: c.id || `c-${Math.random()}`,
+            id: c.id || generateSecureId('c'),
             pekerjaan: ah.namaPekerjaan,
             uraian: c.uraian,
             satuan: c.satuan || 'unit',
@@ -188,18 +191,18 @@ export const QuickReceiptModal: React.FC<QuickReceiptModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
+    const fiscal = getFiscalConfig(school || {});
     let ppnAmount = 0;
     let pph22Amount = 0;
     let pph23Amount = 0;
 
-    if (isPpn) {
-      ppnAmount = Math.round((totalNominal / 1.11) * 0.11 * 100) / 100;
-    }
-    if (isPph22) {
-      pph22Amount = Math.round((totalNominal / 1.11) * 0.015 * 100) / 100;
+    if (isPpn || isPph22) {
+      const { dpp, ppn } = calcDppAndPpn(totalNominal, fiscal.ppnRatePercent);
+      if (isPpn) ppnAmount = ppn;
+      if (isPph22) pph22Amount = calcPph22(dpp, fiscal.pph22RatePercent);
     }
     if (isPph23) {
-      pph23Amount = Math.round(totalNominal * 0.04 * 100) / 100;
+      pph23Amount = calcPph23(totalNominal, fiscal.pph23RatePercent);
     }
 
     const isMaterialNoBukti = /kwt[\/\-_]?mat|kw[\/\-_]?mat|\bmat\b|mat[\/\-_]|material/i.test(noBukti || '');
@@ -214,7 +217,7 @@ export const QuickReceiptModal: React.FC<QuickReceiptModalProps> = ({
     const linkedDivs = Array.from(new Set(items.map((it) => it.rabDivisionKode).filter(Boolean))) as string[];
 
     const doc: KwitansiDocument = {
-      id: `kw-manual-${Date.now()}`,
+      id: generateSecureId('kw-manual'),
       noBukti,
       noSpb,
       tipe: effectiveTipe,

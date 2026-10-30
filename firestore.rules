@@ -1,8 +1,123 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // 1. Default-deny catch-all (Zero Trust Baseline)
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
+    }
+
+    // 2. Reject all access to legacy / app-wide configurations
+    match /app_settings/{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2b. User-specific Preferences (users/{userId}/prefs/{document=**})
+    match /users/{userId}/prefs/{document=**} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(schoolId) {
+      return isSignedIn() && exists(/databases/$(database)/documents/schools/$(schoolId)/members/$(request.auth.uid));
+    }
+
+    function getMemberRole(schoolId) {
+      return get(/databases/$(database)/documents/schools/$(schoolId)/members/$(request.auth.uid)).data.role;
+    }
+
+    function isBendahara(schoolId) {
+      return isMember(schoolId) && getMemberRole(schoolId) == 'BENDAHARA';
+    }
+
+    function isTimTeknis(schoolId) {
+      return isMember(schoolId) && getMemberRole(schoolId) == 'TIM_TEKNIS';
+    }
+
+    function isKepalaSekolah(schoolId) {
+      return isMember(schoolId) && getMemberRole(schoolId) == 'KEPALA_SEKOLAH';
+    }
+
+    function isFasilitator(schoolId) {
+      return isMember(schoolId) && getMemberRole(schoolId) == 'FASILITATOR';
+    }
+
+    // Data Shape & Size Validation
+    function isValidSchool(data) {
+      return data.namaSekolah is string && data.namaSekolah.size() <= 200
+        && (!('npsn' in data) || (data.npsn is string && data.npsn.size() <= 32))
+        && (!('pinHash' in data) || data.pinHash == null || (data.pinHash is string && data.pinHash.size() <= 256))
+        && (!('pinSalt' in data) || data.pinSalt == null || (data.pinSalt is string && data.pinSalt.size() <= 64))
+        && (!('isDeleted' in data) || data.isDeleted is bool);
+    }
+
+    function isValidMember(data) {
+      return data.role in ['BENDAHARA', 'KEPALA_SEKOLAH', 'TIM_TEKNIS', 'FASILITATOR']
+        && data.uid is string && data.uid.size() <= 128;
+    }
+
+    // 3. School Tenant Management
+    match /schools/{schoolId} {
+      // Authenticated users can list or get school records to select their school
+      allow get, list: if isSignedIn();
+
+      // Authenticated user can register a new school
+      allow create: if isSignedIn() && isValidSchool(request.resource.data);
+
+      // BENDAHARA has full edit, or verified member can update pinHash/pinSalt upon first-login mandatory setup
+      allow update: if isBendahara(schoolId) || (
+        isMember(schoolId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pinHash', 'pinSalt', 'mustResetPin', 'updatedAt', 'lastLogin'])
+      );
+
+      // BENDAHARA can delete their school
+      allow delete: if isBendahara(schoolId);
+
+      // 4. School Members & Roles (schools/{schoolId}/members/{uid})
+      match /members/{memberUid} {
+        // Only members of THIS school can view membership list
+        allow read: if isMember(schoolId);
+
+        // Self-registration during join or created by BENDAHARA
+        allow create: if (isSignedIn() && memberUid == request.auth.uid && isValidMember(request.resource.data))
+                      || (isBendahara(schoolId) && isValidMember(request.resource.data));
+
+        // Update role by BENDAHARA, or update self displayName
+        allow update: if (isBendahara(schoolId) && isValidMember(request.resource.data))
+                      || (isSignedIn() && memberUid == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'updatedAt']));
+
+        // Only BENDAHARA can remove members
+        allow delete: if isBendahara(schoolId);
+      }
+
+      // 5. LPJ Application Data (schools/{schoolId}/lpj_data/{dataId})
+      match /lpj_data/{dataId} {
+        // Members of THIS school can read LPJ data; non-members are completely rejected
+        allow read: if isMember(schoolId);
+
+        // Initial creation and deletion by BENDAHARA or members during migration
+        allow create: if isBendahara(schoolId) || isMember(schoolId);
+        allow delete: if isBendahara(schoolId);
+
+        // Tiered RBAC updates:
+        // - BENDAHARA: Full update access
+        // - TIM_TEKNIS: Progress, Wages, and Workers only
+        // - KEPALA_SEKOLAH: Approval & Status only
+        // - FASILITATOR: READ-ONLY (no mutation permitted)
+        allow update: if isBendahara(schoolId) ||
+          (isTimTeknis(schoolId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['progressWeeks', 'wageReports', 'workers', 'updatedAt', 'rev', 'updatedBy'])) ||
+          (isKepalaSekolah(schoolId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['approval', 'approvalKepalaSekolah', 'status', 'catatanKepalaSekolah', 'updatedAt', 'rev', 'updatedBy']));
+      }
+      // 6. Audit Logs (schools/{schoolId}/auditLogs/{logId}) - Requirement 4
+      match /auditLogs/{logId} {
+        allow read: if isMember(schoolId);
+        allow create: if isMember(schoolId);
+        // Only BENDAHARA can update or delete audit logs, regular roles cannot delete
+        allow update: if isBendahara(schoolId);
+        allow delete: if false;
+      }
     }
   }
 }

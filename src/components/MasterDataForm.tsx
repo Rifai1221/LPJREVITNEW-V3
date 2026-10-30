@@ -39,6 +39,8 @@ import { SkTimTeknisDocument } from './SkTimTeknisDocument';
 import { compressImageFile, TUT_WURI_HANDAYANI_LOGO } from '../utils/imageHelper';
 import { getSchoolPin, setSchoolPin } from '../utils/authHelper';
 import { SchoolTenant } from '../data/tenantPresets';
+import { getFiscalConfig, FISCAL_YEAR_CONFIGS } from '../data/fiscalTaxParameters';
+import { mulRupiah, subRupiah, toRupiah } from '../utils/money';
 
 interface MasterDataFormProps {
   school: SchoolMasterData;
@@ -155,10 +157,14 @@ export const MasterDataForm: React.FC<MasterDataFormProps> = ({ school, currentT
     } else if (field === 'namaPelaksana') {
       updated.namaKepalaPelaksana = value;
     }
-    if (field === 'totalAnggaran') {
-      const num = Number(value) || 0;
-      updated.termin1Nilai = Math.round(num * 0.7);
-      updated.termin2Nilai = Math.round(num * 0.3);
+    if (field === 'totalAnggaran' || field === 'termin1Persen' || field === 'termin2Persen') {
+      const num = toRupiah(field === 'totalAnggaran' ? value : updated.totalAnggaran || 0);
+      const p1 = Number(field === 'termin1Persen' ? value : updated.termin1Persen ?? 70) || 70;
+      updated.totalAnggaran = num;
+      updated.termin1Persen = p1;
+      updated.termin2Persen = 100 - p1;
+      updated.termin1Nilai = mulRupiah(num, p1, 100);
+      updated.termin2Nilai = subRupiah(num, updated.termin1Nilai);
     }
     setFormData(updated);
     onSave(updated);
@@ -974,14 +980,201 @@ export const MasterDataForm: React.FC<MasterDataFormProps> = ({ school, currentT
 
             <div className="grid grid-cols-2 gap-3 p-3 bg-slate-50 rounded-lg border border-slate-100">
               <div>
-                <span className="text-[11px] text-slate-500">Termin I (70%)</span>
+                <span className="text-[11px] text-slate-500">Termin I ({formData.termin1Persen ?? 70}%)</span>
                 <p className="text-xs font-bold text-slate-800">{formatRupiah(formData.termin1Nilai)}</p>
               </div>
               <div>
-                <span className="text-[11px] text-slate-500">Termin II (30%)</span>
+                <span className="text-[11px] text-slate-500">Termin II ({formData.termin2Persen ?? 30}%)</span>
                 <p className="text-xs font-bold text-slate-800">{formatRupiah(formData.termin2Nilai)}</p>
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* Card: Parameter Fiskal & Tarif Perpajakan Terkonfigurasi */}
+        <div className="col-span-1 md:col-span-2 bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-950 text-white rounded-2xl p-6 border border-slate-700 shadow-xl space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-700/80 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center justify-center shrink-0">
+                <Sliders className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-white">
+                    Konfigurasi Tarif Pajak & Parameter Fiskal (TA {formData.tahunAnggaran || '2026'})
+                  </h3>
+                  <span className="text-[10px] bg-amber-400/20 text-amber-300 font-semibold px-2 py-0.5 rounded-full border border-amber-400/30">
+                    Resmi & Versi Bertahun
+                  </span>
+                </div>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  Tarif acuan perpajakan dan persentase termin anggaran. Dapat disesuaikan bila terjadi perubahan regulasi perpajakan nasional.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className={`text-xs px-2.5 py-1 rounded-lg font-semibold flex items-center gap-1.5 ${
+                formData.isTaxRatesVerified
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                  : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+              }`}>
+                {formData.isTaxRatesVerified ? <CheckCircle className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
+                <span>{formData.isTaxRatesVerified ? 'Tarif Terverifikasi' : 'Perlu Verifikasi Pengguna'}</span>
+              </span>
+            </div>
+          </div>
+
+          {/* Form Fields: Tarif & Parameter */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-slate-800/80 p-3.5 rounded-xl border border-slate-700">
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Tarif PPN (%)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="50"
+                  value={formData.customPpnRate ?? 11}
+                  onChange={(e) => handleChange('customPpnRate', parseFloat(e.target.value) || 0)}
+                  className="w-full px-3 py-1.5 text-xs font-bold bg-slate-900 border border-slate-700 rounded-lg text-amber-300 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                />
+                <span className="text-xs text-slate-400 font-semibold">%</span>
+              </div>
+              <span className="text-[10px] text-slate-400 block mt-1">Standar UU HPP: 11%</span>
+            </div>
+
+            <div className="bg-slate-800/80 p-3.5 rounded-xl border border-slate-700">
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Tarif PPh Pasal 22 (%)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="50"
+                  value={formData.customPph22Rate ?? 1.5}
+                  onChange={(e) => handleChange('customPph22Rate', parseFloat(e.target.value) || 0)}
+                  className="w-full px-3 py-1.5 text-xs font-bold bg-slate-900 border border-slate-700 rounded-lg text-amber-300 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                />
+                <span className="text-xs text-slate-400 font-semibold">%</span>
+              </div>
+              <span className="text-[10px] text-slate-400 block mt-1">PMK 59/2022: 1.5% (Material)</span>
+            </div>
+
+            <div className="bg-slate-800/80 p-3.5 rounded-xl border border-slate-700">
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Tarif PPh Pasal 23 (%)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="50"
+                  value={formData.customPph23Rate ?? 2.0}
+                  onChange={(e) => handleChange('customPph23Rate', parseFloat(e.target.value) || 0)}
+                  className="w-full px-3 py-1.5 text-xs font-bold bg-slate-900 border border-slate-700 rounded-lg text-amber-300 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                />
+                <span className="text-xs text-slate-400 font-semibold">%</span>
+              </div>
+              <span className="text-[10px] text-slate-400 block mt-1">UU PPh: 2% (Sewa Alat & Jasa)</span>
+            </div>
+
+            <div className="bg-slate-800/80 p-3.5 rounded-xl border border-slate-700">
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Batas Bebas Pungut (Rp)
+              </label>
+              <input
+                type="number"
+                step="100000"
+                value={formData.customTaxThreshold ?? 2000000}
+                onChange={(e) => handleChange('customTaxThreshold', parseFloat(e.target.value) || 0)}
+                className="w-full px-3 py-1.5 text-xs font-bold bg-slate-900 border border-slate-700 rounded-lg text-amber-300 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+              />
+              <span className="text-[10px] text-slate-400 block mt-1">Belanja ≤ Rp 2 Jt Bebas PPh 22</span>
+            </div>
+          </div>
+
+          {/* Termin Settings */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-slate-800/50 p-4 rounded-xl border border-slate-700/60">
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Persentase Termin 1 (%)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="1"
+                  max="99"
+                  value={formData.termin1Persen ?? 70}
+                  onChange={(e) => handleChange('termin1Persen', parseFloat(e.target.value) || 70)}
+                  className="w-32 px-3 py-1.5 text-xs font-bold bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
+                />
+                <span className="text-xs text-slate-300">% = {formatRupiah(formData.termin1Nilai)}</span>
+              </div>
+              <span className="text-[10px] text-slate-400">Juknis DAK Fisik: 70%</span>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Persentase Termin 2 (%)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="1"
+                  max="99"
+                  value={formData.termin2Persen ?? 30}
+                  onChange={(e) => handleChange('termin1Persen', 100 - (parseFloat(e.target.value) || 30))}
+                  className="w-32 px-3 py-1.5 text-xs font-bold bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
+                />
+                <span className="text-xs text-slate-300">% = {formatRupiah(formData.termin2Nilai)}</span>
+              </div>
+              <span className="text-[10px] text-slate-400">Juknis DAK Fisik: 30%</span>
+            </div>
+          </div>
+
+          {/* Rujukan Hukum & Dasar Regulasi */}
+          <div className="p-4 bg-slate-900/80 rounded-xl border border-slate-700/80 text-xs space-y-2 text-slate-300">
+            <div className="font-semibold text-amber-300 flex items-center gap-1.5">
+              <BookOpen className="w-4 h-4" />
+              <span>Rujukan Hukum & Catatan Berlaku:</span>
+            </div>
+            <ul className="list-disc list-inside space-y-1 text-[11px] text-slate-300 leading-relaxed pl-1">
+              <li>
+                <strong className="text-white">PPN:</strong> UU No. 7 Tahun 2021 tentang Harmonisasi Peraturan Perpajakan (UU HPP) Bab IV Pasal 7 ayat (1) huruf a (Tarif standar 11%, mulai berlaku efektif 1 April 2022).
+              </li>
+              <li>
+                <strong className="text-white">PPh Pasal 22:</strong> PMK No. 59/PMK.03/2022 atas pemungutan pajak bendahara pemerintah terhadap belanja barang/material di atas Rp 2.000.000 (tidak termasuk PPN).
+              </li>
+              <li>
+                <strong className="text-white">PPh Pasal 23:</strong> UU Pajak Penghasilan Pasal 23 ayat (1) huruf c sebesar 2% atas jasa teknik, jasa konsultansi, serta sewa peralatan mekanis/perancah.
+              </li>
+              <li>
+                <strong className="text-white">Penyaluran Termin DAK:</strong> PMK No. 198/PMK.07/2021 tentang Pengelolaan DAK Fisik Bidang Pendidikan (Tahap I: 70%, Tahap II: 30%).
+              </li>
+            </ul>
+          </div>
+
+          {/* User Verification Checkbox & Prompt */}
+          <div className="p-4 bg-amber-950/40 rounded-xl border border-amber-500/40 flex items-start gap-3">
+            <input
+              type="checkbox"
+              id="taxVerifiedCheckbox"
+              checked={Boolean(formData.isTaxRatesVerified)}
+              onChange={(e) => handleChange('isTaxRatesVerified', e.target.checked)}
+              className="w-4 h-4 mt-0.5 rounded border-amber-400 text-amber-600 focus:ring-amber-500 cursor-pointer"
+            />
+            <label htmlFor="taxVerifiedCheckbox" className="text-xs text-amber-200 cursor-pointer leading-relaxed">
+              <strong className="font-bold text-amber-100 block">
+                Verifikasi Pengguna: Saya telah memverifikasi tarif perpajakan terkini
+              </strong>
+              Saya mengonfirmasi bahwa parameter perpajakan dan termin di atas telah diverifikasi sesuai dengan ketentuan Kantor Pelayanan Pajak (KPP) Pratama setempat dan Juknis Revitalisasi yang berlaku pada tahun anggaran berjalan.
+            </label>
           </div>
         </div>
 

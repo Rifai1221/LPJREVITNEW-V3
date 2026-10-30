@@ -7,8 +7,9 @@ import {
   getDocs,
   serverTimestamp,
   disableNetwork,
+  runTransaction,
 } from 'firebase/firestore';
-import { db } from './firebase';
+import { db, auth } from './firebase';
 import { AppStateData } from '../types';
 import { sanitizeAndFilterDemoState } from './storageService';
 import {
@@ -17,15 +18,39 @@ import {
   PRESET_SDN1_MUARA_DUA,
   createSchoolStateForTenant,
 } from '../data/tenantPresets';
-import { initialStores } from '../data/initialData';
 import {
   setIndexedDbCache,
   getIndexedDbCache,
   removeIndexedDbCache,
 } from './indexedDbService';
+import { offloadLargeBlobs, rehydrateBlobsInState } from './blobStorageService';
+import { UserRole } from '../utils/authHelper';
+import { logger } from '../utils/logger';
 
 const ACTIVE_TENANT_STORAGE_KEY = 'ACTIVE_SCHOOL_TENANT_ID_V1';
 const TENANT_CACHE_PREFIX = 'LPJ_TENANT_CACHE_';
+const SYNC_QUEUE_KEY = 'LPJ_SYNC_RETRY_QUEUE_V1';
+const TENANT_REV_PREFIX = 'LPJ_TENANT_REV_';
+
+export type CloudSyncStatus = 'ok' | 'failed' | 'quota' | 'skipped';
+
+export interface SaveTenantResult {
+  local: boolean;
+  cloud: CloudSyncStatus;
+  error?: string;
+  rev?: number;
+  serverState?: AppStateData;
+}
+
+export interface SyncQueueItem {
+  id: string;
+  tenantId: string;
+  state: AppStateData;
+  expectedRev?: number;
+  attemptCount: number;
+  nextRetryTime: number;
+  createdAt: string;
+}
 
 function withTimeout<T>(promise: Promise<T>, ms = 12000): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -44,7 +69,7 @@ function withTimeout<T>(promise: Promise<T>, ms = 12000): Promise<T> {
   });
 }
 
-// 1. Get currently active tenant ID (with fallback to global Firestore setting)
+// 1. Get currently active tenant ID
 export function getStoredActiveTenantId(): string {
   try {
     const saved = localStorage.getItem(ACTIVE_TENANT_STORAGE_KEY);
@@ -53,7 +78,8 @@ export function getStoredActiveTenantId(): string {
       return 'sch_real_primary';
     }
     return PRESET_SDN1_MUARA_DUA.id;
-  } catch {
+  } catch (err) {
+    logger.warn('SchoolTenantService', 'Failed to read active tenant ID from storage', undefined, err);
     return 'sch_real_primary';
   }
 }
@@ -62,36 +88,43 @@ export function setStoredActiveTenantId(tenantId: string): void {
   try {
     localStorage.setItem(ACTIVE_TENANT_STORAGE_KEY, tenantId);
   } catch (err) {
-    console.error('Failed to set active tenant:', err);
+    logger.error('SchoolTenantService', 'Failed to set active tenant ID in storage', err);
+  }
+
+  const currentUser = auth.currentUser;
+  if (currentUser) {
+    const prefDocRef = doc(db, 'users', currentUser.uid, 'prefs', 'school');
+    setDoc(prefDocRef, { activeTenantId: tenantId, updatedAt: serverTimestamp() }, { merge: true })
+      .catch((err) => logger.warn('SchoolTenantService', 'Notice saving user school preference', undefined, err));
   }
 }
 
-// Global active school tracker stored in Firestore
 export async function getGlobalActiveTenantId(): Promise<string | null> {
-  if (checkIsQuotaExhausted()) return null;
+  const currentUser = auth.currentUser;
+  if (!currentUser) return null;
+
   try {
-    const activeDocRef = doc(db, 'app_settings', 'active_school');
-    const snap = await withTimeout(getDoc(activeDocRef), 6000);
-    if (snap.exists() && snap.data()?.activeTenantId) {
-      return snap.data().activeTenantId as string;
+    const prefDocRef = doc(db, 'users', currentUser.uid, 'prefs', 'school');
+    const snap = await withTimeout(getDoc(prefDocRef), 5000);
+    if (snap.exists()) {
+      const data = snap.data();
+      if (data && data.activeTenantId) {
+        return data.activeTenantId as string;
+      }
     }
-  } catch (err: any) {
-    const errMsg = err?.message || String(err);
-    if (errMsg.includes('resource-exhausted') || errMsg.includes('Quota limit exceeded') || errMsg.includes('Quota exceeded')) {
-      markQuotaExhausted();
-    }
-    console.warn('Could not read global active school from Firestore:', err);
+  } catch (err) {
+    logger.warn('SchoolTenantService', 'Notice fetching user school preference from Firestore', undefined, err);
   }
   return null;
 }
 
-// Check whether the user wants to hide pure demo presets (Default TRUE for real production)
 export function isHideDemoPresets(): boolean {
   try {
     const val = localStorage.getItem('LPJ_HIDE_DEMO_DATA');
     if (val === 'false') return false;
-    return true; // Clean production by default
-  } catch {
+    return true;
+  } catch (err) {
+    logger.warn('SchoolTenantService', 'Failed to read hide demo flag', undefined, err);
     return true;
   }
 }
@@ -102,7 +135,8 @@ export function getDeletedTenantIds(): string[] {
   try {
     const raw = localStorage.getItem(DELETED_TENANTS_KEY);
     return raw ? JSON.parse(raw) : [];
-  } catch {
+  } catch (err) {
+    logger.warn('SchoolTenantService', 'Failed to parse deleted tenants from storage', undefined, err);
     return [];
   }
 }
@@ -113,7 +147,9 @@ export function addDeletedTenantId(tenantId: string) {
     if (!current.includes(tenantId)) {
       localStorage.setItem(DELETED_TENANTS_KEY, JSON.stringify([...current, tenantId]));
     }
-  } catch {}
+  } catch (err) {
+    logger.error('SchoolTenantService', 'Failed to add deleted tenant ID to storage', err);
+  }
 }
 
 export function removeDeletedTenantId(tenantId: string) {
@@ -121,26 +157,48 @@ export function removeDeletedTenantId(tenantId: string) {
     const current = getDeletedTenantIds();
     const updated = current.filter((id) => id !== tenantId);
     localStorage.setItem(DELETED_TENANTS_KEY, JSON.stringify(updated));
-  } catch {}
+  } catch (err) {
+    logger.error('SchoolTenantService', 'Failed to remove deleted tenant ID from storage', err);
+  }
 }
 
-// 2. Fetch all registered school tenants (Cloud Firestore + Local Presets)
-// CRITICAL: Any school saved in Firestore is real user data and MUST NEVER be dropped or overwritten!
+// Track local known revision per tenant
+export function getStoredTenantRev(tenantId: string): number {
+  try {
+    const raw = localStorage.getItem(`${TENANT_REV_PREFIX}${tenantId}`);
+    return raw ? Number(raw) || 1 : 1;
+  } catch {
+    return 1;
+  }
+}
+
+export function setStoredTenantRev(tenantId: string, rev: number): void {
+  try {
+    localStorage.setItem(`${TENANT_REV_PREFIX}${tenantId}`, String(rev));
+  } catch (err) {
+    logger.warn('SchoolTenantService', 'Failed to save local rev', undefined, err);
+  }
+}
+
+// 2. Fetch all registered school tenants (Filtering out tombstones)
 export async function getAllSchoolTenants(): Promise<SchoolTenant[]> {
   const tenantsMap = new Map<string, SchoolTenant>();
   const hideDemo = isHideDemoPresets();
   const deletedIds = getDeletedTenantIds();
 
-  // Step A: Load custom/active schools saved in Firestore FIRST (Highest Priority!)
   if (!checkIsQuotaExhausted()) {
     try {
       const schoolsCol = collection(db, 'schools');
       const snapshot = await withTimeout(getDocs(schoolsCol), 10000);
       snapshot.forEach((docSnap) => {
-        if (deletedIds.includes(docSnap.id)) return; // Never resurrect deleted schools
+        if (deletedIds.includes(docSnap.id)) return;
         const data = docSnap.data();
+        // Check tombstone
+        if (data?.isDeleted) {
+          addDeletedTenantId(docSnap.id);
+          return;
+        }
         if (data && (data.npsn || data.namaSekolah)) {
-          // Any document stored in Firestore was created or saved by the user!
           tenantsMap.set(docSnap.id, {
             id: docSnap.id,
             npsn: data.npsn || '',
@@ -150,6 +208,9 @@ export async function getAllSchoolTenants(): Promise<SchoolTenant[]> {
             provinsi: data.provinsi || '-',
             email: data.email || '-',
             isDemo: Boolean(data.isDemo && !data.lastActive),
+            pinHash: data.pinHash,
+            pinSalt: data.pinSalt,
+            mustResetPin: data.mustResetPin ?? (!data.pinHash),
             createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : (data.createdAt || new Date().toISOString()),
             lastLogin: data.lastLogin?.toDate ? data.lastLogin.toDate().toISOString() : (data.lastLogin || new Date().toISOString()),
           });
@@ -160,11 +221,11 @@ export async function getAllSchoolTenants(): Promise<SchoolTenant[]> {
       if (errMsg.includes('resource-exhausted') || errMsg.includes('Quota limit exceeded') || errMsg.includes('Quota exceeded')) {
         markQuotaExhausted();
       }
-      console.warn('Could not fetch schools from Firestore:', err);
+      logger.warn('SchoolTenantService', 'Could not fetch schools from Firestore', undefined, err);
     }
   }
 
-  // Step B: Also check local storage custom tenants list if any offline registered
+  // Local storage custom tenants list
   try {
     const customListRaw = localStorage.getItem('LOCAL_CUSTOM_TENANTS_LIST');
     if (customListRaw) {
@@ -175,9 +236,11 @@ export async function getAllSchoolTenants(): Promise<SchoolTenant[]> {
         }
       });
     }
-  } catch {}
+  } catch (err) {
+    logger.warn('SchoolTenantService', 'Failed to read LOCAL_CUSTOM_TENANTS_LIST', undefined, err);
+  }
 
-  // Step C: Include default presets unless user explicitly toggled "hideDemo" OR preset was deleted
+  // Presets
   DEFAULT_PRESET_TENANTS.forEach((preset) => {
     if (!tenantsMap.has(preset.id) && !deletedIds.includes(preset.id)) {
       if (!hideDemo) {
@@ -186,7 +249,6 @@ export async function getAllSchoolTenants(): Promise<SchoolTenant[]> {
     }
   });
 
-  // Step D: Ensure at least one school exists (Real School first if demo is hidden)
   if (tenantsMap.size === 0) {
     if (hideDemo) {
       const realPrimary: SchoolTenant = {
@@ -207,7 +269,6 @@ export async function getAllSchoolTenants(): Promise<SchoolTenant[]> {
     }
   }
 
-  // Step E: Deduplicate strictly by tenant ID (Ensure all distinct registered schools are preserved)
   const deduplicatedMap = new Map<string, SchoolTenant>();
   Array.from(tenantsMap.values()).forEach((tenant) => {
     const key = tenant.id;
@@ -215,13 +276,11 @@ export async function getAllSchoolTenants(): Promise<SchoolTenant[]> {
     if (!existing) {
       deduplicatedMap.set(key, tenant);
     } else {
-      // Prioritize non-demo schools
       if (!tenant.isDemo && existing.isDemo) {
         deduplicatedMap.set(key, tenant);
       } else if (tenant.isDemo && !existing.isDemo) {
         // Keep existing
       } else {
-        // Prioritize the newer one chronologically
         const dateA = new Date(tenant.createdAt || 0).getTime();
         const dateB = new Date(existing.createdAt || 0).getTime();
         if (dateA > dateB) {
@@ -234,7 +293,6 @@ export async function getAllSchoolTenants(): Promise<SchoolTenant[]> {
   return Array.from(deduplicatedMap.values());
 }
 
-// Helper to remove any undefined values before saving to Firestore (Firestore rejects 'undefined')
 function sanitizeForFirestore<T>(obj: T): Record<string, any> {
   return JSON.parse(JSON.stringify(obj, (_key, value) => (value === undefined ? null : value)));
 }
@@ -248,7 +306,7 @@ export async function registerNewSchoolTenant(
     kabKota: string;
     provinsi: string;
     email: string;
-    password?: string;
+    pin?: string;
     templateType: 'full' | 'blank';
   }
 ): Promise<{ tenant: SchoolTenant; state: AppStateData }> {
@@ -256,8 +314,19 @@ export async function registerNewSchoolTenant(
   const uniqueSuffix = Date.now().toString(36);
   const tenantId = `sch_${cleanNpsn ? `${cleanNpsn}_` : ''}${uniqueSuffix}`;
 
-  // Ensure ID is not blacklisted
   removeDeletedTenantId(tenantId);
+
+  let pinHash: string | undefined;
+  let pinSalt: string | undefined;
+  let mustResetPin = true;
+
+  if (params.pin && params.pin.trim().length >= 6) {
+    const { createSaltedPinRecord } = await import('../utils/authHelper');
+    const record = await createSaltedPinRecord(params.pin.trim());
+    pinHash = record.pinHash;
+    pinSalt = record.pinSalt;
+    mustResetPin = false;
+  }
 
   const newTenant: SchoolTenant = {
     id: tenantId,
@@ -268,6 +337,9 @@ export async function registerNewSchoolTenant(
     provinsi: params.provinsi.trim(),
     email: params.email.trim(),
     isDemo: false,
+    pinHash,
+    pinSalt,
+    mustResetPin,
     createdAt: new Date().toISOString(),
     lastLogin: new Date().toISOString(),
   };
@@ -288,154 +360,391 @@ export async function registerNewSchoolTenant(
           provinsi: newTenant.provinsi,
           email: newTenant.email,
           isDemo: false,
+          pinHash: pinHash || null,
+          pinSalt: pinSalt || null,
+          mustResetPin,
           createdAt: serverTimestamp(),
           lastLogin: serverTimestamp(),
         }),
         8000
       );
 
-      // 2. Save isolated initial LPJ state to Firestore subcollection
-      const dataDocRef = doc(db, 'schools', tenantId, 'lpj_data', 'current');
-      const cleanState = sanitizeForFirestore(initialState);
-      await withTimeout(
-        setDoc(dataDocRef, {
-          ...cleanState,
-          updatedAt: serverTimestamp(),
-        }),
-        12000
-      );
+      const currentAuthUser = auth.currentUser;
+      if (currentAuthUser) {
+        const memberDocRef = doc(db, 'schools', tenantId, 'members', currentAuthUser.uid);
+        await withTimeout(
+          setDoc(memberDocRef, {
+            uid: currentAuthUser.uid,
+            role: 'BENDAHARA',
+            email: currentAuthUser.email || '',
+            displayName: currentAuthUser.displayName || 'Bendahara',
+            updatedAt: serverTimestamp(),
+          }),
+          8000
+        ).catch((err) => logger.warn('SchoolTenantService', 'Notice adding initial member', undefined, err));
+      }
 
-      // 3. Update global active school pointer in Firestore
-      const activeDocRef = doc(db, 'app_settings', 'active_school');
-      await withTimeout(
-        setDoc(activeDocRef, { activeTenantId: tenantId, updatedAt: serverTimestamp() }, { merge: true }),
-        6000
-      ).catch(() => {});
+      // Save domain documents
+      await writeDomainDocuments(tenantId, initialState, 1);
     } catch (err: any) {
       const errMsg = err?.message || String(err);
       if (errMsg.includes('resource-exhausted') || errMsg.includes('Quota limit exceeded') || errMsg.includes('Quota exceeded')) {
         markQuotaExhausted();
       }
-      console.warn('Firestore write warning during registration, caching locally:', err);
+      logger.warn('SchoolTenantService', 'Firestore write notice during registration, saving to local cache', undefined, err);
     }
   }
 
-  // 4. Cache locally immediately via IndexedDB & LocalStorage
   const idbKey = `${TENANT_CACHE_PREFIX}${tenantId}`;
   await setIndexedDbCache(idbKey, initialState);
+  setStoredTenantRev(tenantId, 1);
+
   try {
     localStorage.setItem(idbKey, JSON.stringify(initialState));
-    
-    // update local custom list
     const customListRaw = localStorage.getItem('LOCAL_CUSTOM_TENANTS_LIST');
     const customList: SchoolTenant[] = customListRaw ? JSON.parse(customListRaw) : [];
     if (!customList.some((t) => t.id === newTenant.id)) {
       customList.push(newTenant);
       localStorage.setItem('LOCAL_CUSTOM_TENANTS_LIST', JSON.stringify(customList));
     }
-  } catch {}
+  } catch (err) {
+    logger.warn('SchoolTenantService', 'Failed to update LOCAL_CUSTOM_TENANTS_LIST', undefined, err);
+  }
 
   setStoredActiveTenantId(tenantId);
   return { tenant: newTenant, state: initialState };
 }
 
-// 4. Load LPJ data for a specific school from Cloud Firestore (with IndexedDB & local fallback)
-// CRITICAL: This function must NEVER overwrite existing Firestore documents with default template!
+const BLOCKED_AUTOSAVE_PREFIX = 'LPJ_AUTOSAVE_BLOCKED_';
+
+export function setCloudAutosaveBlocked(tenantId: string, blocked: boolean): void {
+  try {
+    if (blocked) {
+      localStorage.setItem(`${BLOCKED_AUTOSAVE_PREFIX}${tenantId}`, 'true');
+    } else {
+      localStorage.removeItem(`${BLOCKED_AUTOSAVE_PREFIX}${tenantId}`);
+    }
+  } catch {}
+}
+
+export function isCloudAutosaveBlockedForTenant(tenantId: string): boolean {
+  try {
+    return localStorage.getItem(`${BLOCKED_AUTOSAVE_PREFIX}${tenantId}`) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+// 4. Domain Document Splitting & Writing Helper
+const DOMAIN_NAMES = ['master', 'kwitansi', 'bku', 'wageReports', 'progressWeeks', 'rpd'] as const;
+
+export async function writeDomainDocuments(
+  tenantId: string,
+  stateData: AppStateData,
+  rev: number
+): Promise<void> {
+  const userIdent = auth.currentUser?.email || auth.currentUser?.displayName || auth.currentUser?.uid || 'user';
+  const offloadedState = await offloadLargeBlobs(stateData);
+
+  const currentPayload = sanitizeForFirestore({
+    ...offloadedState,
+    rev,
+    updatedBy: userIdent,
+    updatedAt: serverTimestamp(),
+  });
+
+  const masterPayload = sanitizeForFirestore({
+    school: offloadedState.school,
+    workers: offloadedState.workers || [],
+    stores: offloadedState.stores || [],
+    realSchoolData: offloadedState.realSchoolData || null,
+    rev,
+    updatedBy: userIdent,
+    updatedAt: serverTimestamp(),
+  });
+
+  const kwitansiPayload = sanitizeForFirestore({
+    kwitansiList: offloadedState.kwitansiList || [],
+    deletedKwitansiIds: offloadedState.deletedKwitansiIds || [],
+    rev,
+    updatedBy: userIdent,
+    updatedAt: serverTimestamp(),
+  });
+
+  const bkuPayload = sanitizeForFirestore({
+    manualBkuTransactions: offloadedState.manualBkuTransactions || [],
+    deletedBkuIds: offloadedState.deletedBkuIds || [],
+    bkbRecords: offloadedState.bkbRecords || [],
+    manualTaxRecords: offloadedState.manualTaxRecords || [],
+    deletedTaxIds: offloadedState.deletedTaxIds || [],
+    rev,
+    updatedBy: userIdent,
+    updatedAt: serverTimestamp(),
+  });
+
+  const wageReportsPayload = sanitizeForFirestore({
+    wageReports: offloadedState.wageReports || [],
+    rev,
+    updatedBy: userIdent,
+    updatedAt: serverTimestamp(),
+  });
+
+  const progressWeeksPayload = sanitizeForFirestore({
+    progressWeeks: offloadedState.progressWeeks || [],
+    rev,
+    updatedBy: userIdent,
+    updatedAt: serverTimestamp(),
+  });
+
+  const rpdPayload = sanitizeForFirestore({
+    rpdItems: offloadedState.rpdItems || [],
+    rev,
+    updatedBy: userIdent,
+    updatedAt: serverTimestamp(),
+  });
+
+  // Write all domain docs and current doc concurrently with rev
+  await Promise.all([
+    withTimeout(setDoc(doc(db, 'schools', tenantId, 'lpj_data', 'current'), currentPayload), 10000),
+    withTimeout(setDoc(doc(db, 'schools', tenantId, 'lpj_data', 'master'), masterPayload), 10000),
+    withTimeout(setDoc(doc(db, 'schools', tenantId, 'lpj_data', 'kwitansi'), kwitansiPayload), 10000),
+    withTimeout(setDoc(doc(db, 'schools', tenantId, 'lpj_data', 'bku'), bkuPayload), 10000),
+    withTimeout(setDoc(doc(db, 'schools', tenantId, 'lpj_data', 'wageReports'), wageReportsPayload), 10000),
+    withTimeout(setDoc(doc(db, 'schools', tenantId, 'lpj_data', 'progressWeeks'), progressWeeksPayload), 10000),
+    withTimeout(setDoc(doc(db, 'schools', tenantId, 'lpj_data', 'rpd'), rpdPayload), 10000),
+  ]);
+}
+
+// Read domain documents and merge them back into AppStateData
+export async function readDomainDocuments(tenantId: string): Promise<{ state: AppStateData; maxRev: number } | null> {
+  const [masterSnap, kwitansiSnap, bkuSnap, wageSnap, progressSnap, rpdSnap] = await Promise.all([
+    withTimeout(getDoc(doc(db, 'schools', tenantId, 'lpj_data', 'master')), 8000),
+    withTimeout(getDoc(doc(db, 'schools', tenantId, 'lpj_data', 'kwitansi')), 8000),
+    withTimeout(getDoc(doc(db, 'schools', tenantId, 'lpj_data', 'bku')), 8000),
+    withTimeout(getDoc(doc(db, 'schools', tenantId, 'lpj_data', 'wageReports')), 8000),
+    withTimeout(getDoc(doc(db, 'schools', tenantId, 'lpj_data', 'progressWeeks')), 8000),
+    withTimeout(getDoc(doc(db, 'schools', tenantId, 'lpj_data', 'rpd')), 8000),
+  ]);
+
+  if (!masterSnap.exists() && !kwitansiSnap.exists() && !bkuSnap.exists()) {
+    return null;
+  }
+
+  const masterData = masterSnap.data() || {};
+  const kwitansiData = kwitansiSnap.data() || {};
+  const bkuData = bkuSnap.data() || {};
+  const wageData = wageSnap.data() || {};
+  const progressData = progressSnap.data() || {};
+  const rpdData = rpdSnap.data() || {};
+
+  const maxRev = Math.max(
+    Number(masterData.rev) || 1,
+    Number(kwitansiData.rev) || 1,
+    Number(bkuData.rev) || 1,
+    Number(wageData.rev) || 1,
+    Number(progressData.rev) || 1,
+    Number(rpdData.rev) || 1
+  );
+
+  const rawState: AppStateData = {
+    school: masterData.school || null,
+    workers: masterData.workers || [],
+    stores: masterData.stores || [],
+    realSchoolData: masterData.realSchoolData || undefined,
+    kwitansiList: kwitansiData.kwitansiList || [],
+    deletedKwitansiIds: kwitansiData.deletedKwitansiIds || [],
+    manualBkuTransactions: bkuData.manualBkuTransactions || [],
+    deletedBkuIds: bkuData.deletedBkuIds || [],
+    bkbRecords: bkuData.bkbRecords || [],
+    manualTaxRecords: bkuData.manualTaxRecords || [],
+    deletedTaxIds: bkuData.deletedTaxIds || [],
+    wageReports: wageData.wageReports || [],
+    progressWeeks: progressData.progressWeeks || [],
+    rpdItems: rpdData.rpdItems || [],
+  };
+
+  const rehydrated = await rehydrateBlobsInState(rawState);
+  return { state: rehydrated, maxRev };
+}
+
+/**
+ * Safe One-Time Non-Destructive Migration
+ * If legacy 'current' document exists and domains don't exist yet,
+ * splits 'current' into domains, verifies each domain was saved,
+ * and marks 'migratedToDomains: true' on 'current' without deleting it.
+ */
+export async function safeMigrateLegacyDocumentIfNeeded(
+  tenantId: string,
+  legacyData: any
+): Promise<AppStateData | null> {
+  try {
+    const rawState: AppStateData = {
+      school: legacyData.school,
+      rpdItems: legacyData.rpdItems || [],
+      workers: legacyData.workers || [],
+      stores: legacyData.stores || [],
+      progressWeeks: legacyData.progressWeeks || [],
+      kwitansiList: legacyData.kwitansiList || [],
+      wageReports: legacyData.wageReports || [],
+      manualBkuTransactions: legacyData.manualBkuTransactions || [],
+      deletedBkuIds: legacyData.deletedBkuIds || [],
+      deletedKwitansiIds: legacyData.deletedKwitansiIds || [],
+      bkbRecords: legacyData.bkbRecords || [],
+      manualTaxRecords: legacyData.manualTaxRecords || [],
+      deletedTaxIds: legacyData.deletedTaxIds || [],
+      realSchoolData: legacyData.realSchoolData,
+    };
+
+    const initialRev = Number(legacyData.rev) || 1;
+    // 1. Write domain documents
+    await writeDomainDocuments(tenantId, rawState, initialRev);
+
+    // 2. Verify all 6 domain docs exist before marking legacy migrated
+    const verified = await readDomainDocuments(tenantId);
+    if (verified && verified.state.school) {
+      // Mark legacy doc as migrated safely without deleting it
+      const currentDocRef = doc(db, 'schools', tenantId, 'lpj_data', 'current');
+      await setDoc(
+        currentDocRef,
+        {
+          migratedToDomains: true,
+          migratedAt: serverTimestamp(),
+        },
+        { merge: true }
+      ).catch((err) => logger.warn('SchoolTenantService', 'Notice updating legacy migration marker', undefined, err));
+
+      logger.info('SchoolTenantService', `Successfully migrated ${tenantId} to domain documents`);
+      return verified.state;
+    }
+  } catch (err) {
+    logger.error('SchoolTenantService', `Migration failed for ${tenantId}; keeping legacy document intact`, err);
+  }
+  return null;
+}
+
+// 5. Load LPJ data for a specific school from Cloud Firestore
 export async function loadSchoolTenantAppState(tenant: SchoolTenant): Promise<{
   state: AppStateData;
   source: 'cloud' | 'cache' | 'fresh_preset';
+  rev: number;
+  cloudReadFailed?: boolean;
+  isCloudAutosaveBlocked?: boolean;
 }> {
   const tenantId = tenant.id;
   const defaultState = createSchoolStateForTenant(tenant, 'full');
   const idbKey = `${TENANT_CACHE_PREFIX}${tenantId}`;
 
-  // Try 1: Fetch directly from Cloud Firestore (Highest Authority)
+  let cloudReadError = false;
+  let docConfirmedMissing = false;
+
+  // Try 1: Fetch from Cloud Firestore
   if (!checkIsQuotaExhausted()) {
     try {
-      const dataDocRef = doc(db, 'schools', tenantId, 'lpj_data', 'current');
-      const docSnap = await withTimeout(getDoc(dataDocRef), 10000);
+      // Check split domain documents first
+      const domainResult = await readDomainDocuments(tenantId);
+      if (domainResult && domainResult.state && domainResult.state.school) {
+        const mergedState = sanitizeAndFilterDemoState({
+          ...defaultState,
+          ...domainResult.state,
+          school: {
+            ...defaultState.school,
+            ...(domainResult.state.school || {}),
+          },
+        });
+
+        setStoredTenantRev(tenantId, domainResult.maxRev);
+        setCloudAutosaveBlocked(tenantId, false);
+        await setIndexedDbCache(idbKey, mergedState);
+        try {
+          localStorage.setItem(idbKey, JSON.stringify(mergedState));
+        } catch (err) {
+          logger.warn('SchoolTenantService', 'Notice saving cache to localStorage', undefined, err);
+        }
+
+        return {
+          state: mergedState,
+          source: 'cloud',
+          rev: domainResult.maxRev,
+          isCloudAutosaveBlocked: false,
+        };
+      }
+
+      // Check legacy 'current' document and perform safe one-time migration
+      const legacyDocRef = doc(db, 'schools', tenantId, 'lpj_data', 'current');
+      const docSnap = await withTimeout(getDoc(legacyDocRef), 10000);
 
       if (docSnap.exists()) {
         const cloudData = docSnap.data();
         if (cloudData && cloudData.school) {
+          const migratedState = await safeMigrateLegacyDocumentIfNeeded(tenantId, cloudData);
+          const baseData = migratedState || cloudData;
+
           const rawMergedState: AppStateData = {
             ...defaultState,
-            ...cloudData,
+            ...baseData,
             school: {
               ...defaultState.school,
-              ...(cloudData.school || {}),
+              ...(baseData.school || {}),
             },
-            realSchoolData: cloudData.realSchoolData || defaultState.realSchoolData,
-            rpdItems: Array.isArray(cloudData.rpdItems) ? cloudData.rpdItems : (defaultState.rpdItems || []),
-            workers: Array.isArray(cloudData.workers) ? cloudData.workers : (defaultState.workers || []),
-            stores: Array.isArray(cloudData.stores) ? cloudData.stores : (defaultState.stores || []),
-            progressWeeks: Array.isArray(cloudData.progressWeeks) && cloudData.progressWeeks.length > 0 ? cloudData.progressWeeks : defaultState.progressWeeks,
-            kwitansiList: Array.isArray(cloudData.kwitansiList) ? cloudData.kwitansiList : (defaultState.kwitansiList || []),
-            wageReports: Array.isArray(cloudData.wageReports) ? cloudData.wageReports : (defaultState.wageReports || []),
-            manualBkuTransactions: Array.isArray(cloudData.manualBkuTransactions) ? cloudData.manualBkuTransactions : [],
-            deletedBkuIds: Array.isArray(cloudData.deletedBkuIds) ? cloudData.deletedBkuIds : [],
-            deletedKwitansiIds: Array.isArray(cloudData.deletedKwitansiIds) ? cloudData.deletedKwitansiIds : [],
-            bkbRecords: Array.isArray(cloudData.bkbRecords) ? cloudData.bkbRecords : [],
-            manualTaxRecords: Array.isArray(cloudData.manualTaxRecords) ? cloudData.manualTaxRecords : [],
-            deletedTaxIds: Array.isArray(cloudData.deletedTaxIds) ? cloudData.deletedTaxIds : [],
           };
           const mergedState = sanitizeAndFilterDemoState(rawMergedState);
+          const rev = Number(cloudData.rev) || 1;
+          setStoredTenantRev(tenantId, rev);
+          setCloudAutosaveBlocked(tenantId, false);
 
-          // Update IndexedDB & LocalStorage cache safely
           await setIndexedDbCache(idbKey, mergedState);
           try {
             localStorage.setItem(idbKey, JSON.stringify(mergedState));
-          } catch {}
+          } catch (err) {
+            logger.warn('SchoolTenantService', 'Notice saving cache to localStorage', undefined, err);
+          }
 
           return {
             state: mergedState,
             source: 'cloud',
+            rev,
+            isCloudAutosaveBlocked: false,
           };
         }
+      } else {
+        docConfirmedMissing = true;
       }
     } catch (err: any) {
+      cloudReadError = true;
       const errMsg = err?.message || String(err);
       if (errMsg.includes('resource-exhausted') || errMsg.includes('Quota limit exceeded') || errMsg.includes('Quota exceeded')) {
         markQuotaExhausted();
       }
-      console.warn(`[Multi-Tenant] Could not read Firestore for ${tenantId}:`, err);
+      logger.warn('SchoolTenantService', `Could not read Firestore for ${tenantId}`, undefined, err);
     }
   }
 
-  // Try 2: Load from IndexedDB high-capacity cache for this school
+  // Try 2: Load from IndexedDB
   try {
     const idbCached = await getIndexedDbCache<AppStateData>(idbKey);
     if (idbCached && idbCached.school) {
-      const rawMergedCache: AppStateData = {
+      const mergedCache = sanitizeAndFilterDemoState({
         ...defaultState,
         ...idbCached,
         school: {
           ...defaultState.school,
           ...(idbCached.school || {}),
         },
-        realSchoolData: idbCached.realSchoolData || defaultState.realSchoolData,
-        rpdItems: Array.isArray(idbCached.rpdItems) ? idbCached.rpdItems : (defaultState.rpdItems || []),
-        workers: Array.isArray(idbCached.workers) ? idbCached.workers : (defaultState.workers || []),
-        stores: Array.isArray(idbCached.stores) ? idbCached.stores : (defaultState.stores || []),
-        progressWeeks: Array.isArray(idbCached.progressWeeks) && idbCached.progressWeeks.length > 0 ? idbCached.progressWeeks : defaultState.progressWeeks,
-        kwitansiList: Array.isArray(idbCached.kwitansiList) ? idbCached.kwitansiList : (defaultState.kwitansiList || []),
-        wageReports: Array.isArray(idbCached.wageReports) ? idbCached.wageReports : (defaultState.wageReports || []),
-        manualBkuTransactions: Array.isArray(idbCached.manualBkuTransactions) ? idbCached.manualBkuTransactions : [],
-        deletedBkuIds: Array.isArray(idbCached.deletedBkuIds) ? idbCached.deletedBkuIds : [],
-        deletedKwitansiIds: Array.isArray(idbCached.deletedKwitansiIds) ? idbCached.deletedKwitansiIds : [],
-        bkbRecords: Array.isArray(idbCached.bkbRecords) ? idbCached.bkbRecords : [],
-        manualTaxRecords: Array.isArray(idbCached.manualTaxRecords) ? idbCached.manualTaxRecords : [],
-        deletedTaxIds: Array.isArray(idbCached.deletedTaxIds) ? idbCached.deletedTaxIds : [],
-      };
-      const mergedCache = sanitizeAndFilterDemoState(rawMergedCache);
+      });
+
+      const isBlocked = cloudReadError && !docConfirmedMissing;
+      setCloudAutosaveBlocked(tenantId, isBlocked);
 
       return {
         state: mergedCache,
         source: 'cache',
+        rev: getStoredTenantRev(tenantId),
+        cloudReadFailed: cloudReadError,
+        isCloudAutosaveBlocked: isBlocked,
       };
     }
   } catch (err) {
-    console.warn(`[Multi-Tenant] IndexedDB cache read error for ${tenantId}:`, err);
+    logger.warn('SchoolTenantService', `IndexedDB cache read error for ${tenantId}`, undefined, err);
   }
 
   // Try 3: Load from LocalStorage fallback
@@ -444,51 +753,49 @@ export async function loadSchoolTenantAppState(tenant: SchoolTenant): Promise<{
     if (cachedRaw) {
       const parsed = JSON.parse(cachedRaw);
       if (parsed && parsed.school) {
-        const rawMergedCache: AppStateData = {
+        const mergedCache = sanitizeAndFilterDemoState({
           ...defaultState,
           ...parsed,
           school: {
             ...defaultState.school,
             ...(parsed.school || {}),
           },
-          realSchoolData: parsed.realSchoolData || defaultState.realSchoolData,
-          rpdItems: Array.isArray(parsed.rpdItems) ? parsed.rpdItems : (defaultState.rpdItems || []),
-          workers: Array.isArray(parsed.workers) ? parsed.workers : (defaultState.workers || []),
-          stores: Array.isArray(parsed.stores) ? parsed.stores : (defaultState.stores || []),
-          progressWeeks: Array.isArray(parsed.progressWeeks) && parsed.progressWeeks.length > 0 ? parsed.progressWeeks : defaultState.progressWeeks,
-          kwitansiList: Array.isArray(parsed.kwitansiList) ? parsed.kwitansiList : (defaultState.kwitansiList || []),
-          wageReports: Array.isArray(parsed.wageReports) ? parsed.wageReports : (defaultState.wageReports || []),
-          manualBkuTransactions: Array.isArray(parsed.manualBkuTransactions) ? parsed.manualBkuTransactions : [],
-          deletedBkuIds: Array.isArray(parsed.deletedBkuIds) ? parsed.deletedBkuIds : [],
-          deletedKwitansiIds: Array.isArray(parsed.deletedKwitansiIds) ? parsed.deletedKwitansiIds : [],
-          bkbRecords: Array.isArray(parsed.bkbRecords) ? parsed.bkbRecords : [],
-          manualTaxRecords: Array.isArray(parsed.manualTaxRecords) ? parsed.manualTaxRecords : [],
-          deletedTaxIds: Array.isArray(parsed.deletedTaxIds) ? parsed.deletedTaxIds : [],
-        };
-        const mergedCache = sanitizeAndFilterDemoState(rawMergedCache);
+        });
 
-        // Migrate seamlessly to IndexedDB
+        const isBlocked = cloudReadError && !docConfirmedMissing;
+        setCloudAutosaveBlocked(tenantId, isBlocked);
+
         setIndexedDbCache(idbKey, mergedCache);
-
         return {
           state: mergedCache,
           source: 'cache',
+          rev: getStoredTenantRev(tenantId),
+          cloudReadFailed: cloudReadError,
+          isCloudAutosaveBlocked: isBlocked,
         };
       }
     }
   } catch (err) {
-    console.warn(`[Multi-Tenant] LocalStorage cache read error for ${tenantId}:`, err);
+    logger.warn('SchoolTenantService', `LocalStorage cache read error for ${tenantId}`, undefined, err);
   }
 
-  // Try 4: Initialize from preset template in memory & IndexedDB
+  // Try 4: Fresh preset
   await setIndexedDbCache(idbKey, defaultState);
   try {
     localStorage.setItem(idbKey, JSON.stringify(defaultState));
-  } catch {}
+  } catch (err) {
+    logger.warn('SchoolTenantService', 'Notice saving default preset to localStorage', undefined, err);
+  }
+
+  const isBlocked = cloudReadError && !docConfirmedMissing;
+  setCloudAutosaveBlocked(tenantId, isBlocked);
 
   return {
     state: defaultState,
     source: 'fresh_preset',
+    rev: 1,
+    cloudReadFailed: cloudReadError,
+    isCloudAutosaveBlocked: isBlocked,
   };
 }
 
@@ -502,133 +809,306 @@ export function checkIsQuotaExhausted(): boolean {
       isCloudQuotaExhausted = true;
       return true;
     }
-  } catch {}
+  } catch (err) {
+    logger.warn('SchoolTenantService', 'Failed to read quota timestamp', undefined, err);
+  }
   return false;
 }
 
 export function markQuotaExhausted(): void {
   isCloudQuotaExhausted = true;
   try {
-    // Suppress network write retries for 1 hour to prevent console spam
     localStorage.setItem('FIRESTORE_QUOTA_EXHAUSTED_UNTIL', String(Date.now() + 60 * 60 * 1000));
     disableNetwork(db).catch(() => {});
-  } catch {}
+  } catch (err) {
+    logger.warn('SchoolTenantService', 'Failed to mark quota exhausted', undefined, err);
+  }
 }
 
-// 5. Save school LPJ data to Cloud Firestore (Isolated per school tenant)
+// 6. Save school LPJ data with Transaction Concurrency & Retry Queue
 export async function saveSchoolTenantAppState(
   tenantId: string,
-  stateData: AppStateData
-): Promise<boolean> {
+  stateData: AppStateData,
+  expectedRev?: number
+): Promise<SaveTenantResult> {
   const idbKey = `${TENANT_CACHE_PREFIX}${tenantId}`;
 
-  // 1. Always update high-capacity IndexedDB cache instantly for 100% data safety
-  await setIndexedDbCache(idbKey, stateData);
+  // Step 1: Always update high-capacity local IndexedDB cache instantly
+  const localCachedOk = await setIndexedDbCache(idbKey, stateData);
 
-  // 2. Safely attempt LocalStorage update without throwing QuotaExceededError
+  // Safely attempt LocalStorage update
   try {
     localStorage.setItem(idbKey, JSON.stringify(stateData));
-
-    // Also sync school metadata in LOCAL_CUSTOM_TENANTS_LIST
-    if (stateData.school) {
-      const customListRaw = localStorage.getItem('LOCAL_CUSTOM_TENANTS_LIST');
-      if (customListRaw) {
-        const customList: SchoolTenant[] = JSON.parse(customListRaw);
-        const idx = customList.findIndex((t) => t.id === tenantId);
-        if (idx >= 0) {
-          customList[idx] = {
-            ...customList[idx],
-            namaSekolah: stateData.school.namaSekolah || customList[idx].namaSekolah,
-            npsn: stateData.school.npsn || customList[idx].npsn,
-            jenjang: ((stateData.school as any)?.jenjang as any) || customList[idx].jenjang,
-            kabKota: stateData.school.kabKota || customList[idx].kabKota,
-            provinsi: stateData.school.provinsi || customList[idx].provinsi,
-            lastLogin: new Date().toISOString(),
-          };
-          try {
-            localStorage.setItem('LOCAL_CUSTOM_TENANTS_LIST', JSON.stringify(customList));
-          } catch {}
-        }
-      }
-    }
   } catch (err: any) {
     if (err?.name === 'QuotaExceededError' || String(err).includes('quota')) {
-      console.info('[Storage] LocalStorage limit reached; data is safely preserved in IndexedDB.');
+      logger.info('SchoolTenantService', 'LocalStorage quota reached; data safely preserved in IndexedDB.');
     } else {
-      console.warn('[Storage] Notice on LocalStorage update:', err);
+      logger.warn('SchoolTenantService', 'LocalStorage update notice', undefined, err);
     }
   }
 
-  // If quota was already marked exhausted, stay in local cache mode without spamming network
-  if (checkIsQuotaExhausted()) {
-    return true; // Successfully saved to local IndexedDB
+  // Safety check: If autosave to cloud is blocked due to cloud read failure, skip cloud write
+  if (isCloudAutosaveBlockedForTenant(tenantId)) {
+    logger.warn('SchoolTenantService', `Cloud autosave is blocked for ${tenantId} to prevent overwriting cloud data.`);
+    return {
+      local: localCachedOk,
+      cloud: 'failed',
+      error: 'CLOUD_AUTOSAVE_BLOCKED',
+    };
   }
 
-  // Save to isolated Firestore path: schools/{tenantId}/lpj_data/current
+  // Step 2: Quota check
+  if (checkIsQuotaExhausted()) {
+    return { local: localCachedOk, cloud: 'quota' };
+  }
+
+  // Step 3: Concurrency revision check via Firestore transaction
+  const currentExpectedRev = expectedRev !== undefined ? expectedRev : getStoredTenantRev(tenantId);
+  const masterDocRef = doc(db, 'schools', tenantId, 'lpj_data', 'master');
+  const currentDocRef = doc(db, 'schools', tenantId, 'lpj_data', 'current');
+
   try {
-    const dataDocRef = doc(db, 'schools', tenantId, 'lpj_data', 'current');
-    const cleanData = sanitizeForFirestore(stateData);
-    await withTimeout(
-      setDoc(dataDocRef, {
-        ...cleanData,
-        updatedAt: serverTimestamp(),
-      }),
-      15000 // 15 seconds timeout for large state uploads
-    );
+    let nextRev = currentExpectedRev + 1;
+    let conflictDetected = false;
+    let serverRev = 1;
+
+    await runTransaction(db, async (transaction) => {
+      const masterSnap = await transaction.get(masterDocRef);
+      const currentSnap = await transaction.get(currentDocRef);
+
+      if (masterSnap.exists()) {
+        serverRev = Number(masterSnap.data().rev) || 1;
+      } else if (currentSnap.exists()) {
+        serverRev = Number(currentSnap.data().rev) || 1;
+      }
+
+      // If server is strictly ahead of our expected revision, conflict!
+      if ((masterSnap.exists() || currentSnap.exists()) && serverRev > currentExpectedRev) {
+        conflictDetected = true;
+        return;
+      }
+      nextRev = Math.max(serverRev, currentExpectedRev) + 1;
+    });
+
+    if (conflictDetected) {
+      // Fetch full server state to allow interactive resolution modal
+      const serverResult = await readDomainDocuments(tenantId);
+      logger.warn('SchoolTenantService', `Concurrency conflict detected for ${tenantId}. Expected rev ${currentExpectedRev}, Cloud rev ${serverRev}`);
+      return {
+        local: localCachedOk,
+        cloud: 'failed',
+        error: 'CONCURRENCY_CONFLICT',
+        rev: serverRev,
+        serverState: serverResult?.state,
+      };
+    }
+
+    // Step 4: Write domain documents with next revision
+    await writeDomainDocuments(tenantId, stateData, nextRev);
+    setStoredTenantRev(tenantId, nextRev);
 
     // Also update parent school metadata document in schools/{tenantId}
     if (stateData.school) {
       const schoolDocRef = doc(db, 'schools', tenantId);
-      await withTimeout(
-        setDoc(
-          schoolDocRef,
-          {
-            id: tenantId,
-            npsn: stateData.school.npsn || '',
-            namaSekolah: stateData.school.namaSekolah || '',
-            jenjang: (stateData.school as any)?.jenjang || 'SD',
-            kabKota: stateData.school.kabKota || '',
-            provinsi: stateData.school.provinsi || '',
-            totalAnggaran: stateData.school.totalAnggaran || 0,
-            updatedAt: serverTimestamp(),
-            lastLogin: serverTimestamp(),
-          },
-          { merge: true }
-        ),
-        8000
-      ).catch((err) => console.warn('Notice updating parent school metadata:', err));
+      await setDoc(
+        schoolDocRef,
+        {
+          id: tenantId,
+          npsn: stateData.school.npsn || '',
+          namaSekolah: stateData.school.namaSekolah || '',
+          jenjang: (stateData.school as any)?.jenjang || 'SD',
+          kabKota: stateData.school.kabKota || '',
+          provinsi: stateData.school.provinsi || '',
+          totalAnggaran: stateData.school.totalAnggaran || 0,
+          updatedAt: serverTimestamp(),
+          lastLogin: serverTimestamp(),
+        },
+        { merge: true }
+      ).catch((err) => logger.warn('SchoolTenantService', 'Notice updating parent school metadata', undefined, err));
     }
 
-    return true;
+    // Remove successful tenant from retry queue
+    dequeueSyncItem(tenantId);
+
+    return {
+      local: localCachedOk,
+      cloud: 'ok',
+      rev: nextRev,
+    };
   } catch (err: any) {
     const errMsg = err?.message || String(err);
-    if (
-      errMsg.includes('resource-exhausted') ||
-      errMsg.includes('Quota limit exceeded') ||
-      errMsg.includes('Quota exceeded')
-    ) {
+    if (errMsg.includes('resource-exhausted') || errMsg.includes('Quota limit exceeded') || errMsg.includes('Quota exceeded')) {
       markQuotaExhausted();
-      console.warn('[Firestore] Free daily write quota reached. Data is securely preserved in browser IndexedDB.');
-      return true;
+      return { local: localCachedOk, cloud: 'quota' };
     }
-    console.warn(`[Multi-Tenant] Notice on Firestore save for ${tenantId}:`, err);
-    return true; // IndexedDB save succeeded
+
+    logger.error('SchoolTenantService', `Cloud save failed for ${tenantId}; enqueuing for background retry`, err);
+
+    // Enqueue for automatic retry with exponential backoff
+    enqueueSyncItem({
+      id: `${tenantId}_${Date.now()}`,
+      tenantId,
+      state: stateData,
+      expectedRev: currentExpectedRev,
+      attemptCount: 0,
+      nextRetryTime: Date.now() + 2000,
+      createdAt: new Date().toISOString(),
+    });
+
+    return {
+      local: localCachedOk,
+      cloud: 'failed',
+      error: errMsg,
+      rev: currentExpectedRev,
+    };
   }
 }
 
-// 6. Delete a school tenant and its associated LPJ data
-export async function deleteSchoolTenant(tenantId: string): Promise<boolean> {
-  // 1. Blacklist ID so it can NEVER be loaded or resurrected
-  addDeletedTenantId(tenantId);
+// 7. Offline Retry Queue with Exponential Backoff
+function loadSyncQueue(): SyncQueueItem[] {
+  try {
+    const raw = localStorage.getItem(SYNC_QUEUE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (err) {
+    logger.warn('SchoolTenantService', 'Failed to read sync queue from localStorage', undefined, err);
+    return [];
+  }
+}
 
-  // 2. Remove from IndexedDB & LocalStorage cache
+function saveSyncQueue(queue: SyncQueueItem[]): void {
+  try {
+    localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(queue));
+  } catch (err) {
+    logger.warn('SchoolTenantService', 'Failed to write sync queue to localStorage', undefined, err);
+  }
+}
+
+export function enqueueSyncItem(item: SyncQueueItem): void {
+  const queue = loadSyncQueue().filter((q) => q.tenantId !== item.tenantId);
+  queue.push(item);
+  saveSyncQueue(queue);
+  notifySyncStatusListeners();
+}
+
+export function dequeueSyncItem(tenantId: string): void {
+  const queue = loadSyncQueue().filter((q) => q.tenantId !== tenantId);
+  saveSyncQueue(queue);
+  notifySyncStatusListeners();
+}
+
+export function isTenantPendingSync(tenantId: string): boolean {
+  const queue = loadSyncQueue();
+  return queue.some((item) => item.tenantId === tenantId);
+}
+
+export function getPendingSyncCount(): number {
+  return loadSyncQueue().length;
+}
+
+type SyncStatusListener = (pendingCount: number) => void;
+const syncStatusListeners: Set<SyncStatusListener> = new Set();
+
+export function subscribeSyncStatus(listener: SyncStatusListener): () => void {
+  syncStatusListeners.add(listener);
+  listener(getPendingSyncCount());
+  return () => {
+    syncStatusListeners.delete(listener);
+  };
+}
+
+function notifySyncStatusListeners() {
+  const count = getPendingSyncCount();
+  syncStatusListeners.forEach((fn) => fn(count));
+}
+
+// Background Retry Worker with Exponential Backoff
+let retryWorkerTimer: any = null;
+
+export function startSyncRetryWorker(intervalMs = 4000): void {
+  if (retryWorkerTimer) return;
+
+  retryWorkerTimer = setInterval(async () => {
+    if (checkIsQuotaExhausted() || !navigator.onLine) return;
+
+    const queue = loadSyncQueue();
+    if (queue.length === 0) return;
+
+    const now = Date.now();
+    for (const item of queue) {
+      if (now >= item.nextRetryTime) {
+        logger.info('SchoolTenantService', `Retrying sync for tenant ${item.tenantId} (attempt ${item.attemptCount + 1})`);
+        try {
+          const res = await saveSchoolTenantAppState(item.tenantId, item.state, item.expectedRev);
+          if (res.cloud === 'ok') {
+            dequeueSyncItem(item.tenantId);
+          } else {
+            // Exponential backoff: 2s, 4s, 8s, 16s, max 30s
+            item.attemptCount += 1;
+            const delay = Math.min(30000, Math.pow(2, Math.min(item.attemptCount, 5)) * 1000);
+            item.nextRetryTime = now + delay;
+            saveSyncQueue(queue);
+            notifySyncStatusListeners();
+          }
+        } catch (err) {
+          item.attemptCount += 1;
+          const delay = Math.min(30000, Math.pow(2, Math.min(item.attemptCount, 5)) * 1000);
+          item.nextRetryTime = now + delay;
+          saveSyncQueue(queue);
+          notifySyncStatusListeners();
+        }
+      }
+    }
+  }, intervalMs);
+}
+
+// 8. Delete a school tenant with Firestore Tombstone (Requirement 6)
+export async function deleteSchoolTenant(tenantId: string): Promise<boolean> {
+  // If cloud deletion fails, MUST return false!
+  let cloudSuccess = false;
+
+  try {
+    // 1. Write tombstone to Firestore first
+    const schoolDocRef = doc(db, 'schools', tenantId);
+    await withTimeout(
+      setDoc(
+        schoolDocRef,
+        {
+          isDeleted: true,
+          deletedAt: serverTimestamp(),
+          deletedBy: auth.currentUser?.uid || 'user',
+        },
+        { merge: true }
+      ),
+      8000
+    );
+
+    // 2. Delete domain documents
+    for (const domain of DOMAIN_NAMES) {
+      const domainDocRef = doc(db, 'schools', tenantId, 'lpj_data', domain);
+      await deleteDoc(domainDocRef).catch((err) => logger.warn('SchoolTenantService', `Notice deleting domain ${domain}`, undefined, err));
+    }
+    const legacyDocRef = doc(db, 'schools', tenantId, 'lpj_data', 'current');
+    await deleteDoc(legacyDocRef).catch((err) => logger.warn('SchoolTenantService', 'Notice deleting legacy doc', undefined, err));
+
+    // 3. Delete school document
+    await withTimeout(deleteDoc(schoolDocRef), 8000);
+    cloudSuccess = true;
+  } catch (err) {
+    logger.error('SchoolTenantService', `Cloud deletion failed for ${tenantId}`, err);
+    return false; // Requirement 6: kembalikan false bila penghapusan cloud gagal!
+  }
+
+  // Local cleanup only after cloud operation succeeded
+  addDeletedTenantId(tenantId);
+  dequeueSyncItem(tenantId);
   const idbKey = `${TENANT_CACHE_PREFIX}${tenantId}`;
   await removeIndexedDbCache(idbKey);
 
   try {
     localStorage.removeItem(idbKey);
     localStorage.removeItem(`LPJ_OFFLINE_STATE_${tenantId}`);
-    
+    localStorage.removeItem(`${TENANT_REV_PREFIX}${tenantId}`);
+
     const customListRaw = localStorage.getItem('LOCAL_CUSTOM_TENANTS_LIST');
     if (customListRaw) {
       const customList: SchoolTenant[] = JSON.parse(customListRaw);
@@ -636,21 +1116,83 @@ export async function deleteSchoolTenant(tenantId: string): Promise<boolean> {
       localStorage.setItem('LOCAL_CUSTOM_TENANTS_LIST', JSON.stringify(updated));
     }
   } catch (err) {
-    console.warn('Error clearing local cache during tenant delete:', err);
+    logger.warn('SchoolTenantService', 'Error clearing local cache during tenant delete', undefined, err);
   }
 
-  // 3. Delete from Firestore
-  try {
-    const dataDocRef = doc(db, 'schools', tenantId, 'lpj_data', 'current');
-    await deleteDoc(dataDocRef);
+  return cloudSuccess;
+}
 
-    const schoolDocRef = doc(db, 'schools', tenantId);
-    await deleteDoc(schoolDocRef);
-    return true;
+// 9. School Members & Roles
+export async function getSchoolMember(
+  schoolId: string,
+  uid: string
+): Promise<{ uid: string; role: UserRole; email?: string; displayName?: string } | null> {
+  if (checkIsQuotaExhausted() || !schoolId || !uid) return null;
+  try {
+    const memberDocRef = doc(db, 'schools', schoolId, 'members', uid);
+    const snap = await withTimeout(getDoc(memberDocRef), 8000);
+    if (snap.exists()) {
+      return snap.data() as { uid: string; role: UserRole; email?: string; displayName?: string };
+    }
   } catch (err) {
-    console.warn('Firestore delete error:', err);
-    return true; // Still true because locally and permanently blacklisted!
+    logger.warn('SchoolTenantService', '[RBAC] Could not fetch school member from Firestore', undefined, err);
+  }
+  return null;
+}
+
+export async function upsertSchoolMember(
+  schoolId: string,
+  member: { uid: string; role: UserRole; email?: string; displayName?: string }
+): Promise<void> {
+  if (checkIsQuotaExhausted() || !schoolId || !member.uid) return;
+  try {
+    const memberDocRef = doc(db, 'schools', schoolId, 'members', member.uid);
+    await withTimeout(
+      setDoc(
+        memberDocRef,
+        {
+          uid: member.uid,
+          role: member.role,
+          email: member.email || '',
+          displayName: member.displayName || '',
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      ),
+      8000
+    );
+  } catch (err) {
+    logger.warn('SchoolTenantService', '[RBAC] Failed to upsert member in Firestore', undefined, err);
   }
 }
 
+// 10. Update PIN salted hash
+export async function updateSchoolPinHash(
+  schoolId: string,
+  newPin: string
+): Promise<{ pinHash: string; pinSalt: string }> {
+  const { createSaltedPinRecord } = await import('../utils/authHelper');
+  const record = await createSaltedPinRecord(newPin);
 
+  if (!checkIsQuotaExhausted()) {
+    try {
+      const schoolDocRef = doc(db, 'schools', schoolId);
+      await withTimeout(
+        setDoc(
+          schoolDocRef,
+          {
+            pinHash: record.pinHash,
+            pinSalt: record.pinSalt,
+            mustResetPin: false,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        ),
+        8000
+      );
+    } catch (err) {
+      logger.warn('SchoolTenantService', 'Failed to update school PIN hash in Firestore', undefined, err);
+    }
+  }
+  return { pinHash: record.pinHash, pinSalt: record.pinSalt };
+}

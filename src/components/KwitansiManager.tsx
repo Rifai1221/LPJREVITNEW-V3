@@ -39,6 +39,7 @@ import {
 import { isRegisteredVendor, isSiplahVendor, findMasterStore, isInternalNonVendorTransaction } from '../utils/vendorValidation';
 import { VendorQuickRegisterModal } from './VendorQuickRegisterModal';
 import { SmartKwitansiEditorModal } from './SmartKwitansiEditorModal';
+import { useCan } from '../hooks/useCan';
 
 interface KwitansiManagerProps {
   kwitansiList: KwitansiDocument[];
@@ -77,6 +78,10 @@ export const KwitansiManager: React.FC<KwitansiManagerProps> = ({
   onCleanDuplicates,
   onAutoBalanceKwitansi,
 }) => {
+  const { can } = useCan();
+  const canCreate = can('create:transaction');
+  const canEdit = can('edit:transaction');
+  const canDelete = can('delete:transaction');
   const [activeType, setActiveType] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [sortOrder, setSortOrder] = useState<'ASC' | 'DESC'>('ASC');
@@ -132,7 +137,7 @@ export const KwitansiManager: React.FC<KwitansiManagerProps> = ({
     return kwitansiList.reduce((s, k) => s + (k.nominal || 0), 0);
   }, [kwitansiList]);
 
-  const paguAnggaran = school?.totalAnggaran || 552457000;
+  const paguAnggaran = school?.totalAnggaran || 0;
   const isOverBudget = totalKwitansiNominal > paguAnggaran;
 
   const handleCleanDuplicates = () => {
@@ -267,7 +272,7 @@ export const KwitansiManager: React.FC<KwitansiManagerProps> = ({
             </button>
           )}
 
-          {onCalibrateToRealProgress && (
+          {canCreate && onCalibrateToRealProgress && (
             <button
               type="button"
               onClick={onCalibrateToRealProgress}
@@ -279,14 +284,16 @@ export const KwitansiManager: React.FC<KwitansiManagerProps> = ({
             </button>
           )}
 
-          <button
-            type="button"
-            onClick={onAddNewKwitansi}
-            className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-xl text-xs font-semibold shadow-xs transition cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>+ Buat Manual</span>
-          </button>
+          {canCreate && (
+            <button
+              type="button"
+              onClick={onAddNewKwitansi}
+              className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-xl text-xs font-semibold shadow-xs transition cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>+ Buat Manual</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -784,55 +791,59 @@ export const KwitansiManager: React.FC<KwitansiManagerProps> = ({
                 </div>
 
                 <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!selectedKw) return;
-                      const isCurrentlyLocked = isReceiptLocked(selectedKw);
-                      const newLock = !isCurrentlyLocked;
-                      const updatedKw: KwitansiDocument = {
-                        ...selectedKw,
-                        isLocked: newLock,
-                        isManual: true,
-                      };
-                      const updated = kwitansiList.map((k) =>
-                        k.id === selectedKw.id ? updatedKw : k
-                      );
-                      setSelectedKw(updatedKw);
-                      if (onUpdateKwitansiList) onUpdateKwitansiList(updated);
-                    }}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer border shadow-2xs ${
-                      isReceiptLocked(selectedKw)
-                        ? 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200'
-                        : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'
-                    }`}
-                    title={
-                      isReceiptLocked(selectedKw)
-                        ? 'Kwitansi ini sedang TERKUNCI (Prioritas Utama, Anti-Penimpaan Komputer). Klik untuk MEMBUKA KUNCI.'
-                        : 'Kwitansi ini TERBUKA (Bisa diolah auto-generator). Klik untuk MENGUNCI MANUAL.'
-                    }
-                  >
-                    {isReceiptLocked(selectedKw) ? (
-                      <>
-                        <Lock className="w-3.5 h-3.5 text-amber-700" />
-                        <span>🔒 Terkunci (Klik Buka Kunci)</span>
-                      </>
-                    ) : (
-                      <>
-                        <Unlock className="w-3.5 h-3.5 text-slate-500" />
-                        <span>🔓 Kunci Manual (Terbuka)</span>
-                      </>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setIsEditorModalOpen(true)}
-                    className="flex items-center gap-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-xs cursor-pointer"
-                    title="Buka pengedit pintar: sesuaikan rincian barang, satuan, dan seimbangkan nominal sesuai pagu anggaran"
-                  >
-                    <Edit3 className="w-3.5 h-3.5 text-amber-300" />
-                    <span>✏️ Edit Cerdas & Rincian</span>
-                  </button>
+                  {canEdit && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!selectedKw) return;
+                        const isCurrentlyLocked = isReceiptLocked(selectedKw);
+                        const newLock = !isCurrentlyLocked;
+                        const updatedKw: KwitansiDocument = {
+                          ...selectedKw,
+                          isLocked: newLock,
+                          isManual: true,
+                        };
+                        const updated = kwitansiList.map((k) =>
+                          k.id === selectedKw.id ? updatedKw : k
+                        );
+                        setSelectedKw(updatedKw);
+                        if (onUpdateKwitansiList) onUpdateKwitansiList(updated);
+                      }}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer border shadow-2xs ${
+                        isReceiptLocked(selectedKw)
+                          ? 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200'
+                          : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'
+                      }`}
+                      title={
+                        isReceiptLocked(selectedKw)
+                          ? 'Kwitansi ini sedang TERKUNCI (Prioritas Utama, Anti-Penimpaan Komputer). Klik untuk MEMBUKA KUNCI.'
+                          : 'Kwitansi ini TERBUKA (Bisa diolah auto-generator). Klik untuk MENGUNCI MANUAL.'
+                      }
+                    >
+                      {isReceiptLocked(selectedKw) ? (
+                        <>
+                          <Lock className="w-3.5 h-3.5 text-amber-700" />
+                          <span>🔒 Terkunci (Klik Buka Kunci)</span>
+                        </>
+                      ) : (
+                        <>
+                          <Unlock className="w-3.5 h-3.5 text-slate-500" />
+                          <span>🔓 Kunci Manual (Terbuka)</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                  {canEdit && (
+                    <button
+                      type="button"
+                      onClick={() => setIsEditorModalOpen(true)}
+                      className="flex items-center gap-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-xs cursor-pointer"
+                      title="Buka pengedit pintar: sesuaikan rincian barang, satuan, dan seimbangkan nominal sesuai pagu anggaran"
+                    >
+                      <Edit3 className="w-3.5 h-3.5 text-amber-300" />
+                      <span>✏️ Edit Cerdas & Rincian</span>
+                    </button>
+                  )}
                   <button
                     onClick={() => onOpenPrintKwitansi(selectedKw.id, 'ALL')}
                     className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold shadow-xs cursor-pointer"
@@ -840,13 +851,15 @@ export const KwitansiManager: React.FC<KwitansiManagerProps> = ({
                     <Printer className="w-3.5 h-3.5" />
                     <span>Cetak Set Lengkap</span>
                   </button>
-                  <button
-                    onClick={() => onDeleteKwitansi(selectedKw.id)}
-                    className="p-1.5 text-slate-400 hover:text-rose-600 rounded hover:bg-rose-50 cursor-pointer"
-                    title="Hapus kwitansi"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  {canDelete && (
+                    <button
+                      onClick={() => onDeleteKwitansi(selectedKw.id)}
+                      className="p-1.5 text-slate-400 hover:text-rose-600 rounded hover:bg-rose-50 cursor-pointer"
+                      title="Hapus kwitansi"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
                 </div>
               </div>
 

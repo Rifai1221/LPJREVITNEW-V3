@@ -79,7 +79,7 @@ export const BastDocument: React.FC<BeritaAcaraProps> = ({
   activeDim = { widthMm: 210, heightMm: 297 },
 }) => {
   const yearStr = school.tahunAnggaran || '2026';
-  const totalAnggaran = school.totalAnggaran || 552457000;
+  const totalAnggaran = school.totalAnggaran || 0;
   const noBast = school.nomorSkP2SP
     ? `02/BAST-REVIT/${school.nomorSkP2SP.replace(/[^a-zA-Z0-9]/g, '-')}/${yearStr}`
     : `01/BAST-REVIT/${school.npsn || 'P2SP'}/${yearStr}`;
@@ -542,7 +542,7 @@ export const BapPembayaranDocument: React.FC<BeritaAcaraProps> = ({
 }) => {
   const [selectedTermin, setSelectedTermin] = useState<'TERMIN_1' | 'TERMIN_2'>('TERMIN_1');
   const yearStr = school.tahunAnggaran || '2026';
-  const totalAnggaran = school.totalAnggaran || 552457000;
+  const totalAnggaran = school.totalAnggaran || 0;
 
   const isTermin1 = selectedTermin === 'TERMIN_1';
   const nominalTermin = isTermin1

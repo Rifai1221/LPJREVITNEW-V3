@@ -22,6 +22,8 @@ import { formatRupiah } from '../utils/formatters';
 import { getAvailableMonthsForSchool, getMonthFromPeriodString } from '../utils/monthHelper';
 import { isRegisteredVendor, isSiplahVendor, findMasterStore, isInternalNonVendorTransaction } from '../utils/vendorValidation';
 import { VendorQuickRegisterModal } from './VendorQuickRegisterModal';
+import { calcDppAndPpn, calcPph22, calcPph23, addRupiah } from '../utils/money';
+import { getFiscalConfig } from '../data/fiscalTaxParameters';
 
 interface TaxManagerProps {
   taxRecords: TaxRecord[];
@@ -176,7 +178,7 @@ export const TaxManager: React.FC<TaxManagerProps> = ({
   // Submit Add / Edit
   const handleSubmitForm = (e: React.FormEvent) => {
     e.preventDefault();
-    const totPajak = (Number(formData.ppn11) || 0) + (Number(formData.pph22) || 0) + (Number(formData.pph23) || 0);
+    const totPajak = addRupiah(formData.ppn11, formData.pph22, formData.pph23);
 
     const nominalKonstruksi = formData.kategori === 'Konstruksi' ? Number(formData.nominalBelanja) || 0 : 0;
     const nominalPerabot = formData.kategori === 'Perabot' ? Number(formData.nominalBelanja) || 0 : 0;
@@ -236,30 +238,32 @@ export const TaxManager: React.FC<TaxManagerProps> = ({
   };
 
   // Auto calculate helpers
+  // Auto calculate helpers using centralized fiscal parameters & integer rupiah math
   const handleCalcPpn = () => {
     const nom = Number(formData.nominalBelanja) || 0;
     if (nom > 0) {
-      // DPP = nom / 1.11, PPN 11% = DPP * 0.11
-      const calculated = Math.round((nom / 1.11) * 0.11);
-      setFormData((prev) => ({ ...prev, ppn11: calculated }));
+      const fiscal = getFiscalConfig(school);
+      const { ppn } = calcDppAndPpn(nom, fiscal.ppnRatePercent);
+      setFormData((prev) => ({ ...prev, ppn11: ppn }));
     }
   };
 
   const handleCalcPph22 = () => {
     const nom = Number(formData.nominalBelanja) || 0;
     if (nom > 0) {
-      // PPh 22 = (nom / 1.11) * 1.5%
-      const calculated = Math.round((nom / 1.11) * 0.015);
-      setFormData((prev) => ({ ...prev, pph22: calculated }));
+      const fiscal = getFiscalConfig(school);
+      const { dpp } = calcDppAndPpn(nom, fiscal.ppnRatePercent);
+      const pph22 = calcPph22(dpp, fiscal.pph22RatePercent);
+      setFormData((prev) => ({ ...prev, pph22 }));
     }
   };
 
   const handleCalcPph23 = () => {
     const nom = Number(formData.nominalBelanja) || 0;
     if (nom > 0) {
-      // Jasa PPh 23 = 2% dari nilai bruto jasa
-      const calculated = Math.round(nom * 0.02);
-      setFormData((prev) => ({ ...prev, pph23: calculated }));
+      const fiscal = getFiscalConfig(school);
+      const pph23 = calcPph23(nom, fiscal.pph23RatePercent);
+      setFormData((prev) => ({ ...prev, pph23 }));
     }
   };
 

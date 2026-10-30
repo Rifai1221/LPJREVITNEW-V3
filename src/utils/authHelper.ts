@@ -1,9 +1,13 @@
 /**
  * Auth Helper for LPJ Revitalisasi Sekolah
- * Dual Login Support:
- * 1. Mode Mandiri (PIN Keamanan Sekolah + Peran Tim Revitalisasi) - 100% Bebas Error OAuth & Tanpa Hambatan
- * 2. Mode Google OAuth (Sinkronisasi Cloud Spreadsheet ke Google Drive Pribadi)
+ * Secure Multi-Role Authentication:
+ * 1. Firebase Auth (Email/Password or Google) as Primary Identity
+ * 2. School Security PIN as Second Step, stored strictly as salted SHA-256 hash in Firestore school document.
+ * 3. NO plain-text localStorage PIN, NO fallback to "123456", NO fallback to "4 digit terakhir NPSN".
+ * 4. First-time login requires setting a new secure PIN.
  */
+
+import { hashPin, verifyPinHash, generateSalt } from './cryptoHelper';
 
 export type UserRole = 'BENDAHARA' | 'KEPALA_SEKOLAH' | 'TIM_TEKNIS' | 'FASILITATOR';
 
@@ -15,6 +19,8 @@ export interface LocalUserSession {
   schoolId: string;
   schoolName: string;
   loginAt: string;
+  uid?: string;
+  email?: string;
 }
 
 export const USER_ROLES: { id: UserRole; title: string; desc: string; icon: string }[] = [
@@ -39,154 +45,109 @@ export const USER_ROLES: { id: UserRole; title: string; desc: string; icon: stri
   {
     id: 'FASILITATOR',
     title: 'Fasilitator / Pengawas / Tamu',
-    desc: 'Monitoring realisasi fisik & keuangan, verifikasi dokumen, serta rekapitulasi laporan',
+    desc: 'Monitoring realisasi fisik & keuangan, verifikasi dokumen, serta rekapitulasi laporan (Baca Saja)',
     icon: '📋',
   },
 ];
 
 const LOCAL_SESSION_STORAGE_KEY = 'LPJ_LOCAL_USER_SESSION';
-const SCHOOL_PIN_PREFIX = 'LPJ_SCHOOL_PIN_';
 
 /**
- * Mendapatkan PIN sekolah yang tersimpan di memori lokal atau fallback default
- * Default universal: '123456'
+ * Checks if a school has already configured its secure salted hash PIN.
+ * If false, user MUST set a new PIN upon first login.
  */
-export function getSchoolPin(schoolId: string, npsn?: string, customDefault?: string): string {
-  try {
-    const cleanId = (schoolId || '').trim();
-    const cleanNpsn = (npsn || '').trim();
-
-    // 1. Cek by exact schoolId
-    if (cleanId) {
-      const savedById = localStorage.getItem(`${SCHOOL_PIN_PREFIX}${cleanId}`);
-      if (savedById && savedById.trim()) return savedById.trim();
-
-      // Cek variasi prefix sch_
-      const stripped = cleanId.replace(/^sch_/, '');
-      const savedByStripped = localStorage.getItem(`${SCHOOL_PIN_PREFIX}${stripped}`);
-      if (savedByStripped && savedByStripped.trim()) return savedByStripped.trim();
-
-      const withSch = `sch_${stripped}`;
-      const savedByWithSch = localStorage.getItem(`${SCHOOL_PIN_PREFIX}${withSch}`);
-      if (savedByWithSch && savedByWithSch.trim()) return savedByWithSch.trim();
-    }
-
-    // 2. Cek by npsn
-    if (cleanNpsn) {
-      const savedByNpsn = localStorage.getItem(`${SCHOOL_PIN_PREFIX}${cleanNpsn}`);
-      if (savedByNpsn && savedByNpsn.trim()) return savedByNpsn.trim();
-
-      const savedBySchNpsn = localStorage.getItem(`${SCHOOL_PIN_PREFIX}sch_${cleanNpsn}`);
-      if (savedBySchNpsn && savedBySchNpsn.trim()) return savedBySchNpsn.trim();
-    }
-
-    // 3. Cek apakah ada di cache tenant Firestore/IndexedDB
-    if (cleanId) {
-      const tenantCache = localStorage.getItem(`LPJ_TENANT_CACHE_${cleanId}`);
-      if (tenantCache) {
-        const parsed = JSON.parse(tenantCache);
-        if (parsed?.school?.pinAkses && String(parsed.school.pinAkses).trim()) {
-          return String(parsed.school.pinAkses).trim();
-        }
-      }
-    }
-  } catch {}
-  return customDefault || '123456';
+export function isSchoolPinConfigured(school?: {
+  pinHash?: string;
+  pinSalt?: string;
+  mustResetPin?: boolean;
+} | null): boolean {
+  if (!school) return false;
+  if (school.mustResetPin) return false;
+  return Boolean(school.pinHash && school.pinSalt && school.pinHash.length >= 32);
 }
 
 /**
- * Menyimpan / memperbarui PIN keamanan sekolah ke semua identitas terkait
+ * Verifies entered PIN against the school's cryptographic salted hash.
+ * Completely eliminates '123456' and '4-digit NPSN' insecure fallbacks.
  */
-export function setSchoolPin(schoolId: string, newPin: string, npsn?: string): void {
-  try {
-    const clean = newPin.trim();
-    if (!clean) return;
-
-    const cleanId = (schoolId || '').trim();
-    const cleanNpsn = (npsn || '').trim();
-
-    // 1. Simpan ke schoolId dan variasi sch_
-    if (cleanId) {
-      localStorage.setItem(`${SCHOOL_PIN_PREFIX}${cleanId}`, clean);
-      const stripped = cleanId.replace(/^sch_/, '');
-      localStorage.setItem(`${SCHOOL_PIN_PREFIX}${stripped}`, clean);
-      localStorage.setItem(`${SCHOOL_PIN_PREFIX}sch_${stripped}`, clean);
-    }
-
-    // 2. Simpan ke npsn dan variasi sch_
-    if (cleanNpsn) {
-      localStorage.setItem(`${SCHOOL_PIN_PREFIX}${cleanNpsn}`, clean);
-      localStorage.setItem(`${SCHOOL_PIN_PREFIX}sch_${cleanNpsn}`, clean);
-    }
-
-    // 3. Simpan ke global active pin
-    localStorage.setItem('LPJ_ACTIVE_SCHOOL_PIN', clean);
-  } catch (err) {
-    console.error('Failed to save school pin:', err);
-  }
-}
-
-/**
- * Memverifikasi kecocokan PIN yang diinput pengguna.
- * Menerima:
- * 1. PIN kustom tersimpan sekolah (diperbarui dari Data Master)
- * 2. 4 digit terakhir NPSN sekolah (opsi darurat/alternatif)
- * 3. Master fallback PIN: '123456' (jika belum diubah)
- */
-export function verifySchoolPin(
-  schoolId: string,
+export async function verifySchoolPinSecure(
   enteredPin: string,
-  npsn?: string,
-  customDefault?: string
-): { isValid: boolean; reason?: string } {
-  const trimmed = (enteredPin || '').trim();
-  if (!trimmed) {
-    return { isValid: false, reason: 'PIN tidak boleh kosong' };
+  school?: {
+    pinHash?: string;
+    pinSalt?: string;
+    mustResetPin?: boolean;
+  } | null
+): Promise<{ isValid: boolean; mustResetPin?: boolean; reason?: string }> {
+  const cleanPin = (enteredPin || '').trim();
+  if (!cleanPin) {
+    return { isValid: false, reason: 'PIN tidak boleh kosong.' };
   }
 
-  const savedPin = getSchoolPin(schoolId, npsn, customDefault);
-
-  // 1. Cek kecocokan dengan PIN kustom yang telah disimpan
-  if (trimmed === savedPin) {
-    return { isValid: true };
+  if (cleanPin.length < 6) {
+    return { isValid: false, reason: 'PIN minimal harus 6 digit angka.' };
   }
 
-  // 2. Cek apakah cocok dengan PIN kustom di cache tenant
-  try {
-    const cacheRaw = localStorage.getItem(`LPJ_TENANT_CACHE_${schoolId}`);
-    if (cacheRaw) {
-      const parsed = JSON.parse(cacheRaw);
-      if (parsed?.school?.pinAkses && String(parsed.school.pinAkses).trim() === trimmed) {
-        return { isValid: true };
-      }
-    }
-  } catch {}
-
-  // 3. Fallback darurat: 4 digit terakhir NPSN
-  if (npsn && npsn.trim().length >= 4) {
-    const last4 = npsn.trim().slice(-4);
-    if (trimmed === last4) {
-      return { isValid: true };
-    }
-  }
-
-  // 4. Default 123456 (hanya jika pengguna belum mengubah PIN kustom)
-  if (trimmed === '123456' && savedPin === '123456') {
-    return { isValid: true };
-  }
-
-  // Jika pengguna memasukkan 123456 tetapi PIN telah diganti
-  if (trimmed === '123456' && savedPin !== '123456') {
+  // If school has not configured a hash yet, enforce PIN change immediately
+  if (!isSchoolPinConfigured(school)) {
     return {
       isValid: false,
-      reason: 'PIN bawaan 123456 sudah diubah ke PIN kustom baru. Masukkan PIN baru yang telah disimpan.',
+      mustResetPin: true,
+      reason: 'Sekolah belum memiliki PIN aman terdaftar. Wajib membuat PIN baru pada login pertama.',
     };
   }
 
+  const isMatch = await verifyPinHash(cleanPin, school!.pinSalt!, school!.pinHash!);
+  if (!isMatch) {
+    return {
+      isValid: false,
+      reason: 'PIN yang dimasukkan salah. Silakan periksa kembali atau hubungi Bendahara/Kepala Sekolah.',
+    };
+  }
+
+  return { isValid: true };
+}
+
+/**
+ * Creates salted hash object for storing in Firestore school document
+ */
+export async function createSaltedPinRecord(newPin: string): Promise<{
+  pinHash: string;
+  pinSalt: string;
+  mustResetPin: boolean;
+}> {
+  const salt = generateSalt(16);
+  const { hash } = await hashPin(newPin.trim(), salt);
   return {
-    isValid: false,
-    reason: `PIN tidak cocok. Silakan masukkan PIN baru yang telah diatur di Data Master Sekolah.`,
+    pinHash: hash,
+    pinSalt: salt,
+    mustResetPin: false,
   };
+}
+
+/**
+ * Legacy stub kept for backward compatibility (purges plain text storage)
+ */
+export function setSchoolPin(schoolId: string, newPin: string, npsn?: string): void {
+  // Security Hardening: Never store plain text PINs in localStorage
+  try {
+    const keysToRemove = [
+      `LPJ_SCHOOL_PIN_${schoolId}`,
+      `LPJ_SCHOOL_PIN_${npsn}`,
+      'LPJ_ACTIVE_SCHOOL_PIN',
+    ];
+    keysToRemove.forEach((k) => {
+      try {
+        localStorage.removeItem(k);
+      } catch {}
+    });
+  } catch {}
+}
+
+/**
+ * Legacy stub kept for component references (always redirects to secure validation)
+ */
+export function getSchoolPin(schoolId: string, npsn?: string, customDefault?: string): string {
+  return '';
 }
 
 /**

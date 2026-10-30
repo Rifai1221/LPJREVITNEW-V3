@@ -528,26 +528,27 @@ export function getBktSaldoAtMonth(bktList: BktTransaction[], monthName: string)
 
 /**
  * Melakukan verifikasi rekonsiliasi kas (BKU vs BKB + BKT)
+ * Menerapkan prinsip akuntansi presisi integer rupiah:
+ * Saldo BKU harus tepat sama dengan Saldo Bank (BKB) + Saldo Kas Tunai (BKT).
  */
 export function reconcileCashBalances(
   bkuSaldo: number,
   bkbSaldo: number,
   bktSaldo: number
 ): CashReconciliationResult {
-  const normBku = Math.abs(bkuSaldo) <= 1000 ? 0 : bkuSaldo;
-  const normBkb = Math.abs(bkbSaldo) <= 1000 ? 0 : bkbSaldo;
-  const normBkt = Math.abs(bktSaldo) <= 1000 ? 0 : bktSaldo;
+  const normBku = Math.round(Number(bkuSaldo) || 0);
+  const normBkb = Math.round(Number(bkbSaldo) || 0);
+  const normBkt = Math.round(Number(bktSaldo) || 0);
 
   const sumSubLedgers = normBkb + normBkt;
-  const rawSelisih = normBku - sumSubLedgers;
-  const selisih = Math.abs(rawSelisih) <= 1000 ? 0 : Math.round(rawSelisih * 100) / 100;
-  const isBalanced = Math.abs(selisih) <= 1000;
+  const selisih = normBku - sumSubLedgers;
+  const isBalanced = selisih === 0;
 
   return {
     saldoBku: normBku,
     saldoBank: normBkb,
     saldoTunai: normBkt,
-    selisih: isBalanced ? 0 : selisih,
+    selisih,
     isBalanced,
     statusText: isBalanced
       ? 'Seimbang & Terintegrasi Penuh (BKU = Bank + Tunai)'

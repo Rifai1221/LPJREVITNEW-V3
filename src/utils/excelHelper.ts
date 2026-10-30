@@ -1,14 +1,19 @@
-import * as XLSX from 'xlsx';
 import { RealSchoolData, RabDivision, RabSubItem, AhspItem, AhspKomponen, ProjectProgressWeek, DivisionProgressItem, SchoolMasterData } from '../types';
 import { DEFAULT_DIVISIONS, renumberDivisions, recalculateAllWeeksProgress, toRoman } from './divisionHelper';
 import { formatWeekPeriodString } from './monthHelper';
 import { isPreservedUnitItem } from '../services/autoGeneratorService';
+import { generateSecureId } from './idAndVoucherHelper';
+
+async function getXLSX() {
+  return await import('xlsx');
+}
 
 /**
  * Generate and download Excel Template for Real School Data
  * (Rekapitulasi Biaya, Rincian RAB Lengkap, AHSP Analisa Harga Satuan, & Identitas Sekolah)
  */
-export function downloadRealDataExcelTemplate(currentData?: RealSchoolData) {
+export async function downloadRealDataExcelTemplate(currentData?: RealSchoolData) {
+  const XLSX = await getXLSX();
   const wb = XLSX.utils.book_new();
 
   // 1. Sheet 1: Identitas Sekolah
@@ -249,6 +254,7 @@ export async function parseRealDataExcelFile(file: File): Promise<{
   };
 }> {
   try {
+    const XLSX = await getXLSX();
     const arrayBuffer = await file.arrayBuffer();
     const wb = XLSX.read(arrayBuffer, { type: 'array' });
 
@@ -366,7 +372,7 @@ export async function parseRealDataExcelFile(file: File): Promise<{
               isPreservedUnitItem(itemUraian, col3);
 
             const newItem: RabSubItem = {
-              id: `item-imp-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+              id: generateSecureId('item-imp'),
               uraian: itemUraian,
               volume,
               satuan: col3 || 'm²',
@@ -427,7 +433,7 @@ export async function parseRealDataExcelFile(file: File): Promise<{
           const ahspKey = kodeAhsp || namaAhsp;
           if (!ahspMap.has(ahspKey)) {
             ahspMap.set(ahspKey, {
-              id: `ahsp-imp-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+              id: generateSecureId('ahsp-imp'),
               kodePekerjaan: kodeAhsp || 'AHSP-IMP',
               namaPekerjaan: namaAhsp || 'Pekerjaan Analisa',
               satuan: satuanAhsp,
@@ -443,10 +449,10 @@ export async function parseRealDataExcelFile(file: File): Promise<{
             if (katKomponen.includes('UPAH') || katKomponen.includes('PEKERJA')) kKat = 'UPAH';
             else if (katKomponen.includes('ALAT')) kKat = 'ALAT';
 
-            const totalKompHarga = Math.round(koef * hargaKomp * 100) / 100;
+            const totalKompHarga = Math.round(koef * hargaKomp);
 
             const komponenObj: AhspKomponen = {
-              id: `komp-imp-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+              id: generateSecureId('komp-imp'),
               kategori: kKat,
               uraian: uraianKomp,
               koefisien: koef,
@@ -489,10 +495,11 @@ export async function parseRealDataExcelFile(file: File): Promise<{
  * Generate and download Excel Template for Weekly Progress & Weights (Matriks Kurva S & Jadwal Mingguan)
  * Memungkinkan pengguna mengisi bobot beberapa minggu sekaligus dalam satu file Excel
  */
-export function downloadWeeklyProgressExcelTemplate(
+export async function downloadWeeklyProgressExcelTemplate(
   progressWeeks: ProjectProgressWeek[],
   school?: SchoolMasterData
 ) {
+  const XLSX = await getXLSX();
   const wb = XLSX.utils.book_new();
 
   const sortedWeeks = [...(progressWeeks && progressWeeks.length > 0 ? progressWeeks : [])].sort(
@@ -549,7 +556,7 @@ export function downloadWeeklyProgressExcelTemplate(
       school?.pekerjaan || school?.program || 'Rehabilitasi Ruang Kelas Rusak Sedang/Berat',
       '',
       'Total Pagu Anggaran (Rp):',
-      school?.totalAnggaran || 552457000,
+      school?.totalAnggaran || 0,
     ],
     [],
     [
@@ -768,6 +775,7 @@ export async function parseWeeklyProgressExcelFile(
   };
 }> {
   try {
+    const XLSX = await getXLSX();
     const arrayBuffer = await file.arrayBuffer();
     const wb = XLSX.read(arrayBuffer, { type: 'array' });
 

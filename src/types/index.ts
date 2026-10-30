@@ -17,6 +17,12 @@ export interface SchoolMasterData {
   termin2Persen: number;
   termin1Nilai: number;
   termin2Nilai: number;
+  // Parameter Pajak & Fiskal Terkonfigurasi
+  customPpnRate?: number;
+  customPph22Rate?: number;
+  customPph23Rate?: number;
+  customTaxThreshold?: number;
+  isTaxRatesVerified?: boolean;
   // Keamanan & Dual Login
   pinAkses?: string;
   // Kop Surat & Visual Identity Logos
@@ -233,6 +239,10 @@ export interface KwitansiDocument {
   linkedRabDivisions?: string[];
   linkedRabItemIds?: string[];
   metodeBayar?: 'TUNAI' | 'BANK';
+  // Requirement 2 fields
+  sumber?: 'NOTA_ASLI' | 'DRAFT_OTOMATIS';
+  fotoNotaUrl?: string;
+  isVerified?: boolean;
 }
 
 export interface BkuTransaction {
@@ -252,6 +262,9 @@ export interface BkuTransaction {
   isManual?: boolean;
   isLocked?: boolean;
   isManualDate?: boolean;
+  sumber?: 'NOTA_ASLI' | 'DRAFT_OTOMATIS';
+  fotoNotaUrl?: string;
+  isVerified?: boolean;
 }
 
 export interface BktTransaction {

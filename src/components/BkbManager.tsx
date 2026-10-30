@@ -3,6 +3,7 @@ import { CreditCard, Printer, Search, X, Plus, Edit3, Trash2, Calendar, AlertCir
 import { BkbTransaction, BkuTransaction, BktTransaction, SchoolMasterData, ProjectProgressWeek } from '../types';
 import { formatRupiah } from '../utils/formatters';
 import { getAvailableMonthsForSchool, resolveWeekDates } from '../utils/monthHelper';
+import { useCan } from '../hooks/useCan';
 
 interface BkbManagerProps {
   bkbList: BkbTransaction[];
@@ -33,6 +34,10 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
   onClearAllBkb,
   onBulkDeleteBkb,
 }) => {
+  const { can } = useCan();
+  const canCreate = can('create:transaction');
+  const canEdit = can('edit:transaction');
+  const canDelete = can('delete:transaction');
   const [selectedTxIds, setSelectedTxIds] = useState<Set<string>>(new Set());
   const [selectedPeriod, setSelectedPeriod] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
@@ -272,7 +277,7 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          {bkbList.length === 0 && onInitStandardBkb && (
+          {canCreate && bkbList.length === 0 && onInitStandardBkb && (
             <button
               onClick={onInitStandardBkb}
               className="flex items-center gap-1.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white px-3.5 py-2 rounded-lg text-xs font-bold shadow-xs transition cursor-pointer"
@@ -283,7 +288,7 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
             </button>
           )}
 
-          {bkbList.length > 0 && (
+          {canDelete && bkbList.length > 0 && (
             <button
               onClick={handleConfirmClearAll}
               className="flex items-center gap-1.5 bg-rose-600 hover:bg-rose-700 text-white px-3.5 py-2 rounded-lg text-xs font-bold shadow-xs transition cursor-pointer"
@@ -305,7 +310,7 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
       </div>
 
       {/* BULK ACTION BAR */}
-      {selectedTxIds.size > 0 && (
+      {canDelete && selectedTxIds.size > 0 && (
         <div className="bg-rose-900 text-white p-3.5 rounded-xl shadow-lg flex flex-col sm:flex-row items-center justify-between gap-3 animate-in fade-in duration-200 border border-rose-700">
           <div className="flex items-center gap-3">
             <span className="bg-white/20 text-white px-2.5 py-1 rounded-lg text-xs font-mono font-bold">
@@ -409,14 +414,16 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleOpenAdd}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg shadow-xs transition cursor-pointer"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>+ Input Transaksi Bank</span>
-            </button>
+            {canCreate && (
+              <button
+                type="button"
+                onClick={handleOpenAdd}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg shadow-xs transition cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>+ Input Transaksi Bank</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -520,22 +527,29 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
                     </td>
                     <td className="py-2.5 px-3 text-center whitespace-nowrap">
                       <div className="flex items-center justify-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => handleOpenEdit(tx)}
-                          className="p-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-700 hover:text-amber-900 border border-amber-200 transition cursor-pointer"
-                          title="Edit Transaksi Bank"
-                        >
-                          <Edit3 className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDelete(tx)}
-                          className="p-1 rounded bg-rose-50 hover:bg-rose-100 text-rose-600 hover:text-rose-800 border border-rose-200 transition cursor-pointer"
-                          title="Hapus Transaksi Bank"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        {canEdit && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEdit(tx)}
+                            className="p-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-700 hover:text-amber-900 border border-amber-200 transition cursor-pointer"
+                            title="Edit Transaksi Bank"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        {canDelete && (
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(tx)}
+                            className="p-1 rounded bg-rose-50 hover:bg-rose-100 text-rose-600 hover:text-rose-800 border border-rose-200 transition cursor-pointer"
+                            title="Hapus Transaksi Bank"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        {!canEdit && !canDelete && (
+                          <span className="text-[10px] text-slate-400 italic">Lihat Saja</span>
+                        )}
                       </div>
                     </td>
                   </tr>

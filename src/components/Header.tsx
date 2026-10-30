@@ -19,11 +19,14 @@ import {
   HardDrive,
   KeyRound,
   UserCheck,
+  AlertTriangle,
+  CheckCircle2,
 } from 'lucide-react';
 import { SchoolMasterData } from '../types';
 import { SchoolTenant } from '../data/tenantPresets';
 import { GoogleUserProfile } from '../services/googleAuthService';
 import { LocalUserSession } from '../utils/authHelper';
+import { useCan } from '../hooks/useCan';
 
 interface HeaderProps {
   school: SchoolMasterData;
@@ -38,6 +41,10 @@ interface HeaderProps {
   onOpenSchoolPortal?: () => void;
   isSyncing: boolean;
   lastSyncedText: string;
+  cloudStatus?: 'ok' | 'failed' | 'quota' | 'skipped' | 'pending';
+  pendingSyncCount?: number;
+  onOpenAnomalyReview?: () => void;
+  anomalyCount?: number;
   onManualSave?: () => void;
   onOpenGoogleSheetsSync?: () => void;
   isGoogleConnected?: boolean;
@@ -60,6 +67,10 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenSchoolPortal,
   isSyncing,
   lastSyncedText,
+  cloudStatus = 'ok',
+  pendingSyncCount = 0,
+  onOpenAnomalyReview,
+  anomalyCount = 0,
   onManualSave,
   onOpenGoogleSheetsSync,
   isGoogleConnected = false,
@@ -68,6 +79,8 @@ export const Header: React.FC<HeaderProps> = ({
   localSession,
   onLogout,
 }) => {
+  const { can } = useCan(currentTenant.id);
+  const canImport = can('import:data');
   const tabs = [
     { id: 'dashboard', label: 'Ringkasan Proyek' },
     { id: 'realdata', label: 'Data Real Sekolah' },
@@ -124,24 +137,58 @@ export const Header: React.FC<HeaderProps> = ({
 
               <span>•</span>
 
-              {/* Cloud Sync Status Indicator */}
-              <div
-                className="flex items-center gap-1 text-[11px] text-blue-300"
-                title="Data tersimpan di Google Cloud Firestore (Multi-Tenant)"
-              >
+              {/* Cloud Sync Status Indicator - Honest Badge (Requirement 1) */}
+              <div className="flex items-center gap-1.5 text-[11px]">
                 {isSyncing ? (
-                  <>
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-950/80 border border-amber-500/40 text-amber-300 font-medium">
                     <RefreshCw className="w-3 h-3 text-amber-400 animate-spin" />
-                    <span className="text-amber-300">Menyimpan ke Cloud...</span>
-                  </>
-                ) : (
-                  <>
-                    <Database className="w-3 h-3 text-blue-400" />
-                    <span className="text-blue-300 font-medium">Cloud Terhubung</span>
+                    <span>Menyinkronkan ke Cloud...</span>
+                  </span>
+                ) : cloudStatus === 'ok' && pendingSyncCount === 0 ? (
+                  <div
+                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 font-medium"
+                    title="Data berhasil disinkronkan penuh ke Google Cloud Firestore"
+                  >
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                    <span>Tersimpan di cloud</span>
                     <span className="text-slate-400 text-[10px]">({lastSyncedText})</span>
-                  </>
+                  </div>
+                ) : cloudStatus === 'quota' ? (
+                  <div
+                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-rose-950/80 border border-rose-500/40 text-rose-300 font-medium"
+                    title="Batas kuota harian Firestore tercapai; data disimpan aman di IndexedDB lokal perangkat"
+                  >
+                    <HardDrive className="w-3 h-3 text-rose-400" />
+                    <span>Hanya tersimpan di perangkat ini (Batas Kuota)</span>
+                  </div>
+                ) : (
+                  <div
+                    className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-950/90 border border-amber-500/50 text-amber-300 font-medium animate-pulse"
+                    title="Data tersimpan di perangkat lokal. Menunggu koneksi cloud untuk sinkronisasi otomatis..."
+                  >
+                    <HardDrive className="w-3 h-3 text-amber-400" />
+                    <span>
+                      Hanya tersimpan di perangkat ini
+                      {pendingSyncCount > 0 ? ` (${pendingSyncCount} antrean)` : ' (Belum tersinkron)'}
+                    </span>
+                  </div>
                 )}
               </div>
+
+              {/* Data Anomaly Detection Notification Badge (Requirement 5) */}
+              {anomalyCount > 0 && onOpenAnomalyReview && (
+                <>
+                  <span>•</span>
+                  <button
+                    onClick={onOpenAnomalyReview}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-400/40 hover:bg-amber-500/30 transition cursor-pointer"
+                    title="Klik untuk meninjau usulan perbaikan data pembukuan yang tidak konsisten"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                    <span>{anomalyCount} Usulan Penyelarasan</span>
+                  </button>
+                </>
+              )}
 
               {onOpenGoogleSheetsSync && (
                 <>
@@ -299,23 +346,27 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="hidden md:inline">Backup</span>
           </button>
 
-          <button
-            onClick={onImportJson}
-            title="Pulihkan data sekolah ini dari JSON"
-            className="flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-200 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-slate-700 transition cursor-pointer"
-          >
-            <Upload className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">Restore</span>
-          </button>
+          {canImport && (
+            <button
+              onClick={onImportJson}
+              title="Pulihkan data sekolah ini dari JSON"
+              className="flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-200 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-slate-700 transition cursor-pointer"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">Restore</span>
+            </button>
+          )}
 
-          <button
-            onClick={onReset}
-            title="Reset ulang formulir sekolah ini"
-            className="flex items-center gap-1 bg-slate-800 hover:bg-rose-900/50 hover:text-rose-300 text-slate-300 px-2 py-1.5 rounded-lg text-xs font-medium border border-slate-700 transition cursor-pointer"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span className="hidden lg:inline">Reset</span>
-          </button>
+          {canImport && (
+            <button
+              onClick={onReset}
+              title="Reset ulang formulir sekolah ini"
+              className="flex items-center gap-1 bg-slate-800 hover:bg-rose-900/50 hover:text-rose-300 text-slate-300 px-2 py-1.5 rounded-lg text-xs font-medium border border-slate-700 transition cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span className="hidden lg:inline">Reset</span>
+            </button>
+          )}
         </div>
       </div>
 

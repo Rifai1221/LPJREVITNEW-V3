@@ -1,4 +1,3 @@
-import * as XLSX from 'xlsx';
 import {
   SchoolMasterData,
   BkuTransaction,
@@ -9,6 +8,10 @@ import {
   RpdItem,
   ProjectProgressWeek,
 } from '../types';
+
+async function getXLSX() {
+  return await import('xlsx');
+}
 
 /**
  * Format angka rupiah untuk tampilan Excel
@@ -35,11 +38,12 @@ function downloadBlob(blob: Blob, filename: string) {
 /**
  * 1. Ekspor BKU (Buku Kas Umum) ke file Excel (.xlsx)
  */
-export function exportBkuToExcel(
+export async function exportBkuToExcel(
   bkuList: BkuTransaction[],
   school: SchoolMasterData,
   filterLabel = 'Semua Periode'
-): void {
+): Promise<void> {
+  const XLSX = await getXLSX();
   const wb = XLSX.utils.book_new();
 
   // Header informasi sekolah
@@ -121,10 +125,11 @@ export function exportBkuToExcel(
 /**
  * 2. Ekspor Seluruh Kwitansi, Bon Toko & SPB ke Excel (.xlsx)
  */
-export function exportKwitansiToExcel(
+export async function exportKwitansiToExcel(
   kwitansiList: KwitansiDocument[],
   school: SchoolMasterData
-): void {
+): Promise<void> {
+  const XLSX = await getXLSX();
   const wb = XLSX.utils.book_new();
 
   const headerRows = [
@@ -216,10 +221,11 @@ export function exportKwitansiToExcel(
 /**
  * 3. Ekspor Rekapitulasi Pajak (PPN, PPh 22, PPh 23) ke Excel (.xlsx)
  */
-export function exportPajakToExcel(
+export async function exportPajakToExcel(
   taxRecords: TaxRecord[],
   school: SchoolMasterData
-): void {
+): Promise<void> {
+  const XLSX = await getXLSX();
   const wb = XLSX.utils.book_new();
 
   const headerRows = [
@@ -304,7 +310,8 @@ export function exportPajakToExcel(
  * 4. Ekspor BUNDEL LPJ LENGKAP (Multi-Sheet Excel Workbook)
  * Berisi seluruh tabel: BKU, BKT, BKB, Kwitansi, Pajak, RPD, Progres Fisik
  */
-export function exportComprehensiveLpjExcel(appState: any): void {
+export async function exportComprehensiveLpjExcel(appState: any): Promise<void> {
+  const XLSX = await getXLSX();
   const school = appState.school as SchoolMasterData;
   const wb = XLSX.utils.book_new();
 

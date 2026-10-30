@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, Suspense, lazy } from 'react';
 import confetti from 'canvas-confetti';
 import {
   SchoolMasterData,
@@ -57,7 +57,17 @@ import {
   registerNewSchoolTenant,
   deleteSchoolTenant,
   checkIsQuotaExhausted,
+  startSyncRetryWorker,
+  subscribeSyncStatus,
+  isTenantPendingSync,
+  getStoredTenantRev,
+  writeDomainDocuments,
+  setCloudAutosaveBlocked,
+  CloudSyncStatus,
 } from './services/schoolTenantService';
+import { detectDataAnomalies, DataAnomalyProposal } from './services/storageService';
+import { ConflictResolutionModal } from './components/ConflictResolutionModal';
+import { AnomalyReviewModal } from './components/AnomalyReviewModal';
 import { getMonthFromPeriodString, resolveWeekDates } from './utils/monthHelper';
 import { syncProgressWeeksWithRealData, calculateSequentialWaterfallRpdItems } from './utils/divisionHelper';
 import { firestoreDatabaseId } from './services/firebase';
@@ -65,24 +75,25 @@ import { initialProgressWeeks, initialWorkers, initialStores } from './data/init
 import { syncAndReconcileAll9CategoriesToBudget } from './utils/projectSummaryRekapHelper';
 
 import { Header } from './components/Header';
-import { Dashboard } from './components/Dashboard';
-import { MasterDataForm } from './components/MasterDataForm';
-import { RpdManager } from './components/RpdManager';
-import { WeeklyProgressManager } from './components/WeeklyProgressManager';
-import { BkuManager } from './components/BkuManager';
-import { BktManager } from './components/BktManager';
-import { BkbManager } from './components/BkbManager';
-import { TaxManager } from './components/TaxManager';
-import { KwitansiManager } from './components/KwitansiManager';
-import { WageManager } from './components/WageManager';
-import { StoreVendorManager } from './components/StoreVendorManager';
-import { RealSchoolDataManager } from './components/RealSchoolDataManager';
-import { PrintDocumentViewer } from './components/PrintDocumentViewer';
 import { QuickReceiptModal } from './components/QuickReceiptModal';
-import { BackupRestoreModal } from './components/BackupRestoreModal';
 import { SchoolTenantPortalModal } from './components/SchoolTenantPortalModal';
 import { GoogleSheetsSyncModal } from './components/GoogleSheetsSyncModal';
 import { LoginPortal } from './components/LoginPortal';
+
+const Dashboard = lazy(() => import('./components/Dashboard').then((m) => ({ default: m.Dashboard })));
+const MasterDataForm = lazy(() => import('./components/MasterDataForm').then((m) => ({ default: m.MasterDataForm })));
+const RpdManager = lazy(() => import('./components/RpdManager').then((m) => ({ default: m.RpdManager })));
+const WeeklyProgressManager = lazy(() => import('./components/WeeklyProgressManager').then((m) => ({ default: m.WeeklyProgressManager })));
+const BkuManager = lazy(() => import('./components/BkuManager').then((m) => ({ default: m.BkuManager })));
+const BktManager = lazy(() => import('./components/BktManager').then((m) => ({ default: m.BktManager })));
+const BkbManager = lazy(() => import('./components/BkbManager').then((m) => ({ default: m.BkbManager })));
+const TaxManager = lazy(() => import('./components/TaxManager').then((m) => ({ default: m.TaxManager })));
+const KwitansiManager = lazy(() => import('./components/KwitansiManager').then((m) => ({ default: m.KwitansiManager })));
+const WageManager = lazy(() => import('./components/WageManager').then((m) => ({ default: m.WageManager })));
+const StoreVendorManager = lazy(() => import('./components/StoreVendorManager').then((m) => ({ default: m.StoreVendorManager })));
+const RealSchoolDataManager = lazy(() => import('./components/RealSchoolDataManager').then((m) => ({ default: m.RealSchoolDataManager })));
+const PrintDocumentViewer = lazy(() => import('./components/PrintDocumentViewer').then((m) => ({ default: m.PrintDocumentViewer })));
+const BackupRestoreModal = lazy(() => import('./components/BackupRestoreModal').then((m) => ({ default: m.BackupRestoreModal })));
 import {
   initAuth,
   getAccessToken,
@@ -103,6 +114,9 @@ import {
 import { CheckCircle2, Database, ShieldAlert, Sparkles, X, Trash2, RefreshCw, AlertTriangle, FileSpreadsheet } from 'lucide-react';
 import { defaultRealSchoolData } from './data/realSchoolData';
 import { RealSchoolData, RpdKategori } from './types';
+import { validateFinancialReconciliation } from './utils/reconciliationValidator';
+import { ReconciliationBanner } from './components/ReconciliationBanner';
+import { useToast } from './context/ToastContext';
 
 export default function App() {
   // Multi-Tenant States
@@ -115,16 +129,26 @@ export default function App() {
   const [isSchoolPortalOpen, setIsSchoolPortalOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncedText, setLastSyncedText] = useState('Otomatis');
-  const [switchNotification, setSwitchNotification] = useState<string | null>(null);
+  const toast = useToast();
+  const setSwitchNotification = useCallback((msg: string | null) => {
+    if (!msg) return;
+    if (msg.includes('❌') || msg.toLowerCase().includes('gagal') || msg.toLowerCase().includes('error')) {
+      toast.error(msg);
+    } else if (msg.includes('⚠️') || msg.toLowerCase().includes('peringatan') || msg.toLowerCase().includes('perhatian')) {
+      toast.warning(msg);
+    } else {
+      toast.success(msg);
+    }
+  }, [toast]);
 
   // Authentication & Dual Login Mode States
   const [localSession, setLocalSession] = useState<LocalUserSession | null>(() => getLocalUserSession());
-  const [currentUser, setCurrentUser] = useState<GoogleUserProfile | null>(() => getCurrentUser() || loadPersistentAuthSession()?.user || null);
+  const [currentUser, setCurrentUser] = useState<GoogleUserProfile | null>(() => getCurrentUser() || null);
   const [isSigningInGoogle, setIsSigningInGoogle] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(() => {
     try {
       const active = localStorage.getItem('LPJ_USER_SESSION_ACTIVE');
-      return active === 'true' || !!loadPersistentAuthSession() || !!getLocalUserSession();
+      return active === 'true' || !!getLocalUserSession();
     } catch {
       return false;
     }
@@ -142,10 +166,39 @@ export default function App() {
     }
   });
 
-  // App State per Tenant
-  const [appState, setAppState] = useState<AppStateData>(() =>
+  // App State per Tenant with Monotonic Change Counter (Requirement 2)
+  const [appState, _setAppState] = useState<AppStateData>(() =>
     createSchoolStateForTenant(PRESET_SDN1_MUARA_DUA, 'full')
   );
+  const changeCounterRef = useRef(0);
+  const savedCounterRef = useRef(0);
+  const isLoadedRef = useRef(false);
+  const isDirtyRef = useRef(false);
+
+  // Status and Modal States (Requirement 1, 3, 5)
+  const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus>('ok');
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [conflictState, setConflictState] = useState<{
+    isOpen: boolean;
+    serverRev: number;
+    localRev: number;
+    serverState?: AppStateData;
+  }>({
+    isOpen: false,
+    serverRev: 1,
+    localRev: 1,
+  });
+  const [anomalies, setAnomalies] = useState<DataAnomalyProposal[]>([]);
+  const [isAnomalyModalOpen, setIsAnomalyModalOpen] = useState(false);
+  const [isCloudAutosaveBlocked, setIsCloudAutosaveBlocked] = useState(false);
+
+  // Wrapped setAppState tracking monotonic change counter
+  const setAppState = React.useCallback((action: React.SetStateAction<AppStateData>) => {
+    changeCounterRef.current += 1;
+    isDirtyRef.current = true;
+    _setAppState(action);
+  }, []);
+
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [bkuWeekLimit, setBkuWeekLimit] = useState<number>(() => {
@@ -168,8 +221,18 @@ export default function App() {
 
   // Debounce ref and protection flags
   const saveTimeoutRef = useRef<any>(null);
-  const isLoadedRef = useRef(false);
-  const isDirtyRef = useRef(false);
+
+  // Listen to background sync retry queue worker (Requirement 1)
+  useEffect(() => {
+    startSyncRetryWorker();
+    const unsub = subscribeSyncStatus((count) => {
+      setPendingSyncCount(count);
+      if (count > 0) {
+        setCloudStatus('failed');
+      }
+    });
+    return () => unsub();
+  }, []);
 
   // 1. Initial Load of Tenants and School Data from Cloud Firestore
   // CRITICAL: Prioritizes existing Cloud Firestore documents so data from previous deploys/publishes is never lost!
@@ -203,10 +266,13 @@ export default function App() {
         if (!isMounted) return;
 
         // Load 100% raw saved state on initial load/refresh without forced auto-overwrite
-        setAppState(loaded.state);
+        _setAppState(loaded.state);
         isLoadedRef.current = true;
         isDirtyRef.current = false; // Initial load is clean, never dirty!
+        savedCounterRef.current = changeCounterRef.current;
         setIsInitialLoading(false);
+        setIsCloudAutosaveBlocked(Boolean(loaded.isCloudAutosaveBlocked));
+        setCloudStatus(loaded.source === 'cloud' ? 'ok' : 'failed');
         setLastSyncedText(
           loaded.source === 'cloud'
             ? 'Cloud Firestore'
@@ -214,6 +280,10 @@ export default function App() {
             ? 'Memori Offline'
             : 'Template Awal'
         );
+
+        // Detect anomalies non-destructively (Requirement 5)
+        const detected = detectDataAnomalies(loaded.state);
+        setAnomalies(detected);
       } catch (err) {
         console.error('Initialization error:', err);
         if (isMounted) setIsInitialLoading(false);
@@ -253,7 +323,7 @@ export default function App() {
     return () => unsub();
   }, [currentTenant.id]);
 
-  // 2. Real-time Cloud Auto-Save on state change (Debounced to Firestore)
+  // 2. Real-time Cloud Auto-Save on state change with Counter Concurrency Guard (Requirement 1, 2, 3)
   // CRITICAL: NEVER auto-save unless data has been successfully loaded AND user has explicitly modified it!
   useEffect(() => {
     if (!isLoadedRef.current || !isDirtyRef.current) {
@@ -267,17 +337,37 @@ export default function App() {
     setIsSyncing(true);
     saveTimeoutRef.current = setTimeout(async () => {
       try {
-        const ok = await saveSchoolTenantAppState(currentTenant.id, appState);
+        const versionAtStart = changeCounterRef.current;
+        const currentRev = getStoredTenantRev(currentTenant.id);
+        const res = await saveSchoolTenantAppState(currentTenant.id, appState, currentRev);
+
         setIsSyncing(false);
-        isDirtyRef.current = false;
+        setCloudStatus(res.cloud);
+
+        // Check for concurrency conflict (Requirement 3)
+        if (res.error === 'CONCURRENCY_CONFLICT') {
+          setConflictState({
+            isOpen: true,
+            serverRev: res.rev || currentRev + 1,
+            localRev: currentRev,
+            serverState: res.serverState,
+          });
+        }
+
+        // Only mark clean if no new changes happened while save was executing (Requirement 2)
+        if (changeCounterRef.current === versionAtStart) {
+          isDirtyRef.current = false;
+          savedCounterRef.current = versionAtStart;
+        }
+
         const now = new Date();
         const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')} WIB`;
-        if (checkIsQuotaExhausted()) {
-          setLastSyncedText(`Tersimpan di Memori Lokal ${timeStr}`);
-        } else if (ok) {
-          setLastSyncedText(`Tersimpan ${timeStr}`);
+        if (res.cloud === 'ok') {
+          setLastSyncedText(`${timeStr}`);
+        } else if (res.cloud === 'quota') {
+          setLastSyncedText(`Batas Kuota Cloud ${timeStr}`);
         } else {
-          setLastSyncedText(`Tersimpan Offline ${timeStr}`);
+          setLastSyncedText(`Perangkat Lokal ${timeStr}`);
         }
 
         // Auto-sync to user's Google Spreadsheet if enabled
@@ -296,7 +386,8 @@ export default function App() {
       } catch (err) {
         console.warn('Auto-save notice:', err);
         setIsSyncing(false);
-        setLastSyncedText('Tersimpan di Memori Lokal');
+        setCloudStatus('failed');
+        setLastSyncedText('Perangkat Lokal');
       }
     }, 1800);
 
@@ -322,10 +413,13 @@ export default function App() {
 
     try {
       const loaded = await loadSchoolTenantAppState(targetTenant);
-      setAppState(loaded.state);
+      _setAppState(loaded.state);
       isLoadedRef.current = true;
       isDirtyRef.current = false;
+      savedCounterRef.current = changeCounterRef.current;
       setIsSyncing(false);
+      setIsCloudAutosaveBlocked(Boolean(loaded.isCloudAutosaveBlocked));
+      setCloudStatus(loaded.source === 'cloud' ? 'ok' : 'failed');
       setLastSyncedText(
         loaded.source === 'cloud'
           ? 'Cloud Firestore'
@@ -333,6 +427,9 @@ export default function App() {
           ? 'Memori Offline'
           : 'Template Awal'
       );
+      // Detect anomalies non-destructively for switched tenant
+      const detected = detectDataAnomalies(loaded.state);
+      setAnomalies(detected);
       setSwitchNotification(`Berhasil beralih ke database ${targetTenant.namaSekolah}. Data terisolasi aman.`);
       setTimeout(() => setSwitchNotification(null), 5000);
     } catch (err) {
@@ -391,13 +488,22 @@ export default function App() {
     setTenantToDeleteConfirm(tenantToDelete);
   };
 
-  // Execute permanent deletion of selected school and its database
+  // Execute permanent deletion of selected school and its database (Requirement 6)
   const handleConfirmDeleteTenant = async () => {
     if (!tenantToDeleteConfirm) return;
     const tenantToDelete = tenantToDeleteConfirm;
     setIsDeletingTenantLoading(true);
 
-    // 1. Optimistic UI update: Remove the tenant immediately from local state (0ms delay)
+    // 1. Delete from Cloud Firestore FIRST with Tombstone; if it fails, abort!
+    const cloudSuccess = await deleteSchoolTenant(tenantToDelete.id);
+    if (!cloudSuccess) {
+      setIsDeletingTenantLoading(false);
+      setTenantToDeleteConfirm(null);
+      toast.error('Gagal menghapus database sekolah dari Cloud Firestore. Penghapusan dibatalkan demi keamanan data.');
+      return;
+    }
+
+    // 2. Remove the tenant from local state
     let updatedTenants = tenants.filter((t) => t.id !== tenantToDelete.id);
 
     // If no tenants left, automatically spawn a clean blank school database
@@ -422,7 +528,7 @@ export default function App() {
 
     setTenants(updatedTenants);
 
-    // 2. If the active tenant was deleted, switch immediately in UI
+    // 3. If the active tenant was deleted, switch immediately in UI
     if (tenantToDelete.id === currentTenant.id) {
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
@@ -435,10 +541,12 @@ export default function App() {
 
       try {
         const loaded = await loadSchoolTenantAppState(nextTenant);
-        setAppState(loaded.state);
+        _setAppState(loaded.state);
         isLoadedRef.current = true;
         isDirtyRef.current = false;
+        savedCounterRef.current = changeCounterRef.current;
         setIsSyncing(false);
+        setCloudStatus(loaded.source === 'cloud' ? 'ok' : 'failed');
         setLastSyncedText(
           loaded.source === 'cloud'
             ? 'Cloud Firestore'
@@ -452,16 +560,9 @@ export default function App() {
       }
     }
 
-    // 3. Run Firestore & localStorage deletion asynchronously
-    try {
-      await deleteSchoolTenant(tenantToDelete.id);
-    } catch (err) {
-      console.warn('Notice on background tenant deletion:', err);
-    }
-
     setIsDeletingTenantLoading(false);
     setTenantToDeleteConfirm(null);
-    setSwitchNotification(`Database sekolah "${tenantToDelete.namaSekolah}" berhasil dihapus beserta databasenya dan dihilangkan dari tampilan.`);
+    setSwitchNotification(`Database sekolah "${tenantToDelete.namaSekolah}" berhasil dihapus beserta databasenya dan ditandai tombstone di cloud.`);
     setTimeout(() => setSwitchNotification(null), 5000);
   };
 
@@ -469,7 +570,25 @@ export default function App() {
   const handleManualSaveNow = async () => {
     setIsSyncing(true);
     try {
-      const ok = await saveSchoolTenantAppState(currentTenant.id, appState);
+      const versionAtStart = changeCounterRef.current;
+      const currentRev = getStoredTenantRev(currentTenant.id);
+      const res = await saveSchoolTenantAppState(currentTenant.id, appState, currentRev);
+
+      setCloudStatus(res.cloud);
+
+      if (res.error === 'CONCURRENCY_CONFLICT') {
+        setConflictState({
+          isOpen: true,
+          serverRev: res.rev || currentRev + 1,
+          localRev: currentRev,
+          serverState: res.serverState,
+        });
+      }
+
+      if (changeCounterRef.current === versionAtStart) {
+        isDirtyRef.current = false;
+        savedCounterRef.current = versionAtStart;
+      }
       
       // Also sync to Google Sheets if connected
       if (isGoogleConnected) {
@@ -488,25 +607,124 @@ export default function App() {
       }
 
       setIsSyncing(false);
-      isDirtyRef.current = false;
       const now = new Date();
       const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')} WIB`;
-      if (checkIsQuotaExhausted()) {
-        setLastSyncedText(`Tersimpan di Memori Lokal ${timeStr}`);
-        setSwitchNotification(`Data ${currentTenant.namaSekolah} tersimpan aman di memori lokal browser (Batas kuota harian cloud tercapai).`);
-      } else if (ok) {
-        setLastSyncedText(`Tersimpan ${timeStr}`);
+      if (res.cloud === 'ok') {
+        setLastSyncedText(`${timeStr}`);
         setSwitchNotification(`Data ${currentTenant.namaSekolah} berhasil disimpan permanen ke Google Cloud Firestore${isGoogleConnected ? ' & Google Sheets' : ''}.`);
+      } else if (res.cloud === 'quota') {
+        setLastSyncedText(`Batas Kuota Cloud ${timeStr}`);
+        setSwitchNotification(`Data ${currentTenant.namaSekolah} tersimpan aman di IndexedDB lokal browser (Batas kuota harian cloud tercapai).`);
       } else {
-        setLastSyncedText(`Tersimpan Offline ${timeStr}`);
-        setSwitchNotification(`Data tersimpan aman di memori lokal perangkat.`);
+        setLastSyncedText(`Perangkat Lokal ${timeStr}`);
+        setSwitchNotification(`Data ${currentTenant.namaSekolah} tersimpan di memori perangkat ini dan akan dicoba sinkron ulang otomatis.`);
       }
-      setTimeout(() => setSwitchNotification(null), 4000);
     } catch (err) {
-      console.warn('Manual save notice:', err);
+      console.warn('Manual save error:', err);
       setIsSyncing(false);
-      setLastSyncedText('Tersimpan Offline');
+      setCloudStatus('failed');
+      setLastSyncedText('Perangkat Lokal');
     }
+  };
+
+  // Concurrency Conflict Resolution Handlers (Requirement 3)
+  const handleResolveConflictMerge = async () => {
+    if (!conflictState.serverState) {
+      setConflictState((prev) => ({ ...prev, isOpen: false }));
+      return;
+    }
+    const server = conflictState.serverState;
+    const serverKwMap = new Map((server.kwitansiList || []).map((k) => [k.id, k]));
+    const mergedKw = [...(server.kwitansiList || [])];
+    (appState.kwitansiList || []).forEach((localK) => {
+      if (!serverKwMap.has(localK.id)) {
+        mergedKw.push(localK);
+      }
+    });
+
+    const serverBkuMap = new Map((server.manualBkuTransactions || []).map((b) => [b.id, b]));
+    const mergedBku = [...(server.manualBkuTransactions || [])];
+    (appState.manualBkuTransactions || []).forEach((localB) => {
+      if (!serverBkuMap.has(localB.id)) {
+        mergedBku.push(localB);
+      }
+    });
+
+    const mergedState: AppStateData = {
+      ...server,
+      school: appState.school || server.school,
+      kwitansiList: mergedKw,
+      manualBkuTransactions: mergedBku,
+      progressWeeks: appState.progressWeeks?.length ? appState.progressWeeks : server.progressWeeks,
+      wageReports: appState.wageReports?.length ? appState.wageReports : server.wageReports,
+    };
+
+    const nextRev = Math.max(conflictState.serverRev, conflictState.localRev) + 1;
+    _setAppState(mergedState);
+    setConflictState({ isOpen: false, serverRev: nextRev, localRev: nextRev });
+    await writeDomainDocuments(currentTenant.id, mergedState, nextRev);
+    setCloudStatus('ok');
+    setSwitchNotification('Data berhasil digabungkan dengan versi cloud secara aman.');
+    setTimeout(() => setSwitchNotification(null), 5000);
+  };
+
+  const handleResolveConflictUseMine = async () => {
+    const nextRev = Math.max(conflictState.serverRev, conflictState.localRev) + 1;
+    setConflictState((prev) => ({ ...prev, isOpen: false }));
+    await writeDomainDocuments(currentTenant.id, appState, nextRev);
+    setCloudStatus('ok');
+    setSwitchNotification('Data lokal berhasil menimpa revisi di cloud.');
+    setTimeout(() => setSwitchNotification(null), 5000);
+  };
+
+  const handleResolveConflictUseCloud = () => {
+    if (conflictState.serverState) {
+      _setAppState(conflictState.serverState);
+      isDirtyRef.current = false;
+      savedCounterRef.current = changeCounterRef.current;
+    }
+    setConflictState((prev) => ({ ...prev, isOpen: false }));
+    setCloudStatus('ok');
+    setSwitchNotification('Data terbaru dari cloud berhasil dimuat.');
+    setTimeout(() => setSwitchNotification(null), 5000);
+  };
+
+  const handleResolveConflictDownloadBoth = () => {
+    const now = new Date();
+    const dateStr = now.toISOString().split('T')[0];
+    const cleanSchoolName = (appState.school?.namaSekolah || 'Sekolah').replace(/[^a-zA-Z0-9]/g, '_');
+    const filename = `Backup_LPJ_Lokal_${cleanSchoolName}_${dateStr}.json`;
+    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(appState, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute('href', dataStr);
+    downloadAnchor.setAttribute('download', filename);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+
+    if (conflictState.serverState) {
+      _setAppState(conflictState.serverState);
+      isDirtyRef.current = false;
+      savedCounterRef.current = changeCounterRef.current;
+    }
+    setConflictState((prev) => ({ ...prev, isOpen: false }));
+    setCloudStatus('ok');
+    setSwitchNotification(`Cadangan lokal diunduh (${filename}) dan data cloud berhasil dimuat.`);
+    setTimeout(() => setSwitchNotification(null), 5000);
+  };
+
+  // Data Anomaly Resolution Handler (Requirement 5)
+  const handleApplyAnomalies = (selectedIds: string[]) => {
+    let nextState = appState;
+    anomalies
+      .filter((a) => selectedIds.includes(a.id))
+      .forEach((a) => {
+        nextState = a.applyFix(nextState);
+      });
+    setAppState(nextState);
+    setAnomalies((prev) => prev.filter((a) => !selectedIds.includes(a.id)));
+    setSwitchNotification('Perbaikan konsistensi data pembukuan berhasil diterapkan.');
+    setTimeout(() => setSwitchNotification(null), 5000);
   };
 
   // Restore state from Google Sheets callback
@@ -576,6 +794,16 @@ export default function App() {
       appState.deletedTaxIds || []
     );
   }, [appState.kwitansiList, appState.manualTaxRecords, appState.deletedTaxIds]);
+
+  const reconciliationReport = useMemo(() => {
+    return validateFinancialReconciliation(
+      appState,
+      bkuList,
+      bktList,
+      effectiveBkbList,
+      taxRecords
+    );
+  }, [appState, bkuList, bktList, effectiveBkbList, taxRecords]);
 
   // Handlers
   const handleAddManualTax = (tax: Omit<TaxRecord, 'id' | 'noUrut'>) => {
@@ -1092,7 +1320,6 @@ export default function App() {
       npsn: updated.npsn || prev.npsn,
       kabKota: updated.kabKota || prev.kabKota,
       provinsi: updated.provinsi || prev.provinsi,
-      pin: updated.pinAkses || prev.pin,
     }));
     setTenants((prev) =>
       prev.map((t) =>
@@ -1103,7 +1330,6 @@ export default function App() {
               npsn: updated.npsn || t.npsn,
               kabKota: updated.kabKota || t.kabKota,
               provinsi: updated.provinsi || t.provinsi,
-              pin: updated.pinAkses || t.pin,
             }
           : t
       )
@@ -1492,33 +1718,22 @@ export default function App() {
     } catch {}
   };
 
-  // Auto-Balance Option A: Jika progres fisik sudah 100% dan akumulasi belanja melebihi pagu bantuan,
-  // otomatis selaraskan belanja material terakhir agar saldo akhir BKU & BKT tepat Rp 0 (Nihil)
-  useEffect(() => {
-    if (!isLoadedRef.current || !appState.kwitansiList || appState.kwitansiList.length === 0) return;
-    const paguTotal = appState.school?.totalAnggaran || 552457000;
-    const currentTotalNominal = appState.kwitansiList.reduce((s, k) => s + (k.nominal || 0), 0);
-    const cumBobot = calculateCumulativeRealizedProgress(appState.progressWeeks || [], bkuWeekLimit);
-
-    if (cumBobot >= 99.9 && currentTotalNominal > paguTotal) {
-      const { balancedKwitansi, adjustedAmount } = balanceFinalMaterialKwitansiToBudget(
-        appState.kwitansiList,
-        paguTotal,
-        1.0
-      );
-      if (adjustedAmount > 0) {
-        isDirtyRef.current = true;
-        setAppState((prev) => ({
-          ...prev,
-          kwitansiList: balancedKwitansi,
-        }));
-      }
+  // Transparent Budget Variance tracking (Requirement 1)
+  const budgetVarianceInfo = useMemo(() => {
+    if (!appState.kwitansiList || appState.kwitansiList.length === 0) {
+      return { totalNominal: 0, pagu: 0, selisih: 0, isOver: false, offendingKwitansi: [] };
     }
-  }, [appState.kwitansiList, appState.school, appState.progressWeeks, bkuWeekLimit]);
+    const paguTotal = appState.school?.totalAnggaran || (appState.rpdItems || []).reduce((acc, r) => acc + (r.jumlahAnggaran || 0), 0) || 0;
+    const totalNominal = appState.kwitansiList.reduce((s, k) => s + (k.nominal || 0), 0);
+    const selisih = totalNominal - paguTotal;
+    const isOver = selisih > 0 && paguTotal > 0;
+    const offendingKwitansi = isOver ? [...appState.kwitansiList].sort((a, b) => (b.nominal || 0) - (a.nominal || 0)).slice(0, 5) : [];
+    return { totalNominal, pagu: paguTotal, selisih, isOver, offendingKwitansi };
+  }, [appState.kwitansiList, appState.school, appState.rpdItems]);
 
   const handleCleanDuplicates = () => {
     isDirtyRef.current = true;
-    const paguTotal = appState.school?.totalAnggaran || 552457000;
+    const paguTotal = appState.school?.totalAnggaran || (appState.rpdItems || []).reduce((acc, r) => acc + (r.jumlahAnggaran || 0), 0) || 0;
     const currentTotalNominal = appState.kwitansiList.reduce((s, k) => s + (k.nominal || 0), 0);
 
     // If total kwitansi exceeds pagu, run full calibration & deduplication
@@ -1758,7 +1973,7 @@ export default function App() {
       .map((w) => w.mingguKe);
 
     if (activeWeeks.length === 0) {
-      alert('Belum ada bobot kemajuan fisik (> 0%) pada Laporan Mingguan. Silakan input bobot fisik terlebih dahulu.');
+      toast.warning('Belum ada bobot kemajuan fisik (> 0%) pada Laporan Mingguan. Silakan input bobot fisik terlebih dahulu.');
       return;
     }
 
@@ -2127,12 +2342,12 @@ Lanjutkan pengosongan data transaksi?`)
               isDirtyRef.current = true;
               const migrated = migrateAndTransformAppState(parsed);
               setAppState(migrated);
-              alert(`Data LPJ untuk ${migrated.school.namaSekolah || currentTenant.namaSekolah} berhasil dipulihkan!`);
+              toast.success(`Data LPJ untuk ${migrated.school.namaSekolah || currentTenant.namaSekolah} berhasil dipulihkan!`);
             } else {
-              alert('Format file JSON tidak sesuai dengan skema LPJ Revitalisasi.');
+              toast.error('Format file JSON tidak sesuai dengan skema LPJ Revitalisasi.');
             }
           } catch (err) {
-            alert('Gagal membaca file JSON.');
+            toast.error('Gagal membaca file JSON.');
           }
         };
         reader.readAsText(file);
@@ -2219,7 +2434,7 @@ Lanjutkan pengosongan data transaksi?`)
                 setTimeout(() => setSwitchNotification(null), 6000);
               }
             } catch (err: any) {
-              alert(`Login Google gagal: ${err?.message || err}`);
+              toast.error(`Login Google gagal: ${err?.message || err}`);
             } finally {
               setIsSigningInGoogle(false);
             }
@@ -2268,6 +2483,10 @@ Lanjutkan pengosongan data transaksi?`)
         onOpenBackupRestoreModal={() => setIsBackupRestoreOpen(true)}
         isSyncing={isSyncing}
         lastSyncedText={lastSyncedText}
+        cloudStatus={cloudStatus}
+        pendingSyncCount={pendingSyncCount}
+        onOpenAnomalyReview={() => setIsAnomalyModalOpen(true)}
+        anomalyCount={anomalies.length}
         onManualSave={handleManualSaveNow}
         onOpenGoogleSheetsSync={() => setIsGoogleSheetsModalOpen(true)}
         isGoogleConnected={isGoogleConnected}
@@ -2277,26 +2496,40 @@ Lanjutkan pengosongan data transaksi?`)
         onLogout={handleLogout}
       />
 
-      {/* Tenant Switch Notification Toast Banner */}
-      {switchNotification && (
-        <div className="bg-emerald-600 text-white px-4 py-2.5 shadow-md flex items-center justify-between text-xs font-medium animate-in slide-in-from-top duration-200 print:hidden">
-          <div className="max-w-7xl mx-auto w-full flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-200 shrink-0" />
-              <span>{switchNotification}</span>
-            </div>
-            <button
-              onClick={() => setSwitchNotification(null)}
-              className="text-emerald-100 hover:text-white p-0.5"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Main Tab Views */}
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 print:hidden">
+        {/* Banner Merah Safety Cloud Load Failure */}
+        {isCloudAutosaveBlocked && (
+          <div className="mb-4 bg-rose-600 border border-rose-700 text-white p-4 rounded-xl shadow-md flex items-center justify-between gap-3 animate-in fade-in">
+            <div className="flex items-center gap-2.5 text-xs font-bold">
+              <AlertTriangle className="w-5 h-5 shrink-0 text-amber-200" />
+              <span>Data cloud gagal dimuat. Penyimpanan ke cloud dinonaktifkan agar data lama tidak tertimpa. Muat ulang atau pulihkan dari cadangan.</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="px-3 py-1.5 bg-white text-rose-700 hover:bg-rose-50 text-xs font-extrabold rounded-lg shadow-xs transition shrink-0 cursor-pointer"
+            >
+              Muat Ulang
+            </button>
+          </div>
+        )}
+
+        {/* Real-time Reconciliation Validation Alert Banner */}
+        <ReconciliationBanner
+          alerts={reconciliationReport.alerts}
+          onNavigateTab={(tab) => setActiveTab(tab)}
+        />
+
+        <Suspense
+          fallback={
+            <div className="flex flex-col items-center justify-center py-20 text-slate-500 gap-3 bg-white rounded-2xl border border-slate-200 shadow-xs">
+              <RefreshCw className="w-8 h-8 animate-spin text-indigo-600" />
+              <p className="text-xs font-semibold text-slate-700">Memuat Modul...</p>
+            </div>
+          }
+        >
+
         {activeTab === 'dashboard' && (
           <Dashboard
             school={appState.school}
@@ -2524,6 +2757,7 @@ Lanjutkan pengosongan data transaksi?`)
             }}
           />
         )}
+        </Suspense>
       </main>
 
       {/* Footer with Multi-Tenancy Info */}
@@ -2678,6 +2912,27 @@ Lanjutkan pengosongan data transaksi?`)
           </div>
         </div>
       )}
+
+      {/* Concurrency Conflict Resolution Modal (Requirement 3) */}
+      <ConflictResolutionModal
+        isOpen={conflictState.isOpen}
+        serverRev={conflictState.serverRev}
+        localRev={conflictState.localRev}
+        serverState={conflictState.serverState}
+        localState={appState}
+        onResolveUseCloud={handleResolveConflictUseCloud}
+        onResolveUseMine={handleResolveConflictUseMine}
+        onResolveDownloadBoth={handleResolveConflictDownloadBoth}
+        onClose={() => setConflictState((prev) => ({ ...prev, isOpen: false }))}
+      />
+
+      {/* Data Anomaly Review & Fix Modal (Requirement 5) */}
+      <AnomalyReviewModal
+        isOpen={isAnomalyModalOpen}
+        proposals={anomalies}
+        onApplySelected={handleApplyAnomalies}
+        onClose={() => setIsAnomalyModalOpen(false)}
+      />
     </div>
   );
 }

@@ -46,6 +46,7 @@ import { resolveWeekDates, formatWeekPeriodString, sanitizeYear } from '../utils
 import { calculateCumulativeRealizedProgress } from '../services/autoGeneratorService';
 import { downloadWeeklyProgressExcelTemplate, parseWeeklyProgressExcelFile } from '../utils/excelHelper';
 import { WeeklyPhotoDocumentation } from './WeeklyPhotoDocumentation';
+import { useCan } from '../hooks/useCan';
 
 interface WeeklyProgressManagerProps {
   progressWeeks: ProjectProgressWeek[];
@@ -82,6 +83,8 @@ export const WeeklyProgressManager: React.FC<WeeklyProgressManagerProps> = ({
   onDeleteTransaction,
   onCalibrateToRealProgress,
 }) => {
+  const { can } = useCan();
+  const canEditProgress = can('edit:progress');
   const [selectedWeekNum, setSelectedWeekNum] = useState<number>(1);
   const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
   const [isEditingBobotMaster, setIsEditingBobotMaster] = useState<boolean>(false);
@@ -600,7 +603,7 @@ export const WeeklyProgressManager: React.FC<WeeklyProgressManagerProps> = ({
     return (kwitansiList || []).reduce((s, k) => s + (k.nominal || 0), 0);
   }, [kwitansiList]);
 
-  const paguSekolah = school?.totalAnggaran || 552457000;
+  const paguSekolah = school?.totalAnggaran || 0;
   const isExpenditureImbalanced = useMemo(() => {
     if (currentTotalRealizedBobot <= 0) return totalKwitansiExpenditure > 0;
     const maxAllowed = Math.round(paguSekolah * (currentTotalRealizedBobot / 100) * 1.35) + 35000000;

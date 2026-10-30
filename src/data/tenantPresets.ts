@@ -12,7 +12,9 @@ export interface SchoolTenant {
   provinsi: string;
   email: string;
   isDemo?: boolean;
-  pin?: string;
+  pinHash?: string;
+  pinSalt?: string;
+  mustResetPin?: boolean;
   createdAt: string;
   lastLogin: string;
 }
@@ -27,6 +29,7 @@ export const PRESET_SDN1_MUARA_DUA: SchoolTenant = {
   provinsi: 'Prov. Aceh',
   email: 'sdn1muaradua@sekolah.id',
   isDemo: true,
+  mustResetPin: true,
   createdAt: '2025-07-01T08:00:00Z',
   lastLogin: new Date().toISOString(),
 };
@@ -41,6 +44,7 @@ export const PRESET_SMPN2_BANDA_ACEH: SchoolTenant = {
   provinsi: 'Prov. Aceh',
   email: 'smpn2bandaaceh@sekolah.id',
   isDemo: true,
+  mustResetPin: true,
   createdAt: '2025-07-10T09:00:00Z',
   lastLogin: new Date().toISOString(),
 };
@@ -55,6 +59,7 @@ export const PRESET_SDN03_KEBON_JERUK: SchoolTenant = {
   provinsi: 'Prov. DKI Jakarta',
   email: 'sdn03kebonjeruk@sekolah.id',
   isDemo: true,
+  mustResetPin: true,
   createdAt: '2025-07-15T10:00:00Z',
   lastLogin: new Date().toISOString(),
 };

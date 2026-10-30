@@ -405,30 +405,7 @@ export async function syncStateToSpreadsheet(
     ]);
   });
 
-  // Batch clear and batch update
-  const rangesToClear = [
-    '_DATABASE_SNAPSHOT!A:C',
-    'DATA_SEKOLAH!A:B',
-    'BKU_KAS_UMUM!A:I',
-    'BKT_KAS_TUNAI!A:G',
-    'BKB_KAS_BANK!A:G',
-    'KWITANSI_TRANSAKSI!A:H',
-    'REKAPITULASI_PAJAK!A:I',
-    'RPD_RAB!A:H',
-    'PROGRES_MINGGUAN!A:E',
-    'DATA_TOKO!A:F',
-    'DATA_PEKERJA!A:E',
-  ];
-
-  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchClear`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ ranges: rangesToClear }),
-  }).catch(() => {});
-
+  // Single atomic batchUpdate overwriting ranges cleanly
   const updatePayload = {
     valueInputOption: 'USER_ENTERED',
     data: [
@@ -456,9 +433,9 @@ export async function syncStateToSpreadsheet(
   });
 
   if (!updateRes.ok) {
-    const errText = await updateRes.text();
-    console.error('Error writing spreadsheet data:', errText);
-    throw new Error(`Gagal menyimpan data ke Google Sheets: ${updateRes.status}`);
+    const errorText = await updateRes.text();
+    console.error('Error syncing values to Google Sheets:', errorText);
+    throw new Error(`Gagal memperbarui Google Sheets: ${updateRes.status} ${updateRes.statusText}`);
   }
 
   return { success: true, updatedAt: nowStr };

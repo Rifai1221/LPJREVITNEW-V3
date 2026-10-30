@@ -20,6 +20,9 @@ import { KwitansiDocument, StoreVendor, SchoolMasterData } from '../types';
 import { formatRupiah } from '../utils/formatters';
 import { normalizeMaterialItems, getHarmonizedKwitansiUraian, isReceiptLocked as checkIsReceiptLocked } from '../services/autoGeneratorService';
 import { getBulanFromTanggal, formatIndonesianDateLong, getAllMonthOptions, getAvailableMonthsForSchool, sanitizeYear } from '../utils/monthHelper';
+import { calcDppAndPpn, calcPph22, toRupiah } from '../utils/money';
+import { getFiscalConfig } from '../data/fiscalTaxParameters';
+import { generateSecureId } from '../utils/idAndVoucherHelper';
 
 interface SmartKwitansiEditorModalProps {
   isOpen: boolean;
@@ -162,7 +165,7 @@ export const SmartKwitansiEditorModal: React.FC<SmartKwitansiEditorModalProps> =
           updated.jumlah = Math.round(v * h);
         } else if (field === 'jumlah') {
           const j = Number(val) || 0;
-          updated.hargaSatuan = updated.volume > 0 ? Math.round((j / updated.volume) * 100) / 100 : 0;
+          updated.hargaSatuan = updated.volume > 0 ? Math.round(j / updated.volume) : 0;
         }
         return updated;
       })
@@ -171,7 +174,7 @@ export const SmartKwitansiEditorModal: React.FC<SmartKwitansiEditorModalProps> =
 
   const handleAddItem = () => {
     const newItem: ItemRow = {
-      id: `it-${Date.now()}-${Math.random()}`,
+      id: generateSecureId('it'),
       namaBarang: '',
       volume: 1,
       satuan: 'bh',
@@ -227,7 +230,7 @@ export const SmartKwitansiEditorModal: React.FC<SmartKwitansiEditorModalProps> =
       const targetJml = isLast ? Math.max(0, targetNominal - runningSum) : Math.round(it.jumlah * scale);
       runningSum += targetJml;
       const vol = it.volume > 0 ? it.volume : 1;
-      const unitP = Math.round((targetJml / vol) * 100) / 100;
+      const unitP = Math.round(targetJml / vol);
       return {
         ...it,
         volume: vol,
@@ -266,7 +269,7 @@ export const SmartKwitansiEditorModal: React.FC<SmartKwitansiEditorModalProps> =
           return {
             ...it,
             volume: nVol,
-            hargaSatuan: Math.round((nJml / nVol) * 100) / 100,
+            hargaSatuan: Math.round(nJml / nVol),
             jumlah: nJml,
           };
         });
@@ -275,7 +278,7 @@ export const SmartKwitansiEditorModal: React.FC<SmartKwitansiEditorModalProps> =
 
     setItems(
       finalNormalized.map((it, idx) => ({
-        id: `it-${Date.now()}-${idx}`,
+        id: generateSecureId('it'),
         namaBarang: it.namaBarang,
         volume: it.volume,
         satuan: it.satuan,
@@ -310,11 +313,13 @@ export const SmartKwitansiEditorModal: React.FC<SmartKwitansiEditorModalProps> =
       jumlah: it.jumlah,
     }));
 
-    const isTaxable = finalNominal >= 2000000 && kwitansi.tipe !== 'UPAH';
+    const fiscalConfig = getFiscalConfig(school || {});
+    const isTaxable = finalNominal >= fiscalConfig.taxExemptionThreshold && kwitansi.tipe !== 'UPAH';
     const isPpn = isTaxable ? true : Boolean(kwitansi.isPpn);
     const isPph22 = isTaxable ? true : Boolean(kwitansi.isPph22);
-    const ppnAmount = isPpn ? Math.round((finalNominal / 1.11) * 0.11 * 100) / 100 : 0;
-    const pph22Amount = isPph22 ? Math.round((finalNominal / 1.11) * 0.015 * 100) / 100 : 0;
+    const { dpp, ppn } = calcDppAndPpn(finalNominal, fiscalConfig.ppnRatePercent);
+    const ppnAmount = isPpn ? ppn : 0;
+    const pph22Amount = isPph22 ? calcPph22(dpp, fiscalConfig.pph22RatePercent) : 0;
 
     const effectiveTanggalFormatted = formatIndonesianDateLong(tanggal.trim(), effYear);
 

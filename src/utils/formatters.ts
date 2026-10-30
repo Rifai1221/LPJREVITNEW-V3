@@ -1,18 +1,14 @@
-export function formatRupiah(amount: number | null | undefined, withPrefix = true): string {
-  if (amount === null || amount === undefined || isNaN(amount) || Math.abs(amount) < 0.001) {
+import { toRupiah } from './money';
+
+export function formatRupiah(amount: number | string | null | undefined, withPrefix = true): string {
+  const rounded = toRupiah(amount);
+  if (rounded === 0) {
     return withPrefix ? 'Rp 0' : '0';
   }
   
-  // Format with standard Indonesian numbering (dots for thousands, comma for decimals)
-  const isNegative = amount < -0.001;
-  const absAmount = Math.abs(amount);
-  
-  const parts = absAmount.toFixed(2).split('.');
-  const integerPart = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.');
-  const decimalPart = parts[1];
-  
-  // If no decimals, we can show ,00 or if exact
-  const formatted = decimalPart === '00' ? `${integerPart}` : `${integerPart},${decimalPart}`;
+  const isNegative = rounded < 0;
+  const absAmount = Math.abs(rounded);
+  const formatted = absAmount.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
   const sign = isNegative ? '-' : '';
   
   return withPrefix ? `${sign}Rp ${formatted}` : `${sign}${formatted}`;
