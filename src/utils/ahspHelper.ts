@@ -1,16 +1,21 @@
 import { RabSubItem, AhspItem } from '../types';
+import { toRupiah, distributeRupiah } from './money';
+
+// Shared fallback constant ratio (60% material, 40% labor)
+export const DEFAULT_MATERIAL_LABOR_RATIO = { material: 0.6, labor: 0.4 };
 
 export const calculateAhspSplit = (
   item: RabSubItem,
   ahspList: AhspItem[]
 ): { materialValue: number; laborValue: number } => {
+  const itemJumlah = toRupiah(item.jumlah);
   const ahsp = ahspList.find((a) => a.id === item.ahspIdRef);
   
   if (!ahsp || !ahsp.komponen || ahsp.komponen.length === 0) {
-    // Fallback: Use 60/40 if AHSP not found
+    const split = distributeRupiah(itemJumlah, [DEFAULT_MATERIAL_LABOR_RATIO.material, DEFAULT_MATERIAL_LABOR_RATIO.labor]);
     return {
-      materialValue: item.jumlah * 0.6,
-      laborValue: item.jumlah * 0.4,
+      materialValue: split[0],
+      laborValue: split[1],
     };
   }
 
@@ -18,28 +23,26 @@ export const calculateAhspSplit = (
   let laborTotal = 0;
 
   ahsp.komponen.forEach((komp) => {
-    // Categories for material: BAHAN, PINTU_JENDELA, ALAT, SMKK, CETAK, SIPLAH
-    // Categories for labor: UPAH
+    const compTotal = toRupiah(komp.totalHarga);
     if (komp.kategori === 'UPAH') {
-      laborTotal += komp.totalHarga;
+      laborTotal += compTotal;
     } else {
-      materialTotal += komp.totalHarga;
+      materialTotal += compTotal;
     }
   });
 
   const totalAhsp = materialTotal + laborTotal;
   if (totalAhsp === 0) {
+    const split = distributeRupiah(itemJumlah, [DEFAULT_MATERIAL_LABOR_RATIO.material, DEFAULT_MATERIAL_LABOR_RATIO.labor]);
     return {
-      materialValue: item.jumlah * 0.6,
-      laborValue: item.jumlah * 0.4,
+      materialValue: split[0],
+      laborValue: split[1],
     };
   }
 
-  const materialRatio = materialTotal / totalAhsp;
-  const laborRatio = laborTotal / totalAhsp;
-
+  const split = distributeRupiah(itemJumlah, [materialTotal, laborTotal]);
   return {
-    materialValue: item.jumlah * materialRatio,
-    laborValue: item.jumlah * laborRatio,
+    materialValue: split[0],
+    laborValue: split[1],
   };
 };

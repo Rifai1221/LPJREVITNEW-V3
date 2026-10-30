@@ -12,6 +12,7 @@ import {
 } from '../types';
 import { isAhspLaborComponent } from './kwitansiTagHelper';
 import { sanitizeYear } from './monthHelper';
+import { toRupiah } from './money';
 
 export type RekapCategoryKey =
   | 'PAPAN_NAMA'
@@ -264,15 +265,15 @@ export function calculateProjectSummaryRekap(
     hasRealRab = true;
     realSchoolData.divisions.forEach((div) => {
       (div.items || []).forEach((it: RabSubItem) => {
-        const itemNominal = it.jumlah || 0;
+        const itemNominal = toRupiah(it.jumlah);
         const uraian = (it.uraian || '').toLowerCase();
         const tags = (it.tags || []).map((t) => t.toUpperCase());
         const kat = it.kategoriBiaya;
 
         // Cek Split Alokasi (Virtual Split UPAH_BAHAN)
         if (it.allocationSplit && it.allocationSplit.isConfirmed) {
-          paguMap.BAHAN_MATERIAL += it.allocationSplit.materialValue || 0;
-          paguMap.UPAH_KERJA += it.allocationSplit.laborValue || 0;
+          paguMap.BAHAN_MATERIAL += toRupiah(it.allocationSplit.materialValue);
+          paguMap.UPAH_KERJA += toRupiah(it.allocationSplit.laborValue);
           return;
         }
 

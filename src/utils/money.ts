@@ -162,6 +162,51 @@ export function splitProportionalRupiah(
 }
 
 /**
+ * Distributes a total amount across weights using largest-remainder method (Hamilton method)
+ * ensuring sum(result) === total strictly with integer Rupiah and zero drift.
+ */
+export function distributeRupiah(totalAmount: number | string | null | undefined, weights: number[]): number[] {
+  const total = toRupiah(totalAmount);
+  if (total <= 0 || weights.length === 0) {
+    return weights.map(() => 0);
+  }
+
+  const cleanWeights = weights.map((w) => Math.max(0, Number(w) || 0));
+  const sumWeights = cleanWeights.reduce((s, w) => s + w, 0);
+
+  if (sumWeights <= 0) {
+    const base = Math.floor(total / weights.length);
+    const result = weights.map(() => base);
+    let remainder = total - result.reduce((s, v) => s + v, 0);
+    for (let i = 0; i < remainder && i < result.length; i++) {
+      result[i] += 1;
+    }
+    return result;
+  }
+
+  // Calculate exact floating shares and floors
+  const exactShares = cleanWeights.map((w) => (total * w) / sumWeights);
+  const floors = exactShares.map((s) => Math.floor(s));
+  let allocatedSum = floors.reduce((s, v) => s + v, 0);
+  let remainder = total - allocatedSum;
+
+  // Calculate remainders (fractions) for largest-remainder distribution
+  const remainders = exactShares.map((s, idx) => ({
+    idx,
+    rem: s - floors[idx],
+  }));
+
+  remainders.sort((a, b) => b.rem - a.rem);
+
+  const result = [...floors];
+  for (let i = 0; i < remainder && i < remainders.length; i++) {
+    result[remainders[i].idx] += 1;
+  }
+
+  return result;
+}
+
+/**
  * Safe calculation of a line item total: volume * unitPrice.
  */
 export function calcItemJumlah(volume: number, hargaSatuan: number): number {

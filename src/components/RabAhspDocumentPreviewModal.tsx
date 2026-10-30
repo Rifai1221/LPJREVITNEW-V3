@@ -37,6 +37,7 @@ import { rebalanceAhspComponents } from '../utils/divisionHelper';
 import { decomposeRealisticBahanAndUpah, isPreservedUnitItem } from '../services/autoGeneratorService';
 import { KwitansiTagManager, AhspLaborProtectionBadge } from './KwitansiTagManager';
 import { isAhspLaborComponent } from '../utils/kwitansiTagHelper';
+import { DEFAULT_MATERIAL_LABOR_RATIO } from '../utils/ahspHelper';
 
 interface RabAhspDocumentPreviewModalProps {
   isOpen: boolean;
@@ -219,7 +220,7 @@ export const RabAhspDocumentPreviewModal: React.FC<RabAhspDocumentPreviewModalPr
             ]);
           }
         } else if (isUpahBahan) {
-          const bNominal = Math.round(rabItem.hargaSatuan * 0.65);
+          const bNominal = Math.round(rabItem.hargaSatuan * DEFAULT_MATERIAL_LABOR_RATIO.material);
           const uNominal = rabItem.hargaSatuan - bNominal;
           const decomposed = decomposeRealisticBahanAndUpah(rabItem.uraian, bNominal, uNominal);
           const comps: AhspKomponen[] = [

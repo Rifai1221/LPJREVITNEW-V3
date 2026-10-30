@@ -12,6 +12,7 @@ import {
   calcPph23,
   splitProportionalRupiah,
   calcItemJumlah,
+  distributeRupiah,
 } from '../src/utils/money';
 import { terbilang, terbilangRupiah } from '../src/utils/terbilang';
 import { getFiscalConfig, FISCAL_YEAR_CONFIGS } from '../src/data/fiscalTaxParameters';
@@ -125,6 +126,25 @@ describe('Financial Audit & Money Engine Unit Tests', () => {
         assert.strictEqual(Number.isInteger(wage), true);
         assert.strictEqual(wage > 0, true);
       }
+    });
+
+    it('should distribute total rupiah across weights with distributeRupiah matching sum exactly', () => {
+      const total = 1000000;
+      const weights = [30, 20, 50];
+      const distributed = distributeRupiah(total, weights);
+      const sum = distributed.reduce((s, v) => s + v, 0);
+
+      assert.strictEqual(sum, total, 'distributeRupiah sum must equal total exactly');
+      assert.strictEqual(distributed[0], 300000);
+      assert.strictEqual(distributed[1], 200000);
+      assert.strictEqual(distributed[2], 500000);
+
+      // Edge cases: zero weights or single item
+      const zeroWeights = distributeRupiah(500000, [0, 0, 0]);
+      assert.strictEqual(zeroWeights.reduce((s, v) => s + v, 0), 500000);
+
+      const singleItem = distributeRupiah(750000, [10]);
+      assert.strictEqual(singleItem[0], 750000);
     });
   });
 

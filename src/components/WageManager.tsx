@@ -295,14 +295,17 @@ export const WageManager: React.FC<WageManagerProps> = ({
       return w;
     });
 
-    const hasBorongan = updated.some((w) => w.kategoriPenugasan === 'BORONGAN');
-    if (!hasBorongan) {
+    const hasBorongan = updated.some((w: any) => w.kategoriPenugasan === 'BORONGAN');
+    if (!hasBorongan && updated.length > 0) {
       hasChanges = true;
-      const coreTeamWithAhsp = DEFAULT_BORONGAN_CORE_TEAM.map((w) => ({
-        ...w,
-        upahHarian: getAhspWageRateForRole(w.peran, w.peranLabel, ahspWageMap, w.upahHarian),
-      }));
-      updated.push(...coreTeamWithAhsp);
+      const firstWorker = updated[0];
+      updated.push({
+        ...firstWorker,
+        id: crypto.randomUUID(),
+        peran: 'MANDOR',
+        peranLabel: 'Ketua Kelompok / Mandor',
+        kategoriPenugasan: 'BORONGAN',
+      });
     }
 
     if (hasChanges) {
