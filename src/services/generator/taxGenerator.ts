@@ -1,5 +1,10 @@
 import { KwitansiDocument, TaxRecord } from '../../types';
+import { toRupiah, calcDppAndPpn, calcPph22, calcPph23 } from '../../utils/money';
 
+/**
+ * Generates Tax Records dynamically from current Kwitansi list.
+ * Unifies all tax calculations using calcDppAndPpn, calcPph22, and calcPph23 from src/utils/money.ts.
+ */
 export function generateTaxesFromKwitansi(
   kwitansiList: KwitansiDocument[],
   manualTaxRecords: TaxRecord[] = [],
@@ -10,7 +15,7 @@ export function generateTaxesFromKwitansi(
   const manualMap = new Map((manualTaxRecords || []).map((m) => [m.id, m]));
 
   // 1. Process from kwitansi
-  kwitansiList.forEach((kw) => {
+  (kwitansiList || []).forEach((kw) => {
     const taxId = `tax-${kw.id}`;
     if (deletedSet.has(taxId) || deletedSet.has(kw.id)) {
       return;
@@ -22,29 +27,36 @@ export function generateTaxesFromKwitansi(
       return;
     }
 
+    const nominal = toRupiah(kw.nominal);
     const isKonsultan = kw.tipe === 'KONSULTAN' || kw.tipe === 'OPERASIONAL';
     const isPerabot = kw.tipe === 'PERABOT';
     const isPeralatan = false;
     const isKonstruksi = kw.tipe === 'MATERIAL' || kw.tipe === 'UPAH';
 
-    const nominalKonstruksi = isKonstruksi ? kw.nominal : 0;
-    const nominalPerabot = isPerabot ? kw.nominal : 0;
-    const nominalPeralatan = isPeralatan ? kw.nominal : 0;
-    const nominalKonsultanAdm = isKonsultan ? kw.nominal : 0;
+    const nominalKonstruksi = isKonstruksi ? nominal : 0;
+    const nominalPerabot = isPerabot ? nominal : 0;
+    const nominalPeralatan = isPeralatan ? nominal : 0;
+    const nominalKonsultanAdm = isKonsultan ? nominal : 0;
 
     let ppn = 0;
     let pph22 = 0;
     let pph23 = 0;
 
     if (kw.isPpn) {
-      ppn = kw.ppnAmount || Math.round((kw.nominal / 1.11) * 0.11);
+      const { ppn: calcPpn } = calcDppAndPpn(nominal, 11);
+      ppn = toRupiah(kw.ppnAmount) > 0 ? toRupiah(kw.ppnAmount) : calcPpn;
     }
     if (kw.isPph22) {
-      pph22 = kw.pph22Amount || Math.round((kw.nominal / 1.11) * 0.015);
+      const { dpp } = calcDppAndPpn(nominal, 11);
+      const calcPph22Val = calcPph22(dpp, 1.5);
+      pph22 = toRupiah(kw.pph22Amount) > 0 ? toRupiah(kw.pph22Amount) : calcPph22Val;
     }
     if (kw.isPph23) {
-      pph23 = kw.pph23Amount || Math.round(kw.nominal * 0.02);
+      const calcPph23Val = calcPph23(nominal, 2.0);
+      pph23 = toRupiah(kw.pph23Amount) > 0 ? toRupiah(kw.pph23Amount) : calcPph23Val;
     }
+
+    const totalPajak = ppn + pph22 + pph23;
 
     result.push({
       id: taxId,
@@ -52,7 +64,7 @@ export function generateTaxesFromKwitansi(
       noBukti: kw.noBukti,
       tanggal: kw.tanggal,
       bulan: kw.bulan,
-      keperluan: kw.uraian.replace('Pembayaran Lunas Biaya ', 'Bayar ').replace('Pembayaran Lunas ', 'Bayar '),
+      keperluan: (kw.uraian || '').replace('Pembayaran Lunas Biaya ', 'Bayar ').replace('Pembayaran Lunas ', 'Bayar '),
       nominalKonstruksi,
       nominalPerabot,
       nominalPeralatan,
@@ -60,16 +72,16 @@ export function generateTaxesFromKwitansi(
       ppn11: ppn,
       pph22,
       pph23,
-      totalPajak: ppn + pph22 + pph23,
+      totalPajak,
       kwitansiIdRef: kw.id,
       namaToko: kw.namaToko || kw.penerimaNama,
       penerimaNama: kw.penerimaNama,
-      statusSetor: ppn + pph22 + pph23 > 0 ? 'LUNAS' : undefined,
+      statusSetor: totalPajak > 0 ? 'LUNAS' : undefined,
     });
   });
 
   // 2. Add manual standalone tax records (not tied to kwitansi)
-  manualTaxRecords.forEach((m) => {
+  (manualTaxRecords || []).forEach((m) => {
     if (!deletedSet.has(m.id) && !result.some((r) => r.id === m.id)) {
       result.push(m);
     }

@@ -168,6 +168,148 @@ export function validateFinancialReconciliation(
     });
   }
 
+  // Check 5: Per-category Kwitansi vs RAB Pagu, Item sum vs Nominal, and Per-kwitansi Tax checks
+  const categoryMap: Record<string, number> = {
+    BAHAN: 0,
+    UPAH: 0,
+    SMKK: 0,
+    SIPLAH: 0,
+    CETAK: 0,
+    FURNITUR: 0,
+    KONSULTAN: 0,
+    PENGAWAS: 0,
+    PENGELOLA: 0,
+  };
+
+  if (appState.realSchoolData?.divisions) {
+    appState.realSchoolData.divisions.forEach((div: any) => {
+      (div.items || []).forEach((it: any) => {
+        const amt = toRupiah(it.jumlah);
+        const tags = (it.tags || []).map((t: string) => t.toUpperCase());
+        const kat = (it.kategoriBiaya || '').toUpperCase();
+        const u = (it.uraian || '').toLowerCase();
+
+        if (tags.includes('CTK') || kat === 'CETAK' || /papan\s*nama|prasasti/i.test(u)) {
+          categoryMap.CETAK += amt;
+        } else if (tags.includes('SMKK') || kat === 'SMKK' || /smkk|k3|helm/i.test(u)) {
+          categoryMap.SMKK += amt;
+        } else if (tags.includes('SIPLAH') || kat === 'SIPLAH' || /siplah/i.test(u)) {
+          categoryMap.SIPLAH += amt;
+        } else if (tags.includes('KONS-P') || kat === 'PERENCANA' || /perencana/i.test(u)) {
+          categoryMap.KONSULTAN += amt;
+        } else if (tags.includes('KONS-W') || kat === 'PENGAWAS' || /pengawas/i.test(u)) {
+          categoryMap.PENGAWAS += amt;
+        } else if (tags.includes('SPJ') || kat === 'PENGELOLA' || /spj|administrasi/i.test(u)) {
+          categoryMap.PENGELOLA += amt;
+        } else if (tags.includes('FUR') || kat === 'PINTU_JENDELA' || it.isBarangPabrikasi || /pintu|jendela|mebeler|kursi|meja/i.test(u)) {
+          categoryMap.FURNITUR += amt;
+        } else if (tags.includes('UPAH') || kat === 'UPAH') {
+          categoryMap.UPAH += amt;
+        } else {
+          categoryMap.BAHAN += amt;
+        }
+      });
+    });
+  }
+
+  const kwCategoryMap: Record<string, number> = {
+    BAHAN: 0,
+    UPAH: 0,
+    SMKK: 0,
+    SIPLAH: 0,
+    CETAK: 0,
+    FURNITUR: 0,
+    KONSULTAN: 0,
+    PENGAWAS: 0,
+    PENGELOLA: 0,
+  };
+
+  (appState.kwitansiList || []).forEach((kw) => {
+    const nom = toRupiah(kw.nominal);
+    const tipe = (kw.tipe || '').toUpperCase();
+    const bukti = (kw.noBukti || '').toUpperCase();
+    const uraian = (kw.uraian || '').toLowerCase();
+
+    // Check (b) kwitansi nominal == sum items
+    const itemsSum = (kw.items || []).reduce((s, it) => s + toRupiah(it.jumlah), 0);
+    if (itemsSum > 0 && itemsSum !== nom) {
+      alerts.push({
+        id: `alert_kw_items_mismatch_${kw.id}`,
+        category: 'BUDGET_OVERSPEND',
+        severity: 'WARNING',
+        title: `Selisih Jumlah Item Kwitansi (${kw.noBukti})`,
+        description: `Nominal kwitansi Rp ${nom.toLocaleString('id-ID')} berbeda dengan total jumlah item Rp ${itemsSum.toLocaleString('id-ID')}.`,
+        expectedValue: nom,
+        actualValue: itemsSum,
+        difference: subRupiah(nom, itemsSum),
+        targetTab: 'kwitansi',
+      });
+    }
+
+    if (tipe === 'UPAH' || /^UK\//i.test(bukti)) {
+      kwCategoryMap.UPAH += nom;
+    } else if (tipe === 'PERABOT' || /^FUR\//i.test(bukti) || /pintu|jendela|mebeler/i.test(uraian)) {
+      kwCategoryMap.FURNITUR += nom;
+    } else if (tipe === 'CETAK' || /^CTK\//i.test(bukti) || /papan nama/i.test(uraian)) {
+      kwCategoryMap.CETAK += nom;
+    } else if (tipe === 'SMKK' || /SMKK/i.test(bukti) || /smkk|k3/i.test(uraian)) {
+      kwCategoryMap.SMKK += nom;
+    } else if (/SIPLAH/i.test(bukti) || /siplah/i.test(uraian)) {
+      kwCategoryMap.SIPLAH += nom;
+    } else if (/KONS-P/i.test(bukti) || /perencana/i.test(uraian)) {
+      kwCategoryMap.KONSULTAN += nom;
+    } else if (/KONS-W/i.test(bukti) || /pengawas/i.test(uraian)) {
+      kwCategoryMap.PENGAWAS += nom;
+    } else if (/ADM/i.test(bukti) || /pengelola/i.test(uraian)) {
+      kwCategoryMap.PENGELOLA += nom;
+    } else {
+      kwCategoryMap.BAHAN += nom;
+    }
+  });
+
+  // Check (a) kwitansi per category vs pagu RAB per category
+  Object.keys(categoryMap).forEach((cat) => {
+    const pagu = categoryMap[cat];
+    const real = kwCategoryMap[cat];
+    if (pagu > 0 && real > pagu) {
+      const diff = subRupiah(real, pagu);
+      alerts.push({
+        id: `alert_cat_overspend_${cat}`,
+        category: 'BUDGET_OVERSPEND',
+        severity: 'WARNING',
+        title: `Realisasi Kategori ${cat} Melampaui Pagu`,
+        description: `Realisasi kwitansi kategori ${cat} (Rp ${real.toLocaleString('id-ID')}) melebihi pagu RAB (Rp ${pagu.toLocaleString('id-ID')}) sebesar Rp ${diff.toLocaleString('id-ID')}.`,
+        expectedValue: pagu,
+        actualValue: real,
+        difference: diff,
+        targetTab: 'kwitansi',
+      });
+    }
+  });
+
+  // Check (d) Per-kwitansi tax check vs Tax Records
+  const taxMap = new Map((taxRecords || []).map((t) => [t.kwitansiIdRef, t]));
+  (appState.kwitansiList || []).forEach((kw) => {
+    const matchingTax = taxMap.get(kw.id);
+    if (matchingTax) {
+      const kwTax = toRupiah(kw.ppnAmount) + toRupiah(kw.pph22Amount) + toRupiah(kw.pph23Amount);
+      const recTax = toRupiah(matchingTax.totalPajak);
+      if (kwTax !== recTax) {
+        alerts.push({
+          id: `alert_tax_kw_mismatch_${kw.id}`,
+          category: 'TAX_MISMATCH',
+          severity: 'WARNING',
+          title: `Selisih Pajak Kwitansi (${kw.noBukti})`,
+          description: `Pajak pada kwitansi (Rp ${kwTax.toLocaleString('id-ID')}) berbeda dengan Buku Pajak (Rp ${recTax.toLocaleString('id-ID')}).`,
+          expectedValue: kwTax,
+          actualValue: recTax,
+          difference: subRupiah(kwTax, recTax),
+          targetTab: 'pajak',
+        });
+      }
+    }
+  });
+
   return {
     isValid: alerts.length === 0,
     alerts,
