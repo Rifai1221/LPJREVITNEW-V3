@@ -715,3 +715,5 @@ export const defaultRealSchoolData: RealSchoolData = {
   ],
 
 };
+
+export const realSchoolData = defaultRealSchoolData;

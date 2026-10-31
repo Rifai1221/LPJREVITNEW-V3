@@ -16,11 +16,13 @@ import {
   isMaterialOnlyPurchase,
   cleanNaturalUraian,
   renumberMaterialTransactionsChronologically,
+  extractWeekNumberFromKwitansi,
 } from './splitTransactionService';
 import {
   deduplicateKwitansiList,
 } from './kwitansiGenerator';
-import { extractWeekNumberFromKwitansi } from './splitTransactionService';
+import { distributeRupiah } from '../../utils/money';
+import { calculateIntegratedBkt } from '../cashLedgerIntegrationService';
 
 export interface DecomposedItem {
   namaBarang: string;
@@ -104,22 +106,25 @@ export function decomposeRealisticBahanAndUpah(
       ],
       upahComponents:
         upahNominal > 0
-          ? [
-              {
-                namaBarang: 'Tukang Terampil',
-                volume: Math.max(1, Math.round((upahNominal * 0.6) / 135000)),
-                satuan: 'OH',
-                hargaSatuan: 135000,
-                jumlah: Math.round(upahNominal * 0.6),
-              },
-              {
-                namaBarang: 'Pekerja Lapangan',
-                volume: Math.max(1, Math.round((upahNominal * 0.4) / 110000)),
-                satuan: 'OH',
-                hargaSatuan: 110000,
-                jumlah: upahNominal - Math.round(upahNominal * 0.6),
-              },
-            ]
+          ? (() => {
+              const [tukangJml, pekerjaJml] = distributeRupiah(upahNominal, [60, 40]);
+              return [
+                {
+                  namaBarang: 'Tukang Terampil',
+                  volume: Math.max(1, Math.round(tukangJml / 135000)),
+                  satuan: 'OH',
+                  hargaSatuan: 135000,
+                  jumlah: tukangJml,
+                },
+                {
+                  namaBarang: 'Pekerja Lapangan',
+                  volume: Math.max(1, Math.round(pekerjaJml / 110000)),
+                  satuan: 'OH',
+                  hargaSatuan: 110000,
+                  jumlah: pekerjaJml,
+                },
+              ];
+            })()
           : [],
     };
   }
@@ -245,8 +250,7 @@ export function decomposeRealisticBahanAndUpah(
 
   const upahComponents: DecomposedItem[] = [];
   if (upahNominal > 0) {
-    const tukangJml = Math.round(upahNominal * 0.6);
-    const pekerjaJml = upahNominal - tukangJml;
+    const [tukangJml, pekerjaJml] = distributeRupiah(upahNominal, [60, 40]);
 
     const tukangVol = Math.max(1, Math.round(tukangJml / 135000));
     const pekerjaVol = Math.max(1, Math.round(pekerjaJml / 110000));
@@ -571,7 +575,15 @@ export function calculateBkuFromTransactions(
       return;
     }
 
-    if (hasAnyActiveProgress && kwWeek !== null && !activeWeekNums.has(kwWeek)) {
+    const isFixedKw =
+      Boolean(kw.isLocked) ||
+      kw.tipe === 'KONSULTAN' ||
+      kw.tipe === 'SMKK' ||
+      kw.tipe === 'CETAK' ||
+      kw.kategoriBiayaPajak === 'Siplah' ||
+      /siplah|kons-|adm|smkk|ctk/i.test(`${kw.noBukti || ''} ${kw.uraian || ''}`);
+
+    if (hasAnyActiveProgress && kwWeek !== null && !activeWeekNums.has(kwWeek) && !isFixedKw) {
       return;
     }
     if (!hasAnyActiveProgress && (kw.tipe === 'MATERIAL' || kw.tipe === 'UPAH' || kw.tipe === 'PERABOT' || kwWeek !== null)) {
@@ -663,13 +675,21 @@ export function calculateBkuFromTransactions(
     }
 
     let bkuUraian = kw.uraian;
+    const isSiplahKw =
+      kw.kategoriBiayaPajak === 'Siplah' ||
+      /siplah|daring/i.test(`${kw.noBukti || ''} ${kw.uraian || ''} ${(kw as any).kategoriBiaya || ''}`) ||
+      (kw.items && kw.items.some((i: any) => /siplah/i.test(i.kategoriBiaya || '')));
+
     const isMaterialKw =
-      kw.tipe === 'MATERIAL' ||
+      !isSiplahKw &&
+      (kw.tipe === 'MATERIAL' ||
       /kwt[\/\-_]?mat|kw[\/\-_]?mat|\bmat\b|mat[\/\-_]|material/i.test(kw.noBukti || '') ||
       Boolean(kw.namaToko) ||
-      /bahan|material|semen|pasir|bata|keramik|besi|cat|toko|tb\./i.test(kw.uraian);
+      /bahan|material|semen|pasir|bata|keramik|besi|cat|toko|tb\./i.test(kw.uraian));
 
-    if (kw.tipe === 'UPAH' || /uk\//i.test(kw.noBukti || '')) {
+    if (isSiplahKw) {
+      bkuUraian = kw.uraian || `Pembayaran Lunas Belanja Daring via ${kw.namaToko || 'Mitra SipLah'}`;
+    } else if (kw.tipe === 'UPAH' || /uk\//i.test(kw.noBukti || '')) {
       bkuUraian = kw.uraian.replace('Pembayaran Lunas Biaya ', 'Bayar ');
     } else if (isMaterialKw) {
       const storeName =
@@ -701,9 +721,9 @@ export function calculateBkuFromTransactions(
       noBukti: kw.noBukti,
       penerimaan: 0,
       pengeluaran: finalPengeluaran,
-      kategoriBiaya: kw.kategoriBiayaPajak,
+      kategoriBiaya: isSiplahKw ? 'Siplah' : kw.kategoriBiayaPajak,
       kwitansiIdRef: kw.id,
-      metodeBayar: kw.metodeBayar || (/siplah/i.test(`${kw.noBukti || ''} ${bkuUraian}`) ? 'BANK' : 'TUNAI'),
+      metodeBayar: isSiplahKw ? 'BANK' : (kw.metodeBayar || 'TUNAI'),
     });
   });
 
@@ -736,8 +756,7 @@ export function calculateBkuFromTransactions(
       const weekBobot = weekDivSum;
       const paguTotal = school?.totalAnggaran || 0;
       const weekIncrementalBudget = Math.round((paguTotal * weekBobot) / 100);
-      const maxWageCap = Math.round(weekIncrementalBudget * 0.35);
-      const cappedUpah = maxWageCap > 0 ? Math.min(wr.totalUpah, maxWageCap) : wr.totalUpah;
+      const cappedUpah = wr.totalUpah;
 
       const wDates = matchW
         ? resolveWeekDates(matchW, yearStr)
@@ -1073,83 +1092,5 @@ export function calculateBktFromBku(
   bkuList: BkuTransaction[],
   bkbList: BkbTransaction[] = []
 ): BktTransaction[] {
-  const bktItems: BktTransaction[] = [];
-  const hasBkbWithdrawals = bkbList.some((b) => (b.pengeluaran || 0) > 0);
-
-  if (hasBkbWithdrawals) {
-    bkbList.forEach((bkbTx, idx) => {
-      if ((bkbTx.pengeluaran || 0) > 0) {
-        if (bkbTx.kategori === 'BIAYA_ADMIN') return;
-        bktItems.push({
-          id: `bkt-inflow-${bkbTx.id || idx}`,
-          tanggal: bkbTx.tanggal,
-          tanggalObj: bkbTx.tanggalObj || parseTxDateToIso(bkbTx.tanggal),
-          bulan: bkbTx.bulan,
-          uraian: bkbTx.uraian.toLowerCase().includes('penarikan') || bkbTx.uraian.toLowerCase().includes('tarik')
-            ? bkbTx.uraian
-            : `Penarikan Tunai dari Rekening Bank (${bkbTx.uraian})`,
-          noBukti: bkbTx.noBukti || `BKT-${String(idx + 1).padStart(2, '0')}`,
-          pemasukan: bkbTx.pengeluaran,
-          pengeluaran: 0,
-          saldo: 0,
-          kategoriBiaya: 'Penerimaan',
-          metodeBayar: 'TUNAI',
-        });
-      }
-    });
-  } else {
-    bkuList.forEach((item, idx) => {
-      if (item.jenis === 'PENERIMAAN') {
-        bktItems.push({
-          id: `bkt-inflow-${item.id || idx}`,
-          tanggal: item.tanggal,
-          tanggalObj: item.tanggalObj || parseTxDateToIso(item.tanggal),
-          bulan: item.bulan,
-          uraian: `Penarikan Tunai dari Bank untuk Kas Operasional (${item.uraian})`,
-          noBukti: item.noBukti ? `BKT-${item.noBukti}` : 'BKT-01',
-          pemasukan: item.penerimaan,
-          pengeluaran: 0,
-          saldo: 0,
-          kategoriBiaya: 'Penerimaan',
-          metodeBayar: 'TUNAI',
-        });
-      }
-    });
-  }
-
-  bkuList.forEach((item) => {
-    if (item.jenis === 'PENERIMAAN' || item.metodeBayar === 'BANK') return;
-    bktItems.push({
-      id: `bkt-${item.id}`,
-      tanggal: item.tanggal,
-      tanggalObj: item.tanggalObj || parseTxDateToIso(item.tanggal),
-      bulan: item.bulan,
-      uraian: item.uraian,
-      noBukti: item.noBukti,
-      pemasukan: 0,
-      pengeluaran: item.pengeluaran,
-      saldo: 0,
-      kategoriBiaya: item.kategoriBiaya,
-      kwitansiIdRef: item.kwitansiIdRef,
-      metodeBayar: 'TUNAI',
-    });
-  });
-
-  bktItems.sort((a, b) => {
-    const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
-    const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
-    if (isoA !== isoB) return isoA.localeCompare(isoB);
-    if (a.pemasukan > 0 && b.pemasukan === 0) return -1;
-    if (b.pemasukan > 0 && a.pemasukan === 0) return 1;
-    return 0;
-  });
-
-  let running = 0;
-  return bktItems.map((item) => {
-    running = running + (item.pemasukan || 0) - (item.pengeluaran || 0);
-    return {
-      ...item,
-      saldo: running,
-    };
-  });
+  return calculateIntegratedBkt(bkuList, bkbList);
 }

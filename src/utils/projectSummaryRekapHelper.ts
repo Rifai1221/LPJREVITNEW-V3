@@ -12,7 +12,9 @@ import {
 } from '../types';
 import { isAhspLaborComponent } from './kwitansiTagHelper';
 import { sanitizeYear } from './monthHelper';
-import { toRupiah } from './money';
+import { toRupiah, distributeRupiah } from './money';
+import { getItemMaterialLaborSplit } from './ahspHelper';
+import { getReconstitutedKusenPintuUnitItems } from '../services/generator/kwitansiGenerator';
 
 export type RekapCategoryKey =
   | 'PAPAN_NAMA'
@@ -183,7 +185,7 @@ export function isKwitansiAllowedByProgressBobot(
       (w.divisions || []).some((d) => {
         const u = `${d.uraian || ''} ${d.kode || ''}`.toLowerCase();
         return (
-          /siplah|mainan|rak\s*mainan/i.test(u) &&
+          (d.kode === 'XII' || /siplah|mebel|meubilair|meubeler|perabot|mainan|rak\s*mainan/i.test(u)) &&
           ((d.prestasiMingguIni || 0) > 0 || (d.prestasiSdMingguIni || 0) > 0)
         );
       })
@@ -277,50 +279,50 @@ export function calculateProjectSummaryRekap(
           return;
         }
 
-        // Papan Nama Proyek
+        // 1. Papan Nama Proyek
         if (tags.includes('CTK') || kat === 'CETAK' || /papan\s*nama|prasasti|banner/i.test(uraian)) {
           paguMap.PAPAN_NAMA += itemNominal;
         }
-        // SMKK
+        // 2. SMKK
         else if (tags.includes('SMKK') || kat === 'SMKK' || /smkk|k3|helm|rompi|sepatu boot|p3k|rambu/i.test(uraian)) {
           paguMap.SMKK += itemNominal;
         }
-        // SipLah
-        else if (tags.includes('SIPLAH') || kat === 'SIPLAH' || /siplah/i.test(uraian)) {
+        // 3. SipLah (Pengadaan Mebeler Daring / Barang Siplah)
+        else if (
+          tags.includes('SIPLAH') ||
+          kat === 'SIPLAH' ||
+          div.kode === 'XII' ||
+          /mebeler|perabot|siplah/i.test(div.uraian || '') ||
+          /kursi siswa|meja setengah|rak mainan|loker|rak buku|papan kreasi|rak sepatu|siplah/i.test(uraian)
+        ) {
           paguMap.SIPLAH += itemNominal;
         }
-        // Konsultan Perencana
+        // 4. Konsultan Perencana
         else if (tags.includes('KONS-P') || kat === 'PERENCANA' || /perencana teknis|jasa.*perencanaan/i.test(uraian)) {
           paguMap.KONSULTAN_PERENCANA += itemNominal;
         }
-        // Pengawas
+        // 5. Pengawas
         else if (tags.includes('KONS-W') || kat === 'PENGAWAS' || /pengawas lapangan|jasa.*pengawasan/i.test(uraian)) {
           paguMap.PENGAWAS += itemNominal;
         }
-        // Pengelola SPJ
+        // 6. Pengelola SPJ
         else if (tags.includes('SPJ') || kat === 'PENGELOLA' || /pengelola.*spj|administrasi lpj|atk/i.test(uraian)) {
           paguMap.PENGELOLA_SPJ += itemNominal;
         }
-        // Furnitur & Pintu Jendela
+        // 7. Furnitur & Pintu Jendela Pabrikasi
         else if (
           tags.includes('FUR') ||
           kat === 'PINTU_JENDELA' ||
-          it.isBarangPabrikasi ||
-          /pintu|kusen|jendela|ventilasi|mebeler|kursi|meja|loker|rak|perabot/i.test(uraian)
+          (it.isBarangPabrikasi && (div.kode === 'V' || /kayu.*kaca.*besi|pintu|jendela/i.test(div.uraian || '') || /pintu|kusen|jendela/i.test(uraian))) ||
+          /pintu|kusen|jendela|ventilasi|boven|jalusi/i.test(uraian)
         ) {
           paguMap.FURNITUR_PINTU_JENDELA += itemNominal;
         }
-        // Upah
-        else if (
-          tags.includes('UPAH') ||
-          kat === 'UPAH' ||
-          isAhspLaborComponent(it.uraian || '', kat)
-        ) {
-          paguMap.UPAH_KERJA += itemNominal;
-        }
-        // Bahan Material
+        // 8. Konstruksi Fisik (UPAH, BAHAN, atau UPAH_BAHAN)
         else {
-          paguMap.BAHAN_MATERIAL += itemNominal;
+          const split = getItemMaterialLaborSplit(it, realSchoolData?.ahspList || []);
+          paguMap.BAHAN_MATERIAL += split.material;
+          paguMap.UPAH_KERJA += split.labor;
         }
       });
     });
@@ -347,16 +349,15 @@ export function calculateProjectSummaryRekap(
         if (paguMap.FURNITUR_PINTU_JENDELA === 0) paguMap.FURNITUR_PINTU_JENDELA += amt;
       } else if (kat === 'KONSULTAN_ADM') {
         if (/perencana/i.test(u)) {
-          paguMap.KONSULTAN_PERENCANA += amt;
+          if (paguMap.KONSULTAN_PERENCANA === 0) paguMap.KONSULTAN_PERENCANA += amt;
         } else if (/pengawas/i.test(u)) {
-          paguMap.PENGAWAS += amt;
+          if (paguMap.PENGAWAS === 0) paguMap.PENGAWAS += amt;
         } else if (/pengelola|spj|lpj|administrasi/i.test(u)) {
-          paguMap.PENGELOLA_SPJ += amt;
+          if (paguMap.PENGELOLA_SPJ === 0) paguMap.PENGELOLA_SPJ += amt;
         } else {
-          // Fallback if generic
-          paguMap.KONSULTAN_PERENCANA += amt * 0.3;
-          paguMap.PENGAWAS += amt * 0.35;
-          paguMap.PENGELOLA_SPJ += amt * 0.35;
+          if (paguMap.KONSULTAN_PERENCANA === 0) paguMap.KONSULTAN_PERENCANA += Math.round(amt * 0.3);
+          if (paguMap.PENGAWAS === 0) paguMap.PENGAWAS += Math.round(amt * 0.35);
+          if (paguMap.PENGELOLA_SPJ === 0) paguMap.PENGELOLA_SPJ += Math.round(amt * 0.35);
         }
       } else if (kat === 'BAHAN_REHAB' || kat === 'BAHAN_BARU') {
         if (/pintu|jendela|kusen/i.test(u)) {
@@ -370,21 +371,12 @@ export function calculateProjectSummaryRekap(
     });
   }
 
-  // Pastikan pagu Konsultan & SPJ selalu sesuai persentase RAB resmi (Perencana: 1.85%, Pengawas: 2.19%, SPJ: 2.41%) jika totalAnggaran ada
-  if (totalAnggaran > 0) {
+  // Jika tidak ada RAB Real, hitung pagu standar dari totalAnggaran
+  if (!hasRealRab && totalAnggaran > 0) {
     paguMap.KONSULTAN_PERENCANA = Math.round(totalAnggaran * 0.0185); // 1.85%
     paguMap.PENGAWAS = Math.round(totalAnggaran * 0.0219); // 2.19%
     paguMap.PENGELOLA_SPJ = Math.round(totalAnggaran * 0.0241); // 2.41%
 
-    // Selaraskan porsi Upah & Material agar seimbang dengan totalAnggaran
-    const upahKwSum = (kwitansiList || [])
-      .filter((k) => classifyKwitansiCategory(k) === 'UPAH_KERJA')
-      .reduce((s, k) => s + (k.nominal || 0), 0);
-    if (upahKwSum > paguMap.UPAH_KERJA && upahKwSum <= totalAnggaran * 0.5) {
-      paguMap.UPAH_KERJA = upahKwSum;
-    }
-
-    // Material adalah sisa penyeimbang dari totalAnggaran
     const otherSum =
       paguMap.PAPAN_NAMA +
       paguMap.SMKK +
@@ -396,6 +388,23 @@ export function calculateProjectSummaryRekap(
       paguMap.UPAH_KERJA;
 
     paguMap.BAHAN_MATERIAL = Math.max(0, totalAnggaran - otherSum);
+  } else if (hasRealRab && totalAnggaran > 0) {
+    // Jika RAB fisik ada tapi tidak menyertakan honorarium manajemen, alokasikan pagu standar manajemen
+    if (paguMap.KONSULTAN_PERENCANA === 0) {
+      paguMap.KONSULTAN_PERENCANA = Math.round(totalAnggaran * 0.0185);
+    }
+    if (paguMap.PENGAWAS === 0) {
+      paguMap.PENGAWAS = Math.round(totalAnggaran * 0.0219);
+    }
+    if (paguMap.PENGELOLA_SPJ === 0) {
+      paguMap.PENGELOLA_SPJ = Math.round(totalAnggaran * 0.0241);
+    }
+
+    // Normalisasi selisih rounding agar total 9 kategori tepat sama dengan totalAnggaran
+    const sumPaguCategories = Object.values(paguMap).reduce((s, v) => s + v, 0);
+    if (sumPaguCategories !== totalAnggaran) {
+      paguMap.BAHAN_MATERIAL += (totalAnggaran - sumPaguCategories);
+    }
   }
 
   // Jika total pagu dihitung masih 0 tapi totalAnggaran ada, buat proporsi standar Revitalisasi
@@ -836,6 +845,18 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
     );
   }
 
+  const authenticFurList = nextKwitansiList.filter(
+    (k) =>
+      (k.noBukti?.toUpperCase().startsWith('FUR/') || k.noBukti?.toUpperCase().includes('/FUR/')) &&
+      !k.id.startsWith('kw-sync-') &&
+      k.noBukti !== `Fur/01/${yearStr}`
+  );
+  if (authenticFurList.length > 0) {
+    nextKwitansiList = nextKwitansiList.filter(
+      (k) => !(k.id.startsWith('kw-sync-furnitur') || (k.noBukti === `Fur/01/${yearStr}` && k.id.startsWith('kw-sync-')))
+    );
+  }
+
   // Helper untuk mencari kwitansi berdasarkan kategori
   const getKwByCategory = (catKey: RekapCategoryKey) => {
     return nextKwitansiList.filter((k) => classifyKwitansiCategory(k) === catKey);
@@ -1209,38 +1230,87 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
   // 6. BELANJA SIPLAH
   const existingSiplahKw = getKwByCategory('SIPLAH');
   if (existingSiplahKw.length === 0 && paguMap.SIPLAH > 0) {
-    ensureFixedCategoryReceipt('SIPLAH', paguMap.SIPLAH, {
-      noBukti: `KW-SIPLAH/01/${yearStr}`,
-      noSpb: `SPB-SIPLAH/01/${yearStr}`,
-      tipe: 'MATERIAL',
-      tanggal: `10/09/${yearStr}`,
-      tanggalFormatted: `10 September ${yearStr}`,
-      bulan: `September ${yearStr}`,
-      uraian: `Pembayaran Lunas Belanja Daring Pengadaan Barang Mitra SipLah Kemdikbud Revitalisasi ${school?.namaSekolah || 'Sekolah'}, Tahun ${yearStr}.`,
-      penerimaNama: siplahStore.pemilikNama || 'Mitra SipLah',
-      penerimaPekerjaan: siplahStore.pekerjaan || 'Mitra SipLah Kemdikbud',
-      penerimaAlamat: siplahStore.alamat || 'Platform SipLah',
-      namaToko: siplahStore.namaToko,
-      items: [
-        {
-          namaBarang: 'Pengadaan Barang & Perlengkapan Daring via Mitra SipLah Kemdikbud',
-          volume: 1,
-          satuan: 'paket',
-          hargaSatuan: paguMap.SIPLAH,
-          jumlah: paguMap.SIPLAH,
-          tag: 'SipLah',
-        },
-      ],
-      isPpn: paguMap.SIPLAH >= 2000000,
-      isPph22: paguMap.SIPLAH >= 2000000,
-      isPph23: false,
-      ppnAmount: paguMap.SIPLAH >= 2000000 ? Math.round((paguMap.SIPLAH / 1.11) * 0.11) : 0,
-      pph22Amount: paguMap.SIPLAH >= 2000000 ? Math.round((paguMap.SIPLAH / 1.11) * 0.015) : 0,
-      pph23Amount: 0,
-      kategoriBiayaPajak: 'Siplah',
-      mingguKeRef: 6,
-      isLocked: true,
-    });
+    const siplahStores = stores.filter((s) => s.kategori === 'SIPLAH' || /siplah/i.test(`${s.namaToko} ${s.pekerjaan || ''}`));
+    if (siplahStores.length > 1) {
+      const weights = siplahStores.map((s) => (/hanimo/i.test(s.namaToko) ? 19650000 : /n&n|stationary/i.test(s.namaToko) ? 22455000 : 1));
+      const amounts = distributeRupiah(paguMap.SIPLAH, weights);
+
+      siplahStores.forEach((st, idx) => {
+        const nom = amounts[idx];
+        const isTaxable = nom >= 2000000;
+        const padIdx = String(idx + 1).padStart(2, '0');
+
+        nextKwitansiList.push({
+          id: `kw-sync-siplah-${st.id || idx}-${Date.now()}`,
+          noBukti: `SipLah/${padIdx}/${yearStr}`,
+          noSpb: `SPB-SipLah/${padIdx}/${yearStr}`,
+          tipe: 'OPERASIONAL',
+          metodeBayar: 'BANK',
+          tanggal: idx === 0 ? `15/08/${yearStr}` : `10/09/${yearStr}`,
+          tanggalFormatted: idx === 0 ? `15 Agustus ${yearStr}` : `10 September ${yearStr}`,
+          bulan: idx === 0 ? `Agustus ${yearStr}` : `September ${yearStr}`,
+          uraian: `Pembayaran Lunas Belanja Daring Pengadaan Barang via ${st.namaToko} Kemdikbud Revitalisasi ${school?.namaSekolah || 'Sekolah'}, Tahun ${yearStr}.`,
+          penerimaNama: st.pemilikNama || 'Mitra SipLah',
+          penerimaPekerjaan: st.pekerjaan || `Mitra Penyedia ${st.namaToko}`,
+          penerimaAlamat: st.alamat || 'Platform SipLah',
+          namaToko: st.namaToko,
+          items: [
+            {
+              namaBarang: `Pengadaan Barang & Mebeler Daring via ${st.namaToko}`,
+              volume: 1,
+              satuan: 'paket',
+              hargaSatuan: nom,
+              jumlah: nom,
+              tag: 'SipLah',
+            },
+          ],
+          nominal: nom,
+          isPpn: isTaxable,
+          isPph22: isTaxable,
+          isPph23: false,
+          ppnAmount: isTaxable ? Math.round((nom / 1.11) * 0.11) : 0,
+          pph22Amount: isTaxable ? Math.round((nom / 1.11) * 0.015) : 0,
+          pph23Amount: 0,
+          kategoriBiayaPajak: 'Siplah',
+          mingguKeRef: idx === 0 ? 4 : 8,
+          isLocked: true,
+        });
+      });
+    } else {
+      ensureFixedCategoryReceipt('SIPLAH', paguMap.SIPLAH, {
+        noBukti: `SipLah/01/${yearStr}`,
+        noSpb: `SPB-SipLah/01/${yearStr}`,
+        tipe: 'OPERASIONAL',
+        metodeBayar: 'BANK',
+        tanggal: `10/09/${yearStr}`,
+        tanggalFormatted: `10 September ${yearStr}`,
+        bulan: `September ${yearStr}`,
+        uraian: `Pembayaran Lunas Belanja Daring Pengadaan Barang via ${siplahStore.namaToko} Kemdikbud Revitalisasi ${school?.namaSekolah || 'Sekolah'}, Tahun ${yearStr}.`,
+        penerimaNama: siplahStore.pemilikNama || 'Mitra SipLah',
+        penerimaPekerjaan: siplahStore.pekerjaan || 'Mitra SipLah Kemdikbud',
+        penerimaAlamat: siplahStore.alamat || 'Platform SipLah',
+        namaToko: siplahStore.namaToko,
+        items: [
+          {
+            namaBarang: 'Pengadaan Barang & Perlengkapan Daring via Mitra SipLah Kemdikbud',
+            volume: 1,
+            satuan: 'paket',
+            hargaSatuan: paguMap.SIPLAH,
+            jumlah: paguMap.SIPLAH,
+            tag: 'SipLah',
+          },
+        ],
+        isPpn: paguMap.SIPLAH >= 2000000,
+        isPph22: paguMap.SIPLAH >= 2000000,
+        isPph23: false,
+        ppnAmount: paguMap.SIPLAH >= 2000000 ? Math.round((paguMap.SIPLAH / 1.11) * 0.11) : 0,
+        pph22Amount: paguMap.SIPLAH >= 2000000 ? Math.round((paguMap.SIPLAH / 1.11) * 0.015) : 0,
+        pph23Amount: 0,
+        kategoriBiayaPajak: 'Siplah',
+        mingguKeRef: 6,
+        isLocked: true,
+      });
+    }
   } else if (existingSiplahKw.length > 0 && paguMap.SIPLAH > 0) {
     const sumSiplah = existingSiplahKw.reduce((s, k) => s + (k.nominal || 0), 0);
     const diffSiplah = paguMap.SIPLAH - sumSiplah;
@@ -1271,6 +1341,7 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
   }
 
   // 7. FURNITUR (PINTU, JENDELA & MEBELER PABRIKASI)
+  const furItems = getReconstitutedKusenPintuUnitItems([], paguMap.FURNITUR_PINTU_JENDELA, realSchoolData);
   ensureFixedCategoryReceipt('FURNITUR_PINTU_JENDELA', paguMap.FURNITUR_PINTU_JENDELA, {
     noBukti: `Fur/01/${yearStr}`,
     noSpb: `SPB-Fur/01/${yearStr}`,
@@ -1283,17 +1354,7 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
     penerimaPekerjaan: kusenStore.pekerjaan || 'Pengrajin Kayu & Mebeler',
     penerimaAlamat: kusenStore.alamat || school?.kabKota || '',
     namaToko: kusenStore.namaToko,
-    items: [
-      {
-        namaBarang: 'Pengadaan & Fabrikasi Pintu Utama, Jendela Aluminium dan Mebeler Siswa/Guru',
-        volume: 1,
-        satuan: 'set',
-        hargaSatuan: paguMap.FURNITUR_PINTU_JENDELA,
-        jumlah: paguMap.FURNITUR_PINTU_JENDELA,
-        tag: 'FUR',
-        isBarangPabrikasi: true,
-      },
-    ],
+    items: furItems,
     isPpn: paguMap.FURNITUR_PINTU_JENDELA >= 2000000,
     isPph22: paguMap.FURNITUR_PINTU_JENDELA >= 2000000,
     isPph23: false,

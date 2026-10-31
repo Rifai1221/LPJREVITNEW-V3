@@ -36,8 +36,7 @@ import { terbilangRupiah } from '../utils/terbilang';
 import { rebalanceAhspComponents } from '../utils/divisionHelper';
 import { decomposeRealisticBahanAndUpah, isPreservedUnitItem } from '../services/autoGeneratorService';
 import { KwitansiTagManager, AhspLaborProtectionBadge } from './KwitansiTagManager';
-import { isAhspLaborComponent } from '../utils/kwitansiTagHelper';
-import { DEFAULT_MATERIAL_LABOR_RATIO } from '../utils/ahspHelper';
+import { DEFAULT_MATERIAL_LABOR_RATIO, getItemMaterialLaborSplit } from '../utils/ahspHelper';
 
 interface RabAhspDocumentPreviewModalProps {
   isOpen: boolean;
@@ -220,8 +219,9 @@ export const RabAhspDocumentPreviewModal: React.FC<RabAhspDocumentPreviewModalPr
             ]);
           }
         } else if (isUpahBahan) {
-          const bNominal = Math.round(rabItem.hargaSatuan * DEFAULT_MATERIAL_LABOR_RATIO.material);
-          const uNominal = rabItem.hargaSatuan - bNominal;
+          const split = getItemMaterialLaborSplit({ ...rabItem, jumlah: rabItem.hargaSatuan }, realData.ahspList || []);
+          const bNominal = split.material;
+          const uNominal = split.labor;
           const decomposed = decomposeRealisticBahanAndUpah(rabItem.uraian, bNominal, uNominal);
           const comps: AhspKomponen[] = [
             ...decomposed.bahanItems.map((bi, i) => ({

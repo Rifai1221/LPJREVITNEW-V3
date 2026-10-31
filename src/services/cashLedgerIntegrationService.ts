@@ -43,133 +43,230 @@ export interface CashReconciliationResult {
 export function generateStandardBkbRecords(
   school: SchoolMasterData,
   progressWeeks: ProjectProgressWeek[] = [],
-  bkuWeekLimit: number = 14
+  bkuWeekLimit: number = 14,
+  bkuList: BkuTransaction[] = []
 ): BkbTransaction[] {
-  const yearStr = school?.tahunAnggaran?.trim() || '2026';
+  return syncBkbFromBku(bkuList, school, progressWeeks);
+}
+
+/**
+ * Synchronize and calibrate BKB records from BKU transactions:
+ * 1. Copies BKU penerimaan (Termin 1 & Termin 2) to BKB penerimaan ('PENERIMAAN_TERMIN').
+ * 2. Harmonizes BKB non-cash SIPLAH debit records 1-to-1 with BKU SIPLAH transactions.
+ * 3. Calculates dynamic cash withdrawals ('TARIK_TUNAI') based on actual cash expenses in BKU:
+ *    - Whenever cash in BKT would be insufficient before upcoming cash expense(s), a 'TARIK_TUNAI' debit is added to BKB.
+ *    - Withdrawal amount is rounded UP to the nearest Rp 1.000.000.
+ *    - Total withdrawals across all stages do not exceed total cash expense needs + small cushion.
+ *    - BKT balance is guaranteed NEVER negative on any date.
+ */
+export function syncBkbFromBku(
+  bkuList: BkuTransaction[],
+  school?: SchoolMasterData,
+  progressWeeks: ProjectProgressWeek[] = []
+): BkbTransaction[] {
   const records: BkbTransaction[] = [];
+  const yearStr = school?.tahunAnggaran?.trim() || '2026';
 
-  let startIso = `${yearStr}-07-01`;
-  let startSlash = `01/07/${yearStr}`;
-  let startBulan = `Juli ${yearStr}`;
+  // 1. Process BKU Penerimaan to BKB PENERIMAAN_TERMIN
+  const penerimaanTxs = (bkuList || []).filter((tx) => tx.jenis === 'PENERIMAAN');
 
-  if (progressWeeks && progressWeeks.length > 0) {
-    const w1 = progressWeeks.find((w) => w.mingguKe === 1) || progressWeeks[0];
-    const resolved = resolveWeekDates(w1, yearStr);
-    startIso = resolved.startDate;
-    startSlash = resolved.startDateSlash;
-    startBulan = resolved.bulan;
-  }
-
-  const termin1Amount =
-    school?.termin1Nilai ||
-    (school?.totalAnggaran ? Math.round(school.totalAnggaran * ((school.termin1Persen || 70) / 100)) : 0);
-
-  if (termin1Amount > 0) {
-    // 1. Penerimaan Bank Termin 1
-    records.push({
-      id: 'bkb-init-termin1',
-      tanggal: startSlash,
-      tanggalObj: startIso,
-      bulan: startBulan,
-      uraian: 'Penerimaan Dana Revitalisasi Termin 1 (70%) ke Rekening Bank',
-      noBukti: `BB-01/${yearStr}`,
-      penerimaan: termin1Amount,
-      pengeluaran: 0,
-      kategori: 'PENERIMAAN_TERMIN',
-    });
-
-    // 2. Penarikan Tunai dari Bank Tahap 1 untuk Kas Tunai (BKT)
-    // Sesuai standar tata kelola kas sekolah: Penarikan tunai operasional tahap awal ~60% dari termin 1,
-    // menyisakan saldo kas di bank yang sehat (~40%) dan kas tunai fisik bendahara siap pakai.
-    const initialWithdrawal = Math.round(termin1Amount * 0.6);
-    records.push({
-      id: 'bkb-withdraw-termin1',
-      tanggal: startSlash,
-      tanggalObj: startIso,
-      bulan: startBulan,
-      uraian: 'Penarikan Tunai dari Bank (Tahap 1) untuk Kas Tunai Operasional BKT',
-      noBukti: 'BKT-01',
-      penerimaan: 0,
-      pengeluaran: initialWithdrawal,
-      kategori: 'TARIK_TUNAI',
-    });
-
-    // Jika minggu proyek berlanjut (minggu 5 ke atas), ada penarikan tahap 2 dari sisa termin 1
-    if (bkuWeekLimit >= 5) {
-      let w5Iso = startIso;
-      let w5Slash = startSlash;
-      let w5Bulan = startBulan;
-      if (progressWeeks && progressWeeks.length > 0) {
-        const w5 = progressWeeks.find((w) => w.mingguKe === 5) || progressWeeks[Math.min(4, progressWeeks.length - 1)];
-        const resW5 = resolveWeekDates(w5, yearStr);
-        w5Iso = resW5.startDate;
-        w5Slash = resW5.startDateSlash;
-        w5Bulan = resW5.bulan;
-      }
-      const secondWithdrawal = Math.round(termin1Amount * 0.25);
+  if (penerimaanTxs.length > 0) {
+    penerimaanTxs.forEach((pTx, idx) => {
       records.push({
-        id: 'bkb-withdraw-termin1-stage2',
-        tanggal: w5Slash,
-        tanggalObj: w5Iso,
-        bulan: w5Bulan,
-        uraian: 'Penarikan Tunai dari Bank (Tahap 2) untuk Kas Tunai Operasional BKT',
-        noBukti: 'BKT-02',
-        penerimaan: 0,
-        pengeluaran: secondWithdrawal,
-        kategori: 'TARIK_TUNAI',
-      });
-    }
-  }
-
-  // Jika minggu mencapai Termin 2 (misal minggu 8+)
-  if (bkuWeekLimit >= 8) {
-    let termin2Iso = `${yearStr}-09-01`;
-    let termin2Slash = `01/09/${yearStr}`;
-    let termin2Bulan = `September ${yearStr}`;
-
-    if (progressWeeks && progressWeeks.length > 0) {
-      const w8 = progressWeeks.find((w) => w.mingguKe === 8) || progressWeeks[Math.min(7, progressWeeks.length - 1)];
-      const resolved8 = resolveWeekDates(w8, yearStr);
-      termin2Iso = resolved8.startDate;
-      termin2Slash = resolved8.startDateSlash;
-      termin2Bulan = resolved8.bulan;
-    }
-
-    const termin2Amount =
-      school?.termin2Nilai ||
-      (school?.totalAnggaran ? Math.round(school.totalAnggaran * ((school.termin2Persen || 30) / 100)) : 0);
-
-    if (termin2Amount > 0) {
-      // 3. Penerimaan Bank Termin 2
-      records.push({
-        id: 'bkb-init-termin2',
-        tanggal: termin2Slash,
-        tanggalObj: termin2Iso,
-        bulan: termin2Bulan,
-        uraian: 'Penerimaan Dana Revitalisasi Termin 2 (30%) ke Rekening Bank',
-        noBukti: `BB-02/${yearStr}`,
-        penerimaan: termin2Amount,
+        id: `bkb-penerimaan-${pTx.id || idx}`,
+        tanggal: pTx.tanggal,
+        tanggalObj: pTx.tanggalObj || parseTxDateToIso(pTx.tanggal),
+        bulan: pTx.bulan,
+        uraian: pTx.uraian,
+        noBukti: pTx.noBukti || `BB-${String(idx + 1).padStart(2, '0')}/${yearStr}`,
+        penerimaan: pTx.penerimaan,
         pengeluaran: 0,
         kategori: 'PENERIMAAN_TERMIN',
       });
+    });
+  } else {
+    // Fallback default receipts if BKU has no penerimaan yet
+    const t1Nom = school?.termin1Nilai || Math.round((school?.totalAnggaran || 0) * 0.7);
+    const t2Nom = school?.termin2Nilai || Math.round((school?.totalAnggaran || 0) * 0.3);
 
-      // 4. Penarikan Tunai Termin 2 dari Bank untuk Kas Tunai
-      const withdrawT2 = Math.round(termin2Amount * 0.7);
+    let startIso = `${yearStr}-07-01`;
+    let startSlash = `01/07/${yearStr}`;
+    let startBulan = `Juli ${yearStr}`;
+
+    if (progressWeeks && progressWeeks.length > 0) {
+      const w1 = progressWeeks.find((w) => w.mingguKe === 1) || progressWeeks[0];
+      const resolved = resolveWeekDates(w1, yearStr);
+      startIso = resolved.startDate;
+      startSlash = resolved.startDateSlash;
+      startBulan = resolved.bulan;
+    }
+
+    if (t1Nom > 0) {
       records.push({
-        id: 'bkb-withdraw-termin2',
-        tanggal: termin2Slash,
-        tanggalObj: termin2Iso,
-        bulan: termin2Bulan,
-        uraian: 'Penarikan Tunai dari Bank (Termin 2) untuk Kas Tunai Operasional BKT',
-        noBukti: 'BKT-03',
+        id: 'bkb-init-termin1',
+        tanggal: startSlash,
+        tanggalObj: startIso,
+        bulan: startBulan,
+        uraian: 'Penerimaan Dana Revitalisasi Termin 1 (70%) ke Rekening Bank',
+        noBukti: `BB-01/${yearStr}`,
+        penerimaan: t1Nom,
+        pengeluaran: 0,
+        kategori: 'PENERIMAAN_TERMIN',
+      });
+    }
+
+    if (t2Nom > 0) {
+      let t2Iso = `${yearStr}-09-01`;
+      let t2Slash = `01/09/${yearStr}`;
+      let t2Bulan = `September ${yearStr}`;
+
+      if (progressWeeks && progressWeeks.length > 0) {
+        const w8 = progressWeeks.find((w) => w.mingguKe === 8) || progressWeeks[Math.min(7, progressWeeks.length - 1)];
+        const res8 = resolveWeekDates(w8, yearStr);
+        t2Iso = res8.startDate;
+        t2Slash = res8.startDateSlash;
+        t2Bulan = res8.bulan;
+      }
+
+      records.push({
+        id: 'bkb-init-termin2',
+        tanggal: t2Slash,
+        tanggalObj: t2Iso,
+        bulan: t2Bulan,
+        uraian: 'Penerimaan Dana Revitalisasi Termin 2 (30%) ke Rekening Bank',
+        noBukti: `BB-02/${yearStr}`,
+        penerimaan: t2Nom,
+        pengeluaran: 0,
+        kategori: 'PENERIMAAN_TERMIN',
+      });
+    }
+  }
+
+  // 2. Harmonize BKB SIPLAH debits 1-to-1 with BKU
+  const harmonizedSiplah = harmonizeBkbRecordsWithSiplah([], bkuList, school);
+  harmonizedSiplah.forEach((s) => records.push(s));
+
+  // 3. Dynamic TARIK_TUNAI calculation based on actual cash expenses in BKU
+  const cashExpenses = (bkuList || [])
+    .filter((tx) => {
+      if (tx.jenis === 'PENERIMAAN') return false;
+      const isSiplah =
+        tx.metodeBayar === 'BANK' ||
+        tx.kategoriBiaya === 'Siplah' ||
+        tx.kategoriBiaya === 'SIPLAH' ||
+        /siplah|daring/i.test(`${tx.noBukti || ''} ${tx.uraian || ''} ${tx.kategoriBiaya || ''}`);
+      return !isSiplah;
+    })
+    .sort((a, b) => {
+      const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
+      const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
+      return isoA.localeCompare(isoB);
+    });
+
+  const totalCashNeed = cashExpenses.reduce((s, c) => s + (c.pengeluaran || 0), 0);
+
+  if (totalCashNeed > 0) {
+    let runningCash = 0;
+    let totalWithdrawn = 0;
+    let withdrawalCount = 0;
+
+    cashExpenses.forEach((exp, idx) => {
+      const expNom = exp.pengeluaran || 0;
+
+      if (runningCash < expNom) {
+        const expIso = exp.tanggalObj || parseTxDateToIso(exp.tanggal);
+
+        let targetWindowSum = 0;
+        for (let j = idx; j < cashExpenses.length; j++) {
+          const nextIso = cashExpenses[j].tanggalObj || parseTxDateToIso(cashExpenses[j].tanggal);
+          const diffDays = Math.round(
+            (new Date(nextIso).getTime() - new Date(expIso).getTime()) / (1000 * 3600 * 24)
+          );
+          if (diffDays <= 28) {
+            targetWindowSum += cashExpenses[j].pengeluaran || 0;
+          } else {
+            break;
+          }
+        }
+
+        const neededRaw = Math.max(expNom - runningCash, targetWindowSum - runningCash);
+        let withdrawAmount = Math.ceil(neededRaw / 1000000) * 1000000;
+
+        const maxAllowed = totalCashNeed - totalWithdrawn;
+        withdrawAmount = Math.min(withdrawAmount, maxAllowed > 0 ? maxAllowed : withdrawAmount);
+
+        if (withdrawAmount <= 0 && totalWithdrawn < totalCashNeed) {
+          withdrawAmount = totalCashNeed - totalWithdrawn;
+        }
+
+        if (withdrawAmount > 0) {
+          withdrawalCount++;
+          const padIdx = String(withdrawalCount).padStart(2, '0');
+
+          records.push({
+            id: `bkb-withdraw-${exp.id || withdrawalCount}`,
+            tanggal: exp.tanggal,
+            tanggalObj: expIso,
+            bulan: exp.bulan,
+            uraian: `Penarikan Tunai dari Bank (Tahap ${withdrawalCount}) untuk Kas Tunai Operasional BKT`,
+            noBukti: `BKT-${padIdx}`,
+            penerimaan: 0,
+            pengeluaran: withdrawAmount,
+            kategori: 'TARIK_TUNAI',
+          });
+
+          totalWithdrawn += withdrawAmount;
+          runningCash += withdrawAmount;
+        }
+      }
+
+      runningCash -= expNom;
+    });
+
+    if (totalWithdrawn < totalCashNeed) {
+      const remainingDeficit = totalCashNeed - totalWithdrawn;
+      withdrawalCount++;
+      const lastExp = cashExpenses[cashExpenses.length - 1];
+      records.push({
+        id: `bkb-withdraw-final-${Date.now()}`,
+        tanggal: lastExp?.tanggal || records[0]?.tanggal || `01/07/${yearStr}`,
+        tanggalObj: lastExp?.tanggalObj || records[0]?.tanggalObj || `${yearStr}-07-01`,
+        bulan: lastExp?.bulan || records[0]?.bulan || `Juli ${yearStr}`,
+        uraian: `Penarikan Tunai dari Bank (Tahap ${withdrawalCount}) Pelunasan Belanja Tunai`,
+        noBukti: `BKT-${String(withdrawalCount).padStart(2, '0')}`,
         penerimaan: 0,
-        pengeluaran: withdrawT2,
+        pengeluaran: remainingDeficit,
+        kategori: 'TARIK_TUNAI',
+      });
+    }
+  } else {
+    const t1Nom = school?.termin1Nilai || Math.round((school?.totalAnggaran || 0) * 0.7);
+    if (t1Nom > 0) {
+      const firstRec = records[0];
+      records.push({
+        id: 'bkb-withdraw-default-1',
+        tanggal: firstRec?.tanggal || `01/07/${yearStr}`,
+        tanggalObj: firstRec?.tanggalObj || `${yearStr}-07-01`,
+        bulan: firstRec?.bulan || `Juli ${yearStr}`,
+        uraian: 'Penarikan Tunai dari Bank (Tahap 1) untuk Kas Tunai Operasional BKT',
+        noBukti: 'BKT-01',
+        penerimaan: 0,
+        pengeluaran: Math.round(t1Nom * 0.7),
         kategori: 'TARIK_TUNAI',
       });
     }
   }
 
-  return records;
+  return calculateRunningBkb(
+    records.sort((a, b) => {
+      const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
+      const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
+      if (isoA !== isoB) return isoA.localeCompare(isoB);
+      if ((a.penerimaan || 0) > 0 && (b.penerimaan || 0) === 0) return -1;
+      if ((b.penerimaan || 0) > 0 && (a.penerimaan || 0) === 0) return 1;
+      return 0;
+    })
+  );
 }
 
 /**
@@ -210,11 +307,7 @@ export function calculateIntegratedBkt(
           bkbTx.kategori === 'BIAYA_ADMIN' ||
           bkbTx.kategori === 'SIPLAH' ||
           bkbTx.kategori === 'BELANJA_NON_TUNAI' ||
-          /siplah|non-tunai|non tunai|daring|transfer/i.test(`${bkbTx.kategori || ''} ${bkbTx.uraian || ''} ${bkbTx.noBukti || ''}`) ||
-          Math.abs((bkbTx.pengeluaran || 0) - 19649948.47) < 500 ||
-          Math.abs((bkbTx.pengeluaran || 0) - 19650000) < 500 ||
-          Math.abs((bkbTx.pengeluaran || 0) - 22455000) < 500 ||
-          Math.abs((bkbTx.pengeluaran || 0) - 42104948.47) < 500;
+          /siplah|non-tunai|non tunai|daring/i.test(`${bkbTx.kategori || ''} ${bkbTx.uraian || ''} ${bkbTx.noBukti || ''}`);
 
         if (isNonCashBankDebit) return;
 
@@ -907,10 +1000,72 @@ export function synthesizeKwitansiFromTransaction(
  */
 export function harmonizeBkbRecordsWithSiplah(
   bkbRecords: BkbTransaction[],
+  bkuList: BkuTransaction[] = [],
   school?: SchoolMasterData
 ): BkbTransaction[] {
-  if (!bkbRecords || bkbRecords.length === 0) return bkbRecords;
-  return bkbRecords;
+  const result: BkbTransaction[] = [];
+  const bkbArray = Array.isArray(bkbRecords) ? bkbRecords : [];
+
+  // 1. Keep non-SIPLAH BKB transactions (PENERIMAAN_TERMIN, TARIK_TUNAI, BIAYA_ADMIN, BELANJA_NON_TUNAI)
+  bkbArray.forEach((bkb) => {
+    if (bkb.kategori !== 'SIPLAH') {
+      result.push(bkb);
+    }
+  });
+
+  // 2. Find all SIPLAH BKU transactions
+  const siplahBkuTxs = (bkuList || []).filter((tx) => {
+    if (tx.jenis === 'PENERIMAAN') return false;
+    return (
+      tx.metodeBayar === 'BANK' ||
+      tx.kategoriBiaya === 'Siplah' ||
+      tx.kategoriBiaya === 'SIPLAH' ||
+      /siplah|daring/i.test(`${tx.noBukti || ''} ${tx.uraian || ''} ${tx.kategoriBiaya || ''}`)
+    );
+  });
+
+  // 3. For each SIPLAH BKU transaction, ensure exactly ONE BKB debit row of category 'SIPLAH'
+  const yearStr = school?.tahunAnggaran?.trim() || '2026';
+  siplahBkuTxs.forEach((bkuTx, idx) => {
+    const existingBkb = bkbArray.find(
+      (b) =>
+        b.kategori === 'SIPLAH' &&
+        ((bkuTx.kwitansiIdRef && b.kwitansiIdRef === bkuTx.kwitansiIdRef) ||
+          (bkuTx.noBukti && b.noBukti === bkuTx.noBukti) ||
+          b.id === `bkb-siplah-${bkuTx.id}` ||
+          (b.tanggal === bkuTx.tanggal && Math.abs(b.pengeluaran - bkuTx.pengeluaran) < 2))
+    );
+
+    const padIdx = String(idx + 1).padStart(2, '0');
+    const storeNameMatch = bkuTx.uraian.match(/(?:toko|mitra|via|dari)\s+([A-Za-z0-9\.\&\s\-]+)/i);
+    const vendorLabel = storeNameMatch ? storeNameMatch[1].trim() : 'SipLah Online';
+
+    const siplahBkbRow: BkbTransaction = {
+      id: existingBkb?.id || `bkb-siplah-${bkuTx.id || idx}`,
+      tanggal: bkuTx.tanggal,
+      tanggalObj: bkuTx.tanggalObj || parseTxDateToIso(bkuTx.tanggal),
+      bulan: bkuTx.bulan,
+      uraian: bkuTx.uraian.toLowerCase().includes('pembayaran')
+        ? bkuTx.uraian
+        : `Pembayaran Non-Tunai Belanja SIPLah - ${vendorLabel}`,
+      noBukti: bkuTx.noBukti || `SipLah/${padIdx}/${yearStr}`,
+      penerimaan: 0,
+      pengeluaran: bkuTx.pengeluaran,
+      kategori: 'SIPLAH',
+      kwitansiIdRef: bkuTx.kwitansiIdRef,
+    };
+
+    result.push(siplahBkbRow);
+  });
+
+  return result.sort((a, b) => {
+    const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
+    const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
+    if (isoA !== isoB) return isoA.localeCompare(isoB);
+    if ((a.penerimaan || 0) > 0 && (b.penerimaan || 0) === 0) return -1;
+    if ((b.penerimaan || 0) > 0 && (a.penerimaan || 0) === 0) return 1;
+    return 0;
+  });
 }
 
 /**

@@ -4,6 +4,8 @@ import {
   ProjectProgressWeek,
 } from '../../types';
 import { parseTxDateToIso } from '../../utils/monthHelper';
+import { distributeRupiah } from '../../utils/money';
+import { realSchoolData as defaultRealSchoolData } from '../../data/realSchoolData';
 import {
   isReceiptLocked,
   splitMaterialPurchases,
@@ -187,11 +189,33 @@ export function normalizeMaterialItems<T extends { namaBarang: string; volume: n
   const result: T[] = [];
 
   groupMap.forEach((group) => {
-    const totalRawVol = group.items.reduce((s, it) => s + it.volume, 0);
-    const totalRawJml = group.items.reduce((s, it) => s + it.jumlah, 0);
+    const totalRawVol = group.items.reduce((s, it) => s + (it.volume || 0), 0);
+    const totalRawJml = group.items.reduce((s, it) => s + (it.jumlah || 0), 0);
     const sampleItem = group.items[0];
     const rawSatuan = (group.satuan || '').toLowerCase().trim();
     const rawName = group.namaBarang.toLowerCase();
+
+    // 1. Jika semua item dalam grup isBarangPabrikasi atau isPreservedUnitItem:
+    // JANGAN pakai logika konversi/pembulatan/harga default.
+    // Jumlahkan jumlah asli RAB, volume = sum volume, hargaSatuan = jumlah / volume (2 desimal). Satuan tetap.
+    const isAllPabrikasiOrPreserved = group.items.every(
+      (it) => (it as any).isBarangPabrikasi === true || isPreservedUnitItem(it.namaBarang, it.satuan, (it as any).isBarangPabrikasi)
+    );
+
+    if (isAllPabrikasiOrPreserved) {
+      const safeVol = totalRawVol > 0 ? totalRawVol : 1;
+      const safeHarga = safeVol > 0 ? Math.round((totalRawJml / safeVol) * 100) / 100 : Math.round(sampleItem.hargaSatuan || 0);
+      result.push({
+        ...sampleItem,
+        namaBarang: group.namaBarang,
+        volume: safeVol,
+        satuan: sampleItem.satuan || group.satuan || 'unit',
+        hargaSatuan: safeHarga,
+        jumlah: totalRawJml,
+        isBarangPabrikasi: true,
+      });
+      return;
+    }
 
     let realisticVolume: number;
     let realisticSatuan = group.satuan;
@@ -393,7 +417,7 @@ export function normalizeMaterialItems<T extends { namaBarang: string; volume: n
       realisticVolume = totalRawVol < 1 ? 1 : Math.round(totalRawVol);
     }
 
-    let unitPrice = 25000;
+    let unitPrice = 0;
     if (/paku|kawat|bendrat/i.test(rawName)) {
       unitPrice = /kawat|bendrat/i.test(rawName) ? 24000 : 21500;
       if (!/kg/i.test(realisticSatuan)) realisticSatuan = 'Kg';
@@ -408,15 +432,25 @@ export function normalizeMaterialItems<T extends { namaBarang: string; volume: n
     } else if (/hollow/i.test(rawName)) {
       unitPrice = 55000;
       if (!/btg|batang/i.test(realisticSatuan)) realisticSatuan = 'btg';
-    } else if (sampleItem.hargaSatuan > 0 && sampleItem.hargaSatuan <= 150000) {
+    } else if (sampleItem.hargaSatuan > 0) {
       unitPrice = sampleItem.hargaSatuan;
+    } else if (totalRawJml > 0 && realisticVolume > 0) {
+      unitPrice = Math.round((totalRawJml / realisticVolume) * 100) / 100;
     }
 
-    const finalJumlah = realisticVolume * unitPrice;
+    let finalItemName = group.namaBarang;
+    if (unitPrice <= 0 && totalRawJml <= 0) {
+      unitPrice = 0;
+      if (!finalItemName.includes('(Perlu Ditinjau)')) {
+        finalItemName = `${finalItemName} (Perlu Ditinjau)`;
+      }
+    }
+
+    const finalJumlah = totalRawJml > 0 ? totalRawJml : Math.round(realisticVolume * unitPrice);
 
     result.push({
       ...sampleItem,
-      namaBarang: group.namaBarang,
+      namaBarang: finalItemName,
       volume: realisticVolume,
       satuan: realisticSatuan,
       hargaSatuan: unitPrice,
@@ -514,71 +548,119 @@ export function getRealisticSmkkItemsForNominal(nominal: number): Array<{
 }
 
 export function getReconstitutedKusenPintuUnitItems<
-  T extends { namaBarang: string; volume: number; satuan: string; hargaSatuan: number; jumlah: number }
->(rawItems: T[], targetNom?: number): T[] {
+  T extends { namaBarang: string; volume: number; satuan: string; hargaSatuan: number; jumlah: number; isBarangPabrikasi?: boolean }
+>(rawItems: T[], targetNom?: number, schoolData?: RealSchoolData): T[] {
+  const rab = schoolData || defaultRealSchoolData;
+  let pj1Rab = { volume: 2, hargaSatuan: 3612291.88, jumlah: 7224583.76 };
+  let j1Rab = { volume: 10, hargaSatuan: 3893845.59, jumlah: 38938455.92 };
+
+  for (const div of rab?.divisions || []) {
+    for (const it of div.items || []) {
+      const u = (it.uraian || '').toLowerCase();
+      if (/pintu utama|pj1\b/i.test(u)) {
+        pj1Rab = {
+          volume: it.volume || 2,
+          hargaSatuan: it.hargaSatuan,
+          jumlah: it.jumlah || Math.round((it.volume || 2) * it.hargaSatuan),
+        };
+      } else if (/jendela alum|j1\b/i.test(u)) {
+        j1Rab = {
+          volume: it.volume || 10,
+          hargaSatuan: it.hargaSatuan,
+          jumlah: it.jumlah || Math.round((it.volume || 10) * it.hargaSatuan),
+        };
+      }
+    }
+  }
+
   const hasDoor = rawItems.some((it) => /daun pintu|kusen.*4|p1j1|pj1\b|pintu/i.test(it.namaBarang));
   const hasWindow = rawItems.some((it) => /daun jendela|kusen.*3|\bj1\b|jendela/i.test(it.namaBarang));
 
-  const items: { namaBarang: string; volume: number; satuan: string; hargaSatuan: number; jumlah: number }[] = [];
-
-  const pj1BahanPrice = 3536096.5;
-  const j1BahanPrice = 3873765;
+  const items: { namaBarang: string; volume: number; satuan: string; hargaSatuan: number; jumlah: number; isBarangPabrikasi?: boolean }[] = [];
 
   if (hasDoor && hasWindow) {
-    items.push({
-      namaBarang: 'Pasang Pintu Utama (PJ1)',
-      volume: 2,
-      satuan: 'unit',
-      hargaSatuan: pj1BahanPrice,
-      jumlah: Math.round(2 * pj1BahanPrice),
-    });
-    items.push({
-      namaBarang: 'Pasang Jendela Alumunium (J1)',
-      volume: 10,
-      satuan: 'unit',
-      hargaSatuan: j1BahanPrice,
-      jumlah: Math.round(10 * j1BahanPrice),
-    });
+    if (targetNom && targetNom > 0) {
+      const nominals = distributeRupiah(targetNom, [Math.round(pj1Rab.jumlah), Math.round(j1Rab.jumlah)]);
+      items.push({
+        namaBarang: 'Pasang Pintu Utama (PJ1)',
+        volume: pj1Rab.volume,
+        satuan: 'unit',
+        hargaSatuan: Math.round((nominals[0] / pj1Rab.volume) * 100) / 100,
+        jumlah: nominals[0],
+        isBarangPabrikasi: true,
+      });
+      items.push({
+        namaBarang: 'Pasang Jendela Alumunium (J1)',
+        volume: j1Rab.volume,
+        satuan: 'unit',
+        hargaSatuan: Math.round((nominals[1] / j1Rab.volume) * 100) / 100,
+        jumlah: nominals[1],
+        isBarangPabrikasi: true,
+      });
+    } else {
+      const pj1Jml = Math.round(pj1Rab.jumlah);
+      const j1Jml = Math.round(j1Rab.jumlah);
+      items.push({
+        namaBarang: 'Pasang Pintu Utama (PJ1)',
+        volume: pj1Rab.volume,
+        satuan: 'unit',
+        hargaSatuan: Math.round((pj1Jml / pj1Rab.volume) * 100) / 100,
+        jumlah: pj1Jml,
+        isBarangPabrikasi: true,
+      });
+      items.push({
+        namaBarang: 'Pasang Jendela Alumunium (J1)',
+        volume: j1Rab.volume,
+        satuan: 'unit',
+        hargaSatuan: Math.round((j1Jml / j1Rab.volume) * 100) / 100,
+        jumlah: j1Jml,
+        isBarangPabrikasi: true,
+      });
+    }
   } else if (hasDoor) {
-    const vol = 2;
-    const jml = targetNom && targetNom > 0 ? targetNom : Math.round(vol * pj1BahanPrice);
-    const harga = Math.round(jml / vol);
+    const vol = pj1Rab.volume;
+    const jml = targetNom && targetNom > 0 ? targetNom : Math.round(pj1Rab.jumlah);
+    const harga = Math.round((jml / vol) * 100) / 100;
     items.push({
       namaBarang: 'Pasang Pintu Utama (PJ1)',
       volume: vol,
       satuan: 'unit',
       hargaSatuan: harga,
       jumlah: jml,
+      isBarangPabrikasi: true,
     });
   } else if (hasWindow) {
-    const vol = 10;
-    const jml = targetNom && targetNom > 0 ? targetNom : Math.round(vol * j1BahanPrice);
-    const harga = Math.round(jml / vol);
+    const vol = j1Rab.volume;
+    const jml = targetNom && targetNom > 0 ? targetNom : Math.round(j1Rab.jumlah);
+    const harga = Math.round((jml / vol) * 100) / 100;
     items.push({
       namaBarang: 'Pasang Jendela Alumunium (J1)',
       volume: vol,
       satuan: 'unit',
       hargaSatuan: harga,
       jumlah: jml,
+      isBarangPabrikasi: true,
     });
   } else {
+    const totalRab = Math.round(pj1Rab.jumlah + j1Rab.jumlah);
+    const effNom = targetNom && targetNom > 0 ? targetNom : totalRab;
+    const nominals = distributeRupiah(effNom, [Math.round(pj1Rab.jumlah), Math.round(j1Rab.jumlah)]);
     items.push({
-      namaBarang: 'Kusen & Pintu Jendela Lengkap (PJ1 & J1)',
-      volume: 1,
-      satuan: 'Set',
-      hargaSatuan: targetNom || 45809843,
-      jumlah: targetNom || 45809843,
+      namaBarang: 'Pasang Pintu Utama (PJ1)',
+      volume: pj1Rab.volume,
+      satuan: 'unit',
+      hargaSatuan: Math.round((nominals[0] / pj1Rab.volume) * 100) / 100,
+      jumlah: nominals[0],
+      isBarangPabrikasi: true,
     });
-  }
-
-  if (targetNom && targetNom > 0 && items.length > 0) {
-    const sum = items.reduce((s, it) => s + it.jumlah, 0);
-    const diff = targetNom - sum;
-    if (diff !== 0) {
-      const last = items[items.length - 1];
-      last.jumlah += diff;
-      last.hargaSatuan = Math.round(last.jumlah / last.volume);
-    }
+    items.push({
+      namaBarang: 'Pasang Jendela Alumunium (J1)',
+      volume: j1Rab.volume,
+      satuan: 'unit',
+      hargaSatuan: Math.round((nominals[1] / j1Rab.volume) * 100) / 100,
+      jumlah: nominals[1],
+      isBarangPabrikasi: true,
+    });
   }
 
   return items as unknown as T[];
@@ -1205,6 +1287,23 @@ export function consolidateAndStandardizeReceiptItems<
   });
 
   const consolidatedList = Array.from(map.values()).map((entry) => {
+    const isPabOrPreserved =
+      entry.isBarangPabrikasi === true ||
+      isPreservedUnitItem(entry.namaBarang, entry.satuan, entry.isBarangPabrikasi);
+
+    if (isPabOrPreserved) {
+      const finalVol = entry.totalVol > 0 ? Math.round(entry.totalVol) : 1;
+      const roundedHarga = finalVol > 0 ? Math.round((entry.totalJml / finalVol) * 100) / 100 : entry.totalJml;
+      return {
+        namaBarang: entry.namaBarang,
+        volume: finalVol,
+        satuan: entry.satuan || 'unit',
+        hargaSatuan: roundedHarga,
+        jumlah: entry.totalJml,
+        isBarangPabrikasi: true,
+      } as unknown as T;
+    }
+
     const finalVol = entry.satuan === 'm³' || entry.satuan === 'm²'
       ? Math.max(1, Math.round(entry.totalVol * 100) / 100)
       : Math.max(1, Math.round(entry.totalVol));
@@ -1215,8 +1314,6 @@ export function consolidateAndStandardizeReceiptItems<
     if (rawHarga >= 10000) {
       if (rawHarga % 500 === 0) {
         roundedHarga = rawHarga;
-      } else if (rawHarga >= 100000) {
-        roundedHarga = Math.round(rawHarga / 500) * 500;
       } else {
         roundedHarga = Math.round(rawHarga / 500) * 500;
       }
@@ -1244,17 +1341,13 @@ export function consolidateAndStandardizeReceiptItems<
     const diff = kwNominal - currentSum;
 
     if (diff !== 0) {
-      const lastIdx = consolidatedList.length - 1;
-      const last = consolidatedList[lastIdx];
-      const newLastJml = Math.max(1, last.jumlah + diff);
-      const newLastVol = last.volume;
-      const newLastHarga = Math.round((newLastJml / newLastVol) * 100) / 100;
-
-      consolidatedList[lastIdx] = {
-        ...last,
-        hargaSatuan: newLastHarga > 0 ? newLastHarga : last.hargaSatuan,
-        jumlah: newLastJml,
-      };
+      const weights = consolidatedList.map((i) => Math.max(1, i.jumlah));
+      const nominals = distributeRupiah(kwNominal, weights);
+      consolidatedList.forEach((item, idx) => {
+        item.jumlah = nominals[idx];
+        const safeVol = item.volume > 0 ? item.volume : 1;
+        item.hargaSatuan = Math.round((item.jumlah / safeVol) * 100) / 100;
+      });
     }
   }
 
@@ -1335,6 +1428,32 @@ export function deduplicateKwitansiList<
       if (!isDuplicate && normNominal > 0 && normStore && seenKeys.has(keyStoreDateNom)) {
         isDuplicate = true;
       }
+
+      const isFixedCategory =
+        normTipe === 'PINTU_JENDELA' ||
+        normTipe === 'PERABOT' ||
+        normTipe === 'SMKK' ||
+        normTipe === 'CETAK' ||
+        normTipe === 'KONSULTAN' ||
+        normTipe === 'SIPLAH' ||
+        /fur[\/\-_]|kw[\/\-_]?fur|siplah|smkk|ctk|kons-p|kons-w|adm/i.test(normNoBukti);
+
+      const fixedCatName =
+        /fur/i.test(normNoBukti) || normTipe === 'PINTU_JENDELA' || normTipe === 'PERABOT' ? 'FURNITUR' :
+        /siplah/i.test(normNoBukti) || normTipe === 'SIPLAH' ? 'SIPLAH' :
+        /smkk/i.test(normNoBukti) || normTipe === 'SMKK' ? 'SMKK' :
+        /ctk/i.test(normNoBukti) || normTipe === 'CETAK' ? 'CETAK' :
+        /kons-p/i.test(normNoBukti) ? 'KONSULTAN_PERENCANA' :
+        /kons-w/i.test(normNoBukti) ? 'PENGAWAS' :
+        /adm/i.test(normNoBukti) || /pengelola|administrasi/i.test(normUraian) ? 'PENGELOLA' : normTipe;
+
+      const keyFixedCatStoreNom = `FIXED:${fixedCatName}|STORE:${normStore || 'default'}|NOM:${normNominal}`;
+
+      if (!isDuplicate && isFixedCategory && normNominal > 0) {
+        if (seenKeys.has(keyFixedCatStoreNom)) {
+          isDuplicate = true;
+        }
+      }
     }
 
     if (!isDuplicate) {
@@ -1344,6 +1463,15 @@ export function deduplicateKwitansiList<
       if (normNominal > 0) {
         seenKeys.add(keyUraianNom);
         if (normStore) seenKeys.add(keyStoreDateNom);
+        const fixedCatNameAdd =
+          /fur/i.test(normNoBukti) || normTipe === 'PINTU_JENDELA' || normTipe === 'PERABOT' ? 'FURNITUR' :
+          /siplah/i.test(normNoBukti) || normTipe === 'SIPLAH' ? 'SIPLAH' :
+          /smkk/i.test(normNoBukti) || normTipe === 'SMKK' ? 'SMKK' :
+          /ctk/i.test(normNoBukti) || normTipe === 'CETAK' ? 'CETAK' :
+          /kons-p/i.test(normNoBukti) ? 'KONSULTAN_PERENCANA' :
+          /kons-w/i.test(normNoBukti) ? 'PENGAWAS' :
+          /adm/i.test(normNoBukti) || /pengelola|administrasi/i.test(normUraian) ? 'PENGELOLA' : normTipe;
+        seenKeys.add(`FIXED:${fixedCatNameAdd}|STORE:${normStore || 'default'}|NOM:${normNominal}`);
       }
       result.push(item);
     }

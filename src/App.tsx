@@ -40,6 +40,7 @@ import {
   reconcileCashBalances,
   migrateAndTransformAppState,
   harmonizeBkbRecordsWithSiplah,
+  syncBkbFromBku,
 } from './services/cashLedgerIntegrationService';
 import {
   SchoolTenant,
@@ -737,17 +738,6 @@ export default function App() {
     setTimeout(() => setSwitchNotification(null), 5000);
   };
 
-  // Derived calculations
-  const effectiveBkbList = useMemo(() => {
-    if (appState.bkbRecords && appState.bkbRecords.length > 0) {
-      const harmonized = harmonizeBkbRecordsWithSiplah(appState.bkbRecords, appState.school);
-      return calculateRunningBkb(harmonized);
-    }
-    const standard = generateStandardBkbRecords(appState.school, appState.progressWeeks, bkuWeekLimit);
-    const harmonized = harmonizeBkbRecordsWithSiplah(standard, appState.school);
-    return calculateRunningBkb(harmonized);
-  }, [appState.bkbRecords, appState.school, appState.progressWeeks, bkuWeekLimit]);
-
   const bkuList = useMemo(() => {
     return calculateBkuFromTransactions(
       appState.kwitansiList,
@@ -757,8 +747,7 @@ export default function App() {
       appState.deletedBkuIds || [],
       appState.wageReports || [],
       bkuWeekLimit,
-      appState.stores || [],
-      effectiveBkbList
+      appState.stores || []
     );
   }, [
     appState.kwitansiList,
@@ -769,8 +758,15 @@ export default function App() {
     appState.wageReports,
     bkuWeekLimit,
     appState.stores,
-    effectiveBkbList,
   ]);
+
+  const effectiveBkbList = useMemo(() => {
+    if (appState.bkbRecords && appState.bkbRecords.length > 0) {
+      const harmonized = harmonizeBkbRecordsWithSiplah(appState.bkbRecords, bkuList, appState.school);
+      return calculateRunningBkb(harmonized);
+    }
+    return generateStandardBkbRecords(appState.school, appState.progressWeeks, bkuWeekLimit, bkuList);
+  }, [appState.bkbRecords, appState.school, appState.progressWeeks, bkuWeekLimit, bkuList]);
 
   const bktList = useMemo(() => {
     return calculateIntegratedBkt(bkuList, effectiveBkbList);
@@ -1224,8 +1220,8 @@ export default function App() {
 
   const handleClearAllBku = () => {
     isDirtyRef.current = true;
-    const allCurrentBkuIds = bkuList.map((t) => t.id);
-    const allKwRefs = bkuList.map((t) => t.kwitansiIdRef).filter(Boolean) as string[];
+    const allCurrentBkuIds = bkuList.map((t: BkuTransaction) => t.id);
+    const allKwRefs = bkuList.map((t: BkuTransaction) => t.kwitansiIdRef).filter(Boolean) as string[];
 
     setAppState((prev) => {
       return {
@@ -1297,12 +1293,24 @@ export default function App() {
     setTimeout(() => setSwitchNotification(null), 4000);
   };
 
-  const handleUpdateBkuWeekLimit = (limit: number) => {
-    setBkuWeekLimit(limit);
-    localStorage.setItem('bkuWeekLimit', String(limit));
-    setSwitchNotification(`✅ Batas minggu BKU berhasil diubah ke Minggu ${limit}. Seluruh BKU & Saldo disesuaikan.`);
-    setTimeout(() => setSwitchNotification(null), 3000);
-  };
+  const handleSyncBkbFromBku = useCallback(() => {
+    isDirtyRef.current = true;
+    setAppState((prev) => {
+      const activeBku = prev.manualBkuTransactions && prev.manualBkuTransactions.length > 0
+        ? prev.manualBkuTransactions
+        : bkuList;
+
+      const synchronizedBkb = syncBkbFromBku(activeBku, prev.school, prev.progressWeeks);
+
+      return {
+        ...prev,
+        bkbRecords: synchronizedBkb,
+      };
+    });
+
+    setSwitchNotification('✅ Pembukuan BKB dan BKT berhasil disinkronkan dari BKU. Selisih kas = Rp 0.');
+    setTimeout(() => setSwitchNotification(null), 5000);
+  }, [bkuList]);
 
   // Handlers
   const handleUpdateSchool = (updated: SchoolMasterData) => {
@@ -1694,7 +1702,7 @@ export default function App() {
         return m;
       });
 
-      const harmonizedBkb = harmonizeBkbRecordsWithSiplah(prev.bkbRecords || [], prev.school);
+      const harmonizedBkb = harmonizeBkbRecordsWithSiplah(prev.bkbRecords || [], bkuList, prev.school);
 
       return {
         ...prev,
@@ -2206,7 +2214,7 @@ export default function App() {
         : effectiveBkbList;
       return {
         ...prev,
-        bkbRecords: currentList.map((b) =>
+        bkbRecords: currentList.map((b: BkbTransaction) =>
           b.id === updatedTx.id || (b.noBukti && b.noBukti !== '-' && b.noBukti === updatedTx.noBukti)
             ? updatedTx
             : b
@@ -2224,7 +2232,7 @@ export default function App() {
       return {
         ...prev,
         bkbRecords: currentList.filter(
-          (b) =>
+          (b: BkbTransaction) =>
             b.id !== txToDelete.id &&
             (b.noBukti === '-' || b.noBukti !== txToDelete.noBukti)
         ),
@@ -2240,11 +2248,16 @@ export default function App() {
       const currentList = prev.bkbRecords !== undefined ? prev.bkbRecords : effectiveBkbList;
       return {
         ...prev,
-        bkbRecords: currentList.filter((b) => !idsToDelete.has(b.id)),
+        bkbRecords: currentList.filter((b: BkbTransaction) => !idsToDelete.has(b.id)),
       };
     });
     setSwitchNotification(`✅ Berhasil menghapus ${recordsToDelete.length} transaksi Bank (BKB) secara massal.`);
     setTimeout(() => setSwitchNotification(null), 4000);
+  };
+
+  const handleUpdateBkuWeekLimit = (limit: number) => {
+    setBkuWeekLimit(limit);
+    localStorage.setItem('bkuWeekLimit', String(limit));
   };
 
   const handleClearAllBkb = () => {
@@ -2519,6 +2532,8 @@ Lanjutkan pengosongan data transaksi?`)
         <ReconciliationBanner
           alerts={reconciliationReport.alerts}
           onNavigateTab={(tab) => setActiveTab(tab)}
+          appState={appState}
+          onSyncBkbFromBku={handleSyncBkbFromBku}
         />
 
         <Suspense
@@ -2692,6 +2707,7 @@ Lanjutkan pengosongan data transaksi?`)
             onUpdateBkbRecord={handleUpdateBkbRecord}
             onDeleteBkbRecord={handleDeleteBkbRecord}
             onInitStandardBkb={handleInitStandardBkb}
+            onSyncBkbFromBku={handleSyncBkbFromBku}
             onClearAllBkb={handleClearAllBkb}
             onBulkDeleteBkb={handleBulkDeleteBkb}
           />

@@ -26,6 +26,7 @@ import { WeeklyWageReport, WorkerItem, SchoolMasterData } from '../types';
 import { formatRupiah, formatNumber } from '../utils/formatters';
 import { getAhspWageRatesMap, getAhspWageRateForRole } from '../utils/divisionHelper';
 import { getBalancedBoronganAttendance } from '../utils/boronganHelper';
+import { getItemMaterialLaborSplit } from '../utils/ahspHelper';
 import { useCan } from '../hooks/useCan';
 
 interface WageManagerProps {
@@ -193,15 +194,8 @@ export const WageManager: React.FC<WageManagerProps> = ({
 
       // Helper to calculate labor nominal for a single item (supports UPAH and UPAH_BAHAN)
       const getItemLaborAmount = (it: any) => {
-        const cat = String(it.kategoriBiaya || '').toUpperCase().trim();
-        const j = Number(it.jumlah) || Math.round((Number(it.volume) || 1) * (Number(it.hargaSatuan) || 0));
-        if (cat === 'UPAH' || (/upah|tukang|pekerja|mandor|hok/i.test(it.uraian || '') && !/upah.*bahan|bahan.*upah/i.test(it.uraian || ''))) {
-          return j;
-        }
-        if (cat === 'UPAH_BAHAN' || cat === 'UPAH & BAHAN' || cat.includes('UPAH') || /upah.*bahan|bahan.*upah/i.test(it.uraian || '')) {
-          return Math.round(j * 0.35); // 35% labor portion for UPAH & BAHAN items!
-        }
-        return 0;
+        const split = getItemMaterialLaborSplit(it, realSchoolData?.ahspList || []);
+        return split.labor;
       };
 
       // Calculate total labor subtotal across RAB divisions (including UPAH_BAHAN)

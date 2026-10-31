@@ -11,6 +11,7 @@ import {
   RealSchoolData,
   AhspKomponen,
 } from '../types';
+import { getItemMaterialLaborSplit } from './ahspHelper';
 
 /**
  * Smart AHSP Budget Rebalancing Engine (Skema A: Proporsional ke Bahan Utama):
@@ -612,9 +613,14 @@ export function calculateSequentialWaterfallRpdItems(
         const vol100 = it.volume;
         const jml100 = it.jumlah;
 
-        // 1. Bahan portion (65%)
-        const jmlBahan = Math.round(jml100 * 0.65);
-        const volBahan = Math.max(0.01, Math.round(vol100 * 0.65 * 100) / 100);
+        const split = getItemMaterialLaborSplit(it, realData.ahspList || []);
+        const jmlBahan = split.material;
+        const jmlUpah = split.labor;
+        const matRatio = jml100 > 0 ? jmlBahan / jml100 : 0.6;
+        const upahRatio = jml100 > 0 ? jmlUpah / jml100 : 0.4;
+
+        // 1. Bahan portion
+        const volBahan = Math.max(0.01, Math.round(vol100 * matRatio * 100) / 100);
         const [bT1Jml, bT2Jml, bT1Vol, bT2Vol] = allocateWaterfallSplit(jmlBahan, volBahan, it.hargaSatuan, runningTotal, t1TargetRp);
         runningTotal += jmlBahan;
 
@@ -634,9 +640,8 @@ export function calculateSequentialWaterfallRpdItems(
           defaultToko: 'USAHA FAMILY',
         });
 
-        // 2. Upah portion (35%)
-        const jmlUpah = jml100 - jmlBahan;
-        const volUpah = Math.max(0.01, Math.round(vol100 * 0.35 * 100) / 100);
+        // 2. Upah portion
+        const volUpah = Math.max(0.01, Math.round(vol100 * upahRatio * 100) / 100);
         const upahHargaSat = volUpah > 0 ? Math.round(jmlUpah / volUpah) : it.hargaSatuan;
         const [uT1Jml, uT2Jml, uT1Vol, uT2Vol] = allocateWaterfallSplit(jmlUpah, volUpah, upahHargaSat, runningTotal, t1TargetRp);
         runningTotal += jmlUpah;

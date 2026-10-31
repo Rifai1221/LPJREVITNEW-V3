@@ -17,7 +17,8 @@ import {
   monthOrderMap,
 } from '../../utils/monthHelper';
 import { getAhspWageRateForRole } from '../../utils/divisionHelper';
-import { calcDppAndPpn, calcPph22, calcPph23 } from '../../utils/money';
+import { calcDppAndPpn, calcPph22, calcPph23, distributeRupiah, toRupiah } from '../../utils/money';
+import { getItemMaterialLaborSplit } from '../../utils/ahspHelper';
 import { getFiscalConfig } from '../../data/fiscalTaxParameters';
 import {
   isReceiptLocked,
@@ -36,6 +37,7 @@ import {
   isPreservedUnitItem,
   isPureDirectMaterial,
   consolidateAndStandardizeReceiptItems,
+  getReconstitutedKusenPintuUnitItems,
   renumberKwitansiChronologically,
 } from './kwitansiGenerator';
 import {
@@ -354,12 +356,25 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
         }
 
         const isFullAbsorption = progressRatio >= 0.95;
-        let execRabVol = isFullAbsorption
-          ? remainingRabVol
-          : Math.round(remainingRabVol * progressRatio * 1000) / 1000;
-
-        if (execRabVol <= 0 && progressRatio > 0 && (it.isBarangPabrikasi || (it.tags && it.tags.some((t) => /siplah|fur/i.test(t))) || isMeubilairDiv)) {
-          execRabVol = Math.max(1, Math.min(remainingRabVol, 1));
+        let execRabVol: number;
+        if (it.isBarangPabrikasi || isPreservedUnitItem(it.uraian, it.satuan, it.isBarangPabrikasi)) {
+          // Barang pabrikasi: dibayar per unit utuh saat terpasang, bukan pecahan unit per minggu.
+          const wholeUnits = Math.round(remainingRabVol * progressRatio);
+          if (isFullAbsorption) {
+            execRabVol = Math.round(remainingRabVol);
+          } else {
+            execRabVol = wholeUnits;
+          }
+          if (execRabVol <= 0 && progressRatio >= 0.5) {
+            execRabVol = Math.min(Math.round(remainingRabVol), 1);
+          }
+        } else {
+          execRabVol = isFullAbsorption
+            ? remainingRabVol
+            : Math.round(remainingRabVol * progressRatio * 1000) / 1000;
+          if (execRabVol <= 0 && progressRatio > 0 && ((it.tags && it.tags.some((t) => /siplah|fur/i.test(t))) || isMeubilairDiv)) {
+            execRabVol = Math.max(1, Math.min(remainingRabVol, 1));
+          }
         }
         if (execRabVol <= 0) return;
         const execRabJml = Math.round(execRabVol * it.hargaSatuan);
@@ -379,188 +394,125 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
           return;
         }
 
-        const ahspMatch = (realSchoolData?.ahspList || []).find((ah) => {
-          if (it.ahspIdRef && ah.id === it.ahspIdRef) return true;
-          const lowerAh = (ah.namaPekerjaan || '').toLowerCase().trim();
-          const lowerRab = it.uraian.toLowerCase().trim();
-          if (lowerAh === lowerRab || lowerAh.includes(lowerRab) || lowerRab.includes(lowerAh)) return true;
-
-          if (/bowplank|bouwplank|pengukuran|utzet/i.test(lowerRab) && /bowplank|bouwplank|pengukuran|utzet/i.test(lowerAh)) return true;
-          if (/papan nama/i.test(lowerRab) && /papan nama/i.test(lowerAh)) return true;
-          if (/air kerja|listrik/i.test(lowerRab) && /air kerja|listrik/i.test(lowerAh)) return true;
-          if (/galian/i.test(lowerRab) && /galian/i.test(lowerAh)) return true;
-          if (/urugan pasir/i.test(lowerRab) && /urugan pasir/i.test(lowerAh)) return true;
-          if (/pondasi|batu kali/i.test(lowerRab) && /pondasi|batu kali/i.test(lowerAh)) return true;
-          if (/beton/i.test(lowerRab) && /beton/i.test(lowerAh)) return true;
-          if (/bata/i.test(lowerRab) && /bata/i.test(lowerAh)) return true;
-          if (/plesteran/i.test(lowerRab) && /plesteran/i.test(lowerAh)) return true;
-          if (/keramik/i.test(lowerRab) && /keramik/i.test(lowerAh)) return true;
-          if (/plafon|gypsum/i.test(lowerRab) && /plafon|gypsum|langit/i.test(lowerAh)) return true;
-          if (/atap|spandek|baja ringan/i.test(lowerRab) && /atap|spandek|baja ringan/i.test(lowerAh)) return true;
-          if (/cat|pengecatan/i.test(lowerRab) && /cat|pengecatan/i.test(lowerAh)) return true;
-          if (/pintu|jendela|kusen/i.test(lowerRab) && /pintu|jendela|kusen/i.test(lowerAh)) return true;
-          if (/listrik|lampu/i.test(lowerRab) && /listrik|lampu/i.test(lowerAh)) return true;
-          if (/sanitasi|kloset|pipa/i.test(lowerRab) && /sanitasi|kloset|pipa/i.test(lowerAh)) return true;
-
-          const keywords = lowerRab
-            .replace(/[^a-zA-Z0-9\s]/g, ' ')
-            .split(/\s+/)
-            .filter((w) => w.length > 3 && !/pekerjaan|pasang|pemasangan|pengadaan/i.test(w));
-          return keywords.length > 0 && keywords.some((kw) => lowerAh.includes(kw));
-        });
-
         const isPreserved =
           (it.tags && it.tags.some((t) => t.toUpperCase() === 'FUR')) ||
           it.isBarangPabrikasi ||
           isPreservedUnitItem(it.uraian, it.satuan, it.isBarangPabrikasi);
-        if (isPreserved) {
-          let unitBahanPrice = it.hargaSatuan;
-          if (!unitBahanPrice || unitBahanPrice <= 0) {
-            if (ahspMatch && ahspMatch.komponen && ahspMatch.komponen.length > 0) {
-              const compBahanList = ahspMatch.komponen.filter(
-                (c) => c.kategori !== 'UPAH' && !/tukang|pekerja|mandor/i.test(c.uraian) && c.kategori !== 'ALAT' && !/molen|sewa|scaffolding/i.test(c.uraian)
-              );
-              const totalBahanInAhsp = compBahanList.reduce(
-                (s, c) => s + ((c.hargaSatuan || 0) * (c.koefisien || 1)),
-                0
-              );
-              if (totalBahanInAhsp > 0) {
-                unitBahanPrice = totalBahanInAhsp;
-              }
-            }
-          }
 
-          if (ahspMatch && ahspMatch.komponen && ahspMatch.komponen.length > 0) {
-            const compUpahList = ahspMatch.komponen.filter((c) => c.kategori === 'UPAH' || /tukang|pekerja|mandor/i.test(c.uraian));
-            compUpahList.forEach((cu) => {
-              const uVol = Math.round((cu.koefisien || 1) * execRabVol * 1000) / 1000;
-              const uJml = Math.round(uVol * (cu.hargaSatuan || 174748));
-              if (uJml > 0) {
-                divUpahTotal += uJml;
-                weeklyAhspUpahComponents.push({
-                  namaBarang: cu.uraian,
-                  volume: uVol,
-                  satuan: cu.satuan || 'Hr',
-                  hargaSatuan: cu.hargaSatuan || 174748,
-                  jumlah: uJml,
-                });
-              }
-            });
-          }
+        // Strict AHSP match: ID ONLY, no keyword matching
+        const ahspMatch = it.ahspIdRef
+          ? (realSchoolData?.ahspList || []).find((ah) => ah.id === it.ahspIdRef)
+          : null;
 
-          const bahanJml = Math.round(execRabVol * unitBahanPrice);
-          if (bahanJml > 0) {
-            bahanItems.push({
-              namaBarang: it.uraian,
-              volume: execRabVol,
-              satuan: it.satuan || 'unit',
-              hargaSatuan: unitBahanPrice,
-              jumlah: bahanJml,
-              isBarangPabrikasi: true,
-              tags: it.tags,
-              kategoriBiaya: it.kategoriBiaya,
-            } as any);
-          }
-        } else if (ahspMatch && ahspMatch.komponen && ahspMatch.komponen.length > 0) {
-          ahspMatch.komponen.forEach((comp) => {
-            const compVol = Math.round((comp.koefisien || 1) * execRabVol * 1000) / 1000;
-            if (compVol <= 0) return;
-            const compJml = Math.round(compVol * (comp.hargaSatuan || 10000));
-            if (compJml <= 0) return;
-            const isUpah = comp.kategori === 'UPAH' || /tukang|pekerja|mandor/i.test(comp.uraian);
-            const isAlat = comp.kategori === 'ALAT' || /molen|sewa|scaffolding|perancah|gerobak|pompa|genset|generator/i.test(comp.uraian);
+        // Split total item amount into material and labor portions via getItemMaterialLaborSplit
+        const itemSplit = getItemMaterialLaborSplit(it, realSchoolData?.ahspList || []);
+        let weeklyMatNominal = 0;
+        let weeklyUpahNominal = 0;
 
-            if (it.kategoriBiaya === 'BAHAN' && (isUpah || isAlat)) return;
-            if (it.kategoriBiaya === 'UPAH' && !isUpah) return;
-            if (it.kategoriBiaya === 'ALAT' && !isAlat) return;
-
-            if (isUpah) {
-              divUpahTotal += compJml;
-              weeklyAhspUpahComponents.push({
-                namaBarang: comp.uraian,
-                volume: compVol,
-                satuan: comp.satuan || 'Hr',
-                hargaSatuan: comp.hargaSatuan || 174748,
-                jumlah: compJml,
-              });
-            } else if (isAlat) {
-              alatItems.push({
-                namaBarang: comp.uraian,
-                volume: compVol,
-                satuan: comp.satuan || 'set',
-                hargaSatuan: comp.hargaSatuan || 50000,
-                jumlah: compJml,
-              });
-            } else {
-              bahanItems.push({
-                namaBarang: comp.uraian,
-                volume: compVol,
-                satuan: comp.satuan || 'unit',
-                hargaSatuan: comp.hargaSatuan || 50000,
-                jumlah: compJml,
-              });
-            }
-          });
+        if (itemSplit.material + itemSplit.labor > 0) {
+          const splitWeekly = distributeRupiah(execRabJml, [itemSplit.material, itemSplit.labor]);
+          weeklyMatNominal = splitWeekly[0];
+          weeklyUpahNominal = splitWeekly[1];
         } else {
-          const isUpahBahan =
-            it.kategoriBiaya === 'UPAH_BAHAN' ||
-            (it.kategoriBiaya as string) === 'UPAH&BAHAN' ||
-            /upah.*bahan|bahan.*upah/i.test(it.kategoriBiaya || '');
+          weeklyMatNominal = execRabJml;
+        }
 
-          const cat = isUpahBahan
-            ? 'UPAH_BAHAN'
-            : it.kategoriBiaya || (
-                /upah|gaji|pekerja|tukang|mandor/i.test(it.uraian) ? 'UPAH' :
-                /alat|sewa|molen|scaffolding|perancah|gerobak/i.test(it.uraian) ? 'ALAT' :
-                /smkk|k3|helm|rompi|sepatu|p3k|rambu|papan nama/i.test(it.uraian) ? 'SMKK' :
-                'BAHAN'
-              );
+        // 1. Process weekly labor portion
+        if (weeklyUpahNominal > 0) {
+          divUpahTotal += weeklyUpahNominal;
+          const ahspLaborComps = (ahspMatch?.komponen || []).filter(
+            (c) => c.kategori === 'UPAH' || /tukang|pekerja|mandor/i.test(c.uraian)
+          );
 
-          if (cat === 'UPAH_BAHAN') {
-            const bahanNominal = Math.round(execRabJml * 0.65);
-            const upahNominal = execRabJml - bahanNominal;
-
-            const decomposed = decomposeRealisticBahanAndUpah(it.uraian, bahanNominal, upahNominal);
-            bahanItems.push(...decomposed.bahanItems);
-
-            divUpahTotal += upahNominal;
-            weeklyAhspUpahComponents.push(...decomposed.upahComponents);
-          } else if (cat === 'UPAH') {
-            divUpahTotal += execRabJml;
-            const decomposedUpah = decomposeRealisticBahanAndUpah(it.uraian, 0, execRabJml);
+          if (ahspLaborComps.length > 0) {
+            const compWeights = ahspLaborComps.map((c) =>
+              Math.max(1, toRupiah(c.totalHarga) || Math.round(toRupiah(c.hargaSatuan) * (c.koefisien || 1)))
+            );
+            const compNominals = distributeRupiah(weeklyUpahNominal, compWeights);
+            ahspLaborComps.forEach((c, idx) => {
+              const cJml = compNominals[idx];
+              if (cJml <= 0) return;
+              const cVol = Math.round((c.koefisien || 1) * execRabVol * 1000) / 1000;
+              const safeVol = cVol > 0 ? cVol : 1;
+              weeklyAhspUpahComponents.push({
+                namaBarang: c.uraian,
+                volume: safeVol,
+                satuan: c.satuan || 'OH',
+                hargaSatuan: Math.round(cJml / safeVol),
+                jumlah: cJml,
+              });
+            });
+          } else {
+            const decomposedUpah = decomposeRealisticBahanAndUpah(it.uraian, 0, weeklyUpahNominal);
             if (decomposedUpah.upahComponents.length > 0) {
               weeklyAhspUpahComponents.push(...decomposedUpah.upahComponents);
             } else {
               weeklyAhspUpahComponents.push({
                 namaBarang: it.uraian,
-                volume: execRabVol,
-                satuan: it.satuan,
-                hargaSatuan: it.hargaSatuan,
-                jumlah: execRabJml,
+                volume: execRabVol > 0 ? execRabVol : 1,
+                satuan: it.satuan || 'OH',
+                hargaSatuan: Math.round(weeklyUpahNominal / (execRabVol > 0 ? execRabVol : 1)),
+                jumlah: weeklyUpahNominal,
               });
             }
-          } else if (cat === 'ALAT') {
-            alatItems.push({
+          }
+        }
+
+        // 2. Process weekly material portion
+        if (weeklyMatNominal > 0) {
+          if (isPreserved) {
+            bahanItems.push({
               namaBarang: it.uraian,
-              volume: execRabVol,
-              satuan: it.satuan,
-              hargaSatuan: it.hargaSatuan,
-              jumlah: execRabJml,
-            });
-          } else if (cat === 'SMKK' || cat === 'LAINNYA') {
+              volume: execRabVol > 0 ? execRabVol : 1,
+              satuan: it.satuan || 'unit',
+              hargaSatuan: Math.round(weeklyMatNominal / (execRabVol > 0 ? execRabVol : 1)),
+              jumlah: weeklyMatNominal,
+              isBarangPabrikasi: true,
+              tags: it.tags,
+              kategoriBiaya: it.kategoriBiaya,
+            } as any);
           } else {
-            const isCompositeJob = !isPureDirectMaterial(it.uraian);
-            if (isCompositeJob && execRabJml >= 25000) {
-              const decomposedBahan = decomposeRealisticBahanAndUpah(it.uraian, execRabJml, 0);
-              bahanItems.push(...decomposedBahan.bahanItems);
-            } else {
-              bahanItems.push({
-                namaBarang: it.uraian,
-                volume: execRabVol,
-                satuan: it.satuan,
-                hargaSatuan: it.hargaSatuan,
-                jumlah: execRabJml,
+            const ahspMatComps = (ahspMatch?.komponen || []).filter(
+              (c) => c.kategori !== 'UPAH' && !/tukang|pekerja|mandor/i.test(c.uraian)
+            );
+
+            if (ahspMatComps.length > 0) {
+              const matWeights = ahspMatComps.map((c) =>
+                Math.max(1, toRupiah(c.totalHarga) || Math.round(toRupiah(c.hargaSatuan) * (c.koefisien || 1)))
+              );
+              const matNominals = distributeRupiah(weeklyMatNominal, matWeights);
+              ahspMatComps.forEach((c, idx) => {
+                const cJml = matNominals[idx];
+                if (cJml <= 0) return;
+                const cVol = Math.round((c.koefisien || 1) * execRabVol * 1000) / 1000;
+                const safeVol = cVol > 0 ? cVol : 1;
+                const isAlat = c.kategori === 'ALAT' || /molen|sewa|scaffolding|perancah|gerobak|pompa|genset/i.test(c.uraian);
+                const targetArr = isAlat ? alatItems : bahanItems;
+                targetArr.push({
+                  namaBarang: c.uraian,
+                  volume: safeVol,
+                  satuan: c.satuan || (isAlat ? 'set' : 'unit'),
+                  hargaSatuan: Math.round(cJml / safeVol),
+                  jumlah: cJml,
+                } as any);
               });
+            } else {
+              const isComposite = !isPureDirectMaterial(it.uraian);
+              if (isComposite && weeklyMatNominal >= 25000) {
+                const dec = decomposeRealisticBahanAndUpah(it.uraian, weeklyMatNominal, 0);
+                bahanItems.push(...dec.bahanItems);
+              } else {
+                bahanItems.push({
+                  namaBarang: it.uraian,
+                  volume: execRabVol > 0 ? execRabVol : 1,
+                  satuan: it.satuan || 'unit',
+                  hargaSatuan: Math.round(weeklyMatNominal / (execRabVol > 0 ? execRabVol : 1)),
+                  jumlah: weeklyMatNominal,
+                  isBarangPabrikasi: it.isBarangPabrikasi,
+                  tags: it.tags,
+                  kategoriBiaya: it.kategoriBiaya,
+                } as any);
+              }
             }
           }
         }
@@ -727,9 +679,27 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
       const padW = String(targetWeek).padStart(2, '0');
       const kwPJBukti = `Fur/${padW}/${yearStr}`;
       const spbPJBukti = `SPB-Fur/${padW}/${yearStr}`;
-      const isTaxable = totalPJNominal >= 2000000;
-      const ppn = isTaxable ? Math.round((totalPJNominal / 1.11) * 0.11 * 100) / 100 : 0;
-      const pph22 = isTaxable ? Math.round((totalPJNominal / 1.11) * 0.015 * 100) / 100 : 0;
+
+      const furPagu = Math.round(
+        (realSchoolData?.divisions?.find((d: any) => d.kode?.toUpperCase() === 'V' || /kayu.*kaca.*besi/i.test(d.uraian))?.subTotal) ||
+        (realSchoolData?.divisions?.flatMap((d: any) => d.items).filter((it: any) => it.isBarangPabrikasi || /pj1|j1\b|pintu|jendela/i.test(it.uraian)).reduce((s: number, it: any) => s + (it.jumlah || 0), 0)) ||
+        46163040
+      );
+
+      const existingFurSum = newKwitansiList
+        .filter((k) => k.noBukti !== kwPJBukti && (k.tipe === 'PINTU_JENDELA' || (k.noBukti || '').startsWith('Fur/')))
+        .reduce((s, k) => s + (k.nominal || 0), 0);
+
+      const remainingFurPagu = Math.max(0, furPagu - existingFurSum);
+      if (remainingFurPagu > 0) {
+        const cappedPJNominal = Math.min(totalPJNominal, remainingFurPagu);
+        const finalPJItems = cappedPJNominal !== totalPJNominal
+          ? consolidateAndStandardizeReceiptItems(normalizedPJ, cappedPJNominal)
+          : normalizedPJ;
+
+      const isTaxable = cappedPJNominal >= 2000000;
+      const ppn = isTaxable ? Math.round((cappedPJNominal / 1.11) * 0.11 * 100) / 100 : 0;
+      const pph22 = isTaxable ? Math.round((cappedPJNominal / 1.11) * 0.015 * 100) / 100 : 0;
 
       const defaultPJStore = stores.find(
         (s) => s.kategori === 'PINTU_JENDELA_ALUMINIUM' || /alumunium|aluminium|pintu|jendela/i.test(`${s.namaToko} ${s.pekerjaan || ''}`)
@@ -752,13 +722,13 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
         tanggal: pjDateInfo.dateSlash,
         tanggalFormatted: pjDateInfo.dateFormatted,
         bulan: pjDateInfo.bulan,
-        uraian: `Pembayaran Lunas Pengadaan & Pemasangan Pintu dan Jendela Aluminium Complete Awal Minggu Ke-${targetWeek} (${normalizedPJ.map((i) => i.namaBarang).slice(0, 3).join(', ')}), Mengacu Bobot Fisik Bangunan Revitalisasi ${school.namaSekolah}, Tahun ${yearStr}.`,
+        uraian: `Pembayaran Lunas Pengadaan & Pemasangan Pintu dan Jendela Aluminium Complete Awal Minggu Ke-${targetWeek} (${finalPJItems.map((i) => i.namaBarang).slice(0, 3).join(', ')}), Mengacu Bobot Fisik Bangunan Revitalisasi ${school.namaSekolah}, Tahun ${yearStr}.`,
         penerimaNama: defaultPJStore.pemilikNama || 'Ir. Bambang Sugiarto',
         penerimaPekerjaan: `Pemilik ${defaultPJStore.namaToko}`,
         penerimaAlamat: defaultPJStore.alamat || school.kabKota,
         namaToko: defaultPJStore.namaToko,
-        items: normalizedPJ,
-        nominal: totalPJNominal,
+        items: finalPJItems,
+        nominal: cappedPJNominal,
         isPpn: isTaxable,
         isPph22: isTaxable,
         isPph23: false,
@@ -777,6 +747,7 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
         newKwitansiList.push(pjDoc);
       }
       generatedCount.bahan++;
+      }
     }
   }
 
@@ -1041,13 +1012,29 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
     },
   ];
 
-  const hasPhysicalExecution = activeDivisions.some((d) => !/perencana|pengawas|administrasi|pengelolaan/i.test(d.uraian));
-  if (totalWageAmountForWeek === 0 && hasPhysicalExecution) {
-    const totalPhysicalExecJml = activeDivisions.reduce((sum, d) => {
-      if (/perencana|pengawas|administrasi|pengelolaan/i.test(d.uraian)) return sum;
-      return sum + Math.round((school.totalAnggaran || 500000000) * ((d.prestasiMingguIni || 0) / 100));
-    }, 0);
-    totalWageAmountForWeek = Math.round(totalPhysicalExecJml * 0.35);
+  let totalLaborPagu = 0;
+  let totalMaterialPagu = 0;
+  (realSchoolData?.divisions || []).forEach((d) => {
+    (d.items || []).forEach((it) => {
+      const s = getItemMaterialLaborSplit(it, realSchoolData?.ahspList || []);
+      totalMaterialPagu += s.material;
+      totalLaborPagu += s.labor;
+    });
+  });
+
+  const priorWageSpent = updatedWageReports.reduce((s, wr) => s + (wr.totalUpah || 0), 0);
+  const remainingLaborBudget = Math.max(0, totalLaborPagu - priorWageSpent);
+
+  const activeWeeksAll = weeksToUse.filter((w) => (w.bobotRealisasi && w.bobotRealisasi > 0) || w.divisions?.some((d) => (d.prestasiMingguIni || 0) > 0));
+  const isFinalWeek = activeWeeksAll.length > 0 && activeWeeksAll[activeWeeksAll.length - 1].mingguKe === targetWeek;
+  const isCumulative100 = weekObj.bobotRealisasi >= 99.9 || (weekObj.divisions || []).every((d) => d.prestasiSdMingguIni >= d.bobotTotal - 0.01);
+
+  if (totalLaborPagu > 0) {
+    if (isFinalWeek && isCumulative100) {
+      totalWageAmountForWeek = remainingLaborBudget;
+    } else {
+      totalWageAmountForWeek = Math.min(totalWageAmountForWeek, remainingLaborBudget);
+    }
   }
 
   const targetWage = totalWageAmountForWeek;
@@ -1419,9 +1406,9 @@ export function generateMonthlyManagementTransactions({
   const divW = realSchoolData?.divisions?.find((d) => /pengawas/i.test(d.uraian));
   const divA = realSchoolData?.divisions?.find((d) => /pengelolaan|administrasi/i.test(d.uraian));
 
-  const bobotP = divP?.bobotPersen || (divP && divP.subTotal > 0 ? (divP.subTotal / paguTotal) * 100 : 2.23);
-  const bobotW = divW?.bobotPersen || (divW && divW.subTotal > 0 ? (divW.subTotal / paguTotal) * 100 : 2.74);
-  const bobotA = divA?.bobotPersen || (divA && divA.subTotal > 0 ? (divA.subTotal / paguTotal) * 100 : 3.23);
+  const bobotP = divP?.bobotPersen || (divP && divP.subTotal > 0 ? (divP.subTotal / paguTotal) * 100 : 1.85);
+  const bobotW = divW?.bobotPersen || (divW && divW.subTotal > 0 ? (divW.subTotal / paguTotal) * 100 : 2.19);
+  const bobotA = divA?.bobotPersen || (divA && divA.subTotal > 0 ? (divA.subTotal / paguTotal) * 100 : 2.41);
 
   const budgetP = divP?.subTotal || Math.round((paguTotal * bobotP) / 100);
   const budgetW = divW?.subTotal || Math.round((paguTotal * bobotW) / 100);
@@ -1855,7 +1842,7 @@ export function generateRealisticMultiWeekTransactions({
       rpdItems,
       realSchoolData,
       existingKwitansi: [],
-      existingWageReports: [],
+      existingWageReports: updatedWageReports,
       existingBkb: [],
       splitDays: false,
     });
@@ -1867,9 +1854,15 @@ export function generateRealisticMultiWeekTransactions({
       }
     });
 
-    resSingle.updatedWageReports.forEach((wr) => {
-      updatedWageReports.push(wr);
-    });
+    const newReport = resSingle.updatedWageReports.find((wr) => wr.mingguKe === weekObj.mingguKe);
+    if (newReport) {
+      const existingIdx = updatedWageReports.findIndex((w) => w.mingguKe === newReport.mingguKe);
+      if (existingIdx >= 0) {
+        updatedWageReports[existingIdx] = newReport;
+      } else {
+        updatedWageReports.push(newReport);
+      }
+    }
   });
 
   const monthlyMgmtRes = generateMonthlyManagementTransactions({
@@ -2109,12 +2102,24 @@ export function generateRealisticMultiWeekTransactions({
           }
 
           const isFullAbsorption = progressRatio >= 0.95;
-          let execVol = isFullAbsorption
-            ? remainingRabVol
-            : Math.round(remainingRabVol * progressRatio * 1000) / 1000;
-
-          if (execVol <= 0 && progressRatio > 0 && (it.isBarangPabrikasi || (it.tags && it.tags.some((t) => /siplah|fur/i.test(t))) || isMeubilairBatch)) {
-            execVol = Math.max(1, Math.min(remainingRabVol, 1));
+          let execVol: number;
+          if (it.isBarangPabrikasi || isPreservedUnitItem(it.uraian, it.satuan, it.isBarangPabrikasi)) {
+            const wholeUnits = Math.round(remainingRabVol * progressRatio);
+            if (isFullAbsorption) {
+              execVol = Math.round(remainingRabVol);
+            } else {
+              execVol = wholeUnits;
+            }
+            if (execVol <= 0 && progressRatio >= 0.5) {
+              execVol = Math.min(Math.round(remainingRabVol), 1);
+            }
+          } else {
+            execVol = isFullAbsorption
+              ? remainingRabVol
+              : Math.round(remainingRabVol * progressRatio * 1000) / 1000;
+            if (execVol <= 0 && progressRatio > 0 && ((it.tags && it.tags.some((t) => /siplah|fur/i.test(t))) || isMeubilairBatch)) {
+              execVol = Math.max(1, Math.min(remainingRabVol, 1));
+            }
           }
           if (execVol <= 0) return;
           const execJml = Math.round(execVol * it.hargaSatuan);
@@ -2128,39 +2133,29 @@ export function generateRealisticMultiWeekTransactions({
             return;
           }
 
-          const ahspMatch = (realSchoolData?.ahspList || []).find((ah) => {
-            if (it.ahspIdRef && ah.id === it.ahspIdRef) return true;
-            const lAh = (ah.namaPekerjaan || '').toLowerCase().trim();
-            const lRab = it.uraian.toLowerCase().trim();
-            return lAh === lRab || lAh.includes(lRab) || lRab.includes(lAh);
-          });
+          const ahspMatch = it.ahspIdRef
+            ? (realSchoolData?.ahspList || []).find((ah) => ah.id === it.ahspIdRef)
+            : null;
 
           const isPreserved =
             (it.tags && it.tags.some((t) => t.toUpperCase() === 'FUR')) ||
             it.isBarangPabrikasi ||
             isPreservedUnitItem(it.uraian, it.satuan, it.isBarangPabrikasi);
+
+          const split = getItemMaterialLaborSplit(it, realSchoolData?.ahspList || []);
+          const matNominal = split.material > 0 && it.jumlah > 0
+            ? Math.round(execJml * (split.material / it.jumlah))
+            : (split.material > 0 ? execJml : 0);
+
+          if (matNominal <= 0) return;
+
           if (isPreserved) {
-            let unitBahanPrice = it.hargaSatuan;
-            if (!unitBahanPrice || unitBahanPrice <= 0) {
-              if (ahspMatch && ahspMatch.komponen && ahspMatch.komponen.length > 0) {
-                const compBahanList = ahspMatch.komponen.filter(
-                  (c) => c.kategori !== 'UPAH' && !/tukang|pekerja|mandor/i.test(c.uraian) && c.kategori !== 'ALAT' && !/molen|sewa|scaffolding/i.test(c.uraian)
-                );
-                const totalBahanInAhsp = compBahanList.reduce(
-                  (s, c) => s + ((c.hargaSatuan || 0) * (c.koefisien || 1)),
-                  0
-                );
-                if (totalBahanInAhsp > 0) {
-                  unitBahanPrice = totalBahanInAhsp;
-                }
-              }
-            }
             batchBahanItems.push({
               namaBarang: it.uraian,
-              volume: execVol,
+              volume: execVol > 0 ? execVol : 1,
               satuan: it.satuan || 'unit',
-              hargaSatuan: unitBahanPrice,
-              jumlah: Math.round(execVol * unitBahanPrice),
+              hargaSatuan: Math.round(matNominal / (execVol > 0 ? execVol : 1)),
+              jumlah: matNominal,
               isBarangPabrikasi: true,
               tags: it.tags,
               kategoriBiaya: it.kategoriBiaya,
@@ -2168,62 +2163,46 @@ export function generateRealisticMultiWeekTransactions({
             return;
           }
 
-          if (ahspMatch && ahspMatch.komponen && ahspMatch.komponen.length > 0) {
-            ahspMatch.komponen.forEach((comp) => {
-              const compVol = Math.round((comp.koefisien || 1) * execVol * 1000) / 1000;
-              if (compVol <= 0) return;
-              const compJml = Math.round(compVol * (comp.hargaSatuan || 10000));
-              if (compJml <= 0) return;
+          const ahspMatComps = (ahspMatch?.komponen || []).filter(
+            (c) => c.kategori !== 'UPAH' && !/tukang|pekerja|mandor/i.test(c.uraian)
+          );
 
-              const isUpah = comp.kategori === 'UPAH' || /tukang|pekerja|mandor/i.test(comp.uraian);
-              const isAlat = comp.kategori === 'ALAT' || /molen|sewa|scaffolding|perancah/i.test(comp.uraian);
-
-              if (!isUpah && !isAlat) {
-                batchBahanItems.push({
-                  namaBarang: comp.uraian,
-                  volume: compVol,
-                  satuan: comp.satuan || 'unit',
-                  hargaSatuan: comp.hargaSatuan || 50000,
-                  jumlah: compJml,
-                });
-              } else if (isAlat) {
-                batchAlatItems.push({
-                  namaBarang: comp.uraian,
-                  volume: compVol,
-                  satuan: comp.satuan || 'set',
-                  hargaSatuan: comp.hargaSatuan || 50000,
-                  jumlah: compJml,
-                });
-              }
+          if (ahspMatComps.length > 0) {
+            const matWeights = ahspMatComps.map((c) =>
+              Math.max(1, toRupiah(c.totalHarga) || Math.round(toRupiah(c.hargaSatuan) * (c.koefisien || 1)))
+            );
+            const matNominals = distributeRupiah(matNominal, matWeights);
+            ahspMatComps.forEach((c, idx) => {
+              const cJml = matNominals[idx];
+              if (cJml <= 0) return;
+              const cVol = Math.round((c.koefisien || 1) * execVol * 1000) / 1000;
+              const safeVol = cVol > 0 ? cVol : 1;
+              const isAlat = c.kategori === 'ALAT' || /molen|sewa|scaffolding|perancah|gerobak|pompa|genset/i.test(c.uraian);
+              const targetArr = isAlat ? batchAlatItems : batchBahanItems;
+              targetArr.push({
+                namaBarang: c.uraian,
+                volume: safeVol,
+                satuan: c.satuan || (isAlat ? 'set' : 'unit'),
+                hargaSatuan: Math.round(cJml / safeVol),
+                jumlah: cJml,
+              } as any);
             });
           } else {
-            const isUpahBahan = /upah.*bahan|bahan.*upah/i.test(it.kategoriBiaya || '');
-            if (isUpahBahan) {
-              const bahanNom = Math.round(execJml * 0.65);
-              const dec = decomposeRealisticBahanAndUpah(it.uraian, bahanNom, 0);
+            const isComp = !isPureDirectMaterial(it.uraian, it.satuan);
+            if (isComp && matNominal >= 25000) {
+              const dec = decomposeRealisticBahanAndUpah(it.uraian, matNominal, 0);
               batchBahanItems.push(...dec.bahanItems);
-            } else if (it.kategoriBiaya === 'ALAT') {
-              batchAlatItems.push({
+            } else {
+              batchBahanItems.push({
                 namaBarang: it.uraian,
-                volume: execVol,
+                volume: execVol > 0 ? execVol : 1,
                 satuan: it.satuan,
-                hargaSatuan: it.hargaSatuan,
-                jumlah: execJml,
-              });
-            } else if (it.kategoriBiaya !== 'UPAH' && it.kategoriBiaya !== 'SMKK') {
-              const isComp = !isPureDirectMaterial(it.uraian, it.satuan);
-              if (isComp && execJml >= 25000) {
-                const dec = decomposeRealisticBahanAndUpah(it.uraian, execJml, 0);
-                batchBahanItems.push(...dec.bahanItems);
-              } else {
-                batchBahanItems.push({
-                  namaBarang: it.uraian,
-                  volume: execVol,
-                  satuan: it.satuan,
-                  hargaSatuan: it.hargaSatuan,
-                  jumlah: execJml,
-                });
-              }
+                hargaSatuan: Math.round(matNominal / (execVol > 0 ? execVol : 1)),
+                jumlah: matNominal,
+                isBarangPabrikasi: it.isBarangPabrikasi,
+                tags: it.tags,
+                kategoriBiaya: it.kategoriBiaya,
+              } as any);
             }
           }
         });
@@ -2652,6 +2631,12 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
     const bukti = (k.noBukti || '').toUpperCase();
     const uraian = (k.uraian || '').toLowerCase();
     const tipe = (k.tipe || '').toUpperCase();
+    const isFurnitur =
+      tipe === 'PINTU_JENDELA' ||
+      tipe === 'PERABOT' ||
+      /^fur[\/\-_]|kw[\/\-_]?fur/i.test(bukti) ||
+      /pintu.*jendela|daun pintu|daun jendela/i.test(uraian) ||
+      (k.items && k.items.some((i: any) => i.isBarangPabrikasi || /pj1|j1\b|pintu utama|jendela alum/i.test(i.namaBarang || '')));
     const isSiplahOrMeub =
       /siplah/i.test(bukti) ||
       /siplah/i.test(uraian) ||
@@ -2669,6 +2654,7 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
       tipe === 'SMKK' ||
       /KW-SMKK/i.test(bukti) ||
       /smkk|k3|keselamatan kerja|apd/i.test(uraian) ||
+      isFurnitur ||
       isSiplahOrMeub ||
       isManagement
     );
@@ -2684,6 +2670,12 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
       }
 
       const isPapan = (k.tipe || '').toUpperCase() === 'CETAK' || /^CTK\//i.test(k.noBukti || '') || /papan nama/i.test(k.uraian || '');
+      const isFurnitur =
+        (k.tipe || '').toUpperCase() === 'PINTU_JENDELA' ||
+        (k.tipe || '').toUpperCase() === 'PERABOT' ||
+        /^fur[\/\-_]|kw[\/\-_]?fur/i.test(k.noBukti || '') ||
+        /pintu.*jendela|daun pintu|daun jendela/i.test(k.uraian || '') ||
+        (k.items && k.items.some((i: any) => i.isBarangPabrikasi || /pj1|j1\b|pintu utama|jendela alum/i.test(i.namaBarang || '')));
       const isSiplahOrMeub =
         /siplah/i.test(k.noBukti || '') ||
         /siplah|mebel|meubilair|meubeler|perabot/i.test(k.uraian || '') ||
@@ -2709,6 +2701,19 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
           tipe: 'CETAK',
           nominal: exactPapanNominal,
           items: pItems,
+        });
+      } else if (isFurnitur) {
+        const hasExistingItems = k.items && k.items.length > 0;
+        const finalItems = hasExistingItems
+          ? getReconstitutedKusenPintuUnitItems(k.items, k.nominal, realSchoolData)
+          : getReconstitutedKusenPintuUnitItems([], k.nominal, realSchoolData);
+        const itemSum = finalItems.reduce((s: number, it: any) => s + (it.jumlah || 0), 0);
+        const finalNominal = itemSum > 0 ? itemSum : (k.nominal || 46163040);
+        fixedPreparationKw.push({
+          ...k,
+          tipe: 'PINTU_JENDELA',
+          nominal: finalNominal,
+          items: finalItems,
         });
       } else if (isSiplahOrMeub) {
         const hasExistingItems = k.items && k.items.length > 0;
@@ -2756,42 +2761,46 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
   });
 
   const targetConstructionTotal = Math.round((paguTotal * cumulativeBobot) / 100);
-  const sumFixedPrep = fixedPreparationKw.reduce((s, k) => s + (k.nominal || 0), 0);
+  const sumFixedPrep = fixedPreparationKw
+    .filter((k) => !/kons-p|kons-w|perencana|pengawas|\badm\b|pengelola|spj/i.test(`${k.noBukti} ${k.uraian}`))
+    .reduce((s, k) => s + (k.nominal || 0), 0);
   const remainingTargetConstruction = Math.max(0, targetConstructionTotal - sumFixedPrep);
 
-  const sumConstructionRaw = activeWeeklyKw.reduce((s, k) => s + (k.nominal || 0), 0);
+  const isWageReceipt = (k: KwitansiDocument) => k.tipe === 'UPAH' || (k.noBukti || '').startsWith('UK/');
+  const activeWeeklyWageKw = activeWeeklyKw.filter(isWageReceipt);
+  const activeWeeklyMatKw = activeWeeklyKw.filter((k) => !isWageReceipt(k));
 
-  let scaledActiveKw: KwitansiDocument[] = [];
-  if (sumConstructionRaw > 0 && remainingTargetConstruction > 0) {
-    const scaleFactor = remainingTargetConstruction / sumConstructionRaw;
-    let runningSum = 0;
+  const sumWageKw = activeWeeklyWageKw.reduce((s, k) => s + (k.nominal || 0), 0);
+  const remainingTargetMaterial = Math.max(0, remainingTargetConstruction - sumWageKw);
+  const sumMaterialRaw = activeWeeklyMatKw.reduce((s, k) => s + (k.nominal || 0), 0);
 
-    scaledActiveKw = activeWeeklyKw.map((kw, idx) => {
-      if (idx === activeWeeklyKw.length - 1) {
-        const lastNominal = Math.max(0, remainingTargetConstruction - runningSum);
-        const itemScale = kw.nominal > 0 ? lastNominal / kw.nominal : scaleFactor;
-        const scaledItems = (kw.items || []).map((it) => {
-          const newVol = Math.max(1, Math.round((it.volume || 1) * itemScale));
-          const newJml = Math.round(newVol * (it.hargaSatuan || 1));
-          return { ...it, volume: newVol, jumlah: newJml };
-        });
-        const newNom = scaledItems.length > 0 ? scaledItems.reduce((s, i) => s + i.jumlah, 0) : lastNominal;
-        return { ...kw, items: scaledItems, nominal: newNom > 0 ? newNom : lastNominal };
+  let scaledActiveMatKw: KwitansiDocument[] = [];
+  if (sumMaterialRaw > 0 && remainingTargetMaterial > 0) {
+    const activeWeights = activeWeeklyMatKw.map((k) => Math.max(1, k.nominal || 0));
+    const newKwNominals = distributeRupiah(remainingTargetMaterial, activeWeights);
+
+    scaledActiveMatKw = activeWeeklyMatKw.map((kw, idx) => {
+      const targetKwNominal = newKwNominals[idx];
+      const items = kw.items || [];
+      if (items.length === 0) {
+        return { ...kw, nominal: targetKwNominal };
       }
-
-      const scaledNominal = Math.round((kw.nominal || 0) * scaleFactor);
-      runningSum += scaledNominal;
-      const scaledItems = (kw.items || []).map((it) => {
-        const newVol = Math.max(1, Math.round((it.volume || 1) * scaleFactor));
-        const newJml = Math.round(newVol * (it.hargaSatuan || 1));
-        return { ...it, volume: newVol, jumlah: newJml };
+      const itemWeights = items.map((it) => Math.max(1, it.jumlah || 0));
+      const newItemNominals = distributeRupiah(targetKwNominal, itemWeights);
+      const scaledItems = items.map((it, iIdx) => {
+        const itemJml = newItemNominals[iIdx];
+        const hSat = it.hargaSatuan && it.hargaSatuan > 0 ? it.hargaSatuan : 1;
+        const newVol = Math.max(0.01, Math.round((itemJml / hSat) * 100) / 100);
+        return { ...it, volume: newVol, jumlah: itemJml };
       });
-      const newNom = scaledItems.length > 0 ? scaledItems.reduce((s, i) => s + i.jumlah, 0) : scaledNominal;
-      return { ...kw, items: scaledItems, nominal: newNom > 0 ? newNom : scaledNominal };
+      const newNom = scaledItems.reduce((s, i) => s + i.jumlah, 0);
+      return { ...kw, items: scaledItems, nominal: newNom };
     });
   } else {
-    scaledActiveKw = activeWeeklyKw;
+    scaledActiveMatKw = activeWeeklyMatKw;
   }
+
+  const scaledActiveKw = [...activeWeeklyWageKw, ...scaledActiveMatKw];
 
   const finalizedKwitansi = renumberKwitansiChronologically(
     deduplicateKwitansiList([...scaledActiveKw, ...fixedPreparationKw, ...nonWeeklyPreserved]),

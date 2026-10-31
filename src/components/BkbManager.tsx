@@ -16,6 +16,7 @@ interface BkbManagerProps {
   onUpdateBkbRecord?: (record: BkbTransaction) => void;
   onDeleteBkbRecord?: (record: BkbTransaction) => void;
   onInitStandardBkb?: () => void;
+  onSyncBkbFromBku?: () => void;
   onClearAllBkb?: () => void;
   onBulkDeleteBkb?: (records: BkbTransaction[]) => void;
 }
@@ -31,6 +32,7 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
   onUpdateBkbRecord,
   onDeleteBkbRecord,
   onInitStandardBkb,
+  onSyncBkbFromBku,
   onClearAllBkb,
   onBulkDeleteBkb,
 }) => {
@@ -277,6 +279,17 @@ export const BkbManager: React.FC<BkbManagerProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          {onSyncBkbFromBku && (
+            <button
+              onClick={onSyncBkbFromBku}
+              className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-lg text-xs font-bold shadow-xs transition cursor-pointer"
+              title="Sinkronkan BKB dan BKT sepenuhnya dari BKU (penarikan tunai & non-tunai SipLah)"
+            >
+              <Sparkles className="w-4 h-4 text-emerald-200" />
+              <span>Sinkronkan BKB dari BKU</span>
+            </button>
+          )}
+
           {canCreate && bkbList.length === 0 && onInitStandardBkb && (
             <button
               onClick={onInitStandardBkb}

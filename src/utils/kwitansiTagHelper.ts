@@ -259,6 +259,7 @@ export function isAhspLaborComponent(uraian: string, kategori?: string): boolean
   if (kategori === 'UPAH') return true;
   if (kategori === 'UPAH_BAHAN') return false;
   const n = (uraian || '').toLowerCase();
-  return /pekerja|tukang|kepala tukang|mandor|operator alat|sopir|kenek/i.test(n) &&
+  if (/pekerjaan/i.test(n)) return false;
+  return /\b(pekerja|tukang|kepala tukang|mandor|operator alat|sopir|kenek)\b/i.test(n) &&
     !/sewa|perancah|scaffolding|alat bantu/i.test(n);
 }

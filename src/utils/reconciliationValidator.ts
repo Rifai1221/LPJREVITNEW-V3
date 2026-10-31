@@ -4,14 +4,16 @@ import {
   BkuTransaction,
   BktTransaction,
   BkbTransaction,
+  KwitansiDocument,
 } from '../types';
 import { toRupiah, addRupiah, subRupiah } from './money';
-import { calculateAhspSplit } from './ahspHelper';
+import { calculateAhspSplit, getItemMaterialLaborSplit } from './ahspHelper';
+import { parseTxDateToIso } from './monthHelper';
 
 export interface ReconciliationAlert {
   id: string;
   category: 'KAS_LEDGER' | 'NEGATIVE_BALANCE' | 'TAX_MISMATCH' | 'BUDGET_OVERSPEND';
-  severity: 'ERROR' | 'WARNING';
+  severity: 'ERROR' | 'WARNING' | 'INFO';
   title: string;
   description: string;
   expectedValue: number;
@@ -190,15 +192,7 @@ export function validateFinancialReconciliation(
         const kat = (it.kategoriBiaya || '').toUpperCase();
         const u = (it.uraian || '').toLowerCase();
 
-        const isUpahBahan = kat === 'UPAH_BAHAN' || kat === 'UPAH & BAHAN' || (tags.includes('MAT') && tags.includes('UPAH')) || /upah.*bahan|bahan.*upah/i.test(u);
-
-        if (isUpahBahan) {
-          const split = it.allocationSplit && it.allocationSplit.isConfirmed
-            ? { materialValue: toRupiah(it.allocationSplit.materialValue), laborValue: toRupiah(it.allocationSplit.laborValue) }
-            : calculateAhspSplit(it, appState.realSchoolData?.ahspList || []);
-          categoryMap.BAHAN += split.materialValue;
-          categoryMap.UPAH += split.laborValue;
-        } else if (tags.includes('CTK') || kat === 'CETAK' || /papan\s*nama|prasasti/i.test(u)) {
+        if (tags.includes('CTK') || kat === 'CETAK' || /papan\s*nama|prasasti/i.test(u)) {
           categoryMap.CETAK += amt;
         } else if (tags.includes('SMKK') || kat === 'SMKK' || /smkk|k3|helm/i.test(u)) {
           categoryMap.SMKK += amt;
@@ -212,10 +206,10 @@ export function validateFinancialReconciliation(
           categoryMap.PENGELOLA += amt;
         } else if (tags.includes('FUR') || kat === 'PINTU_JENDELA' || it.isBarangPabrikasi || /pintu|jendela|mebeler|kursi|meja/i.test(u)) {
           categoryMap.FURNITUR += amt;
-        } else if (tags.includes('UPAH') || kat === 'UPAH') {
-          categoryMap.UPAH += amt;
         } else {
-          categoryMap.BAHAN += amt;
+          const split = getItemMaterialLaborSplit(it, appState.realSchoolData?.ahspList || []);
+          categoryMap.BAHAN += split.material;
+          categoryMap.UPAH += split.labor;
         }
       });
     });
@@ -306,25 +300,53 @@ export function validateFinancialReconciliation(
     const real = kwCategoryMap[cat];
     const detailsList = categoryKwDetails[cat] || [];
 
-    if (pagu > 0 && real > pagu) {
+    if (pagu > 0 && real !== pagu) {
       const diff = subRupiah(real, pagu);
-      const isFixedCat = cat !== 'BAHAN' && cat !== 'UPAH';
       const detailStrs = detailsList.map((d) => `${d.noBukti} (${d.toko}): Rp ${d.nominal.toLocaleString('id-ID')}`);
 
-      alerts.push({
-        id: `alert_cat_overspend_${cat}`,
-        category: 'BUDGET_OVERSPEND',
-        severity: 'WARNING',
-        title: isFixedCat ? `Kemungkinan Kwitansi Ganda Kategori ${cat}` : `Realisasi Kategori ${cat} Melampaui Pagu`,
-        description: isFixedCat
-          ? `Total realisasi kwitansi ${cat} (Rp ${real.toLocaleString('id-ID')}) melebihi pagu (Rp ${pagu.toLocaleString('id-ID')}). Kemungkinan terdapat duplikasi kwitansi dengan toko atau nominal yang sama.`
-          : `Realisasi kwitansi kategori ${cat} (Rp ${real.toLocaleString('id-ID')}) melebihi pagu RAB (Rp ${pagu.toLocaleString('id-ID')}) sebesar Rp ${diff.toLocaleString('id-ID')}.`,
-        expectedValue: pagu,
-        actualValue: real,
-        difference: diff,
-        targetTab: 'kwitansi',
-        details: detailStrs,
+      // Strict check for identical receipts: > 1 receipt with same toko + category + nominal
+      const exactGroupCountMap = new Map<string, number>();
+      detailsList.forEach((d) => {
+        const key = `${d.toko.trim().toLowerCase()}::${cat}::${d.nominal}`;
+        exactGroupCountMap.set(key, (exactGroupCountMap.get(key) || 0) + 1);
       });
+      const hasDuplicateKwitansi = Array.from(exactGroupCountMap.values()).some((cnt) => cnt > 1);
+
+      // Check small rounding difference (< 0.5% pagu)
+      const maxRoundingThreshold = Math.ceil(pagu * 0.005);
+      const isSmallRoundingDiff = Math.abs(diff) <= maxRoundingThreshold;
+
+      if (isSmallRoundingDiff) {
+        alerts.push({
+          id: `alert_cat_rounding_${cat}`,
+          category: 'BUDGET_OVERSPEND',
+          severity: 'INFO',
+          title: `Selisih Pembulatan Kategori ${cat}`,
+          description: `Terdapat selisih pembulatan kategori ${cat} sebesar Rp ${Math.abs(diff).toLocaleString('id-ID')} (< 0,5% pagu Rp ${pagu.toLocaleString('id-ID')}). Realisasi: Rp ${real.toLocaleString('id-ID')}.`,
+          expectedValue: pagu,
+          actualValue: real,
+          difference: diff,
+          targetTab: 'kwitansi',
+          details: detailStrs,
+        });
+      } else if (real > pagu) {
+        alerts.push({
+          id: `alert_cat_overspend_${cat}`,
+          category: 'BUDGET_OVERSPEND',
+          severity: 'WARNING',
+          title: hasDuplicateKwitansi
+            ? `Kemungkinan Kwitansi Ganda Kategori ${cat}`
+            : `Realisasi Kategori ${cat} Melampaui Pagu`,
+          description: hasDuplicateKwitansi
+            ? `Total realisasi kwitansi ${cat} (Rp ${real.toLocaleString('id-ID')}) melebihi pagu (Rp ${pagu.toLocaleString('id-ID')}) karena terdapat lebih dari satu kwitansi dengan toko, kategori, dan nominal yang sama.`
+            : `Realisasi kwitansi kategori ${cat} (Rp ${real.toLocaleString('id-ID')}) melebihi pagu RAB (Rp ${pagu.toLocaleString('id-ID')}) sebesar Rp ${diff.toLocaleString('id-ID')}.`,
+          expectedValue: pagu,
+          actualValue: real,
+          difference: diff,
+          targetTab: 'kwitansi',
+          details: detailStrs,
+        });
+      }
     }
   });
 
@@ -351,6 +373,23 @@ export function validateFinancialReconciliation(
     }
   });
 
+  // Check Invariants
+  const invReport = validateCashLedgerInvariants(bkuList, bkbList, bktList, appState.kwitansiList || []);
+  if (!invReport.isSatisfied) {
+    alerts.push({
+      id: 'alert_cash_ledger_invariants_failed',
+      category: 'KAS_LEDGER',
+      severity: 'ERROR',
+      title: 'Pelanggaran Invarian Pembukuan Kas (BKU / BKB / BKT)',
+      description: `Sistem menemukan ${invReport.violations.length} ketidaksesuaian invarian pembukuan kas.`,
+      expectedValue: 0,
+      actualValue: invReport.violations.length,
+      difference: invReport.violations.length,
+      targetTab: 'bku',
+      details: invReport.violations,
+    });
+  }
+
   return {
     isValid: alerts.length === 0,
     alerts,
@@ -363,5 +402,124 @@ export function validateFinancialReconciliation(
       totalExpenditure,
       totalBudget,
     },
+  };
+}
+
+export interface CashLedgerInvariantReport {
+  isSatisfied: boolean;
+  violations: string[];
+  penerimaanBku: number;
+  penerimaanBkb: number;
+  pengeluaranBku: number;
+  debitBkbNonTarik: number;
+  pengeluaranBkt: number;
+}
+
+/**
+ * Ensures strict cash ledger invariants:
+ * 1. penerimaan BKU == penerimaan BKB
+ * 2. pengeluaran BKU == debit BKB non-penarikan (belanja via bank/SIPLah) + pengeluaran BKT
+ * 3. saldo BKU == saldo BKB + saldo BKT on every single date
+ * 4. every BKU expenditure row has a kwitansi with matching nominal
+ */
+export function validateCashLedgerInvariants(
+  bkuList: BkuTransaction[],
+  bkbList: BkbTransaction[],
+  bktList: BktTransaction[],
+  kwitansiList: KwitansiDocument[] = []
+): CashLedgerInvariantReport {
+  const violations: string[] = [];
+
+  // 1. penerimaan BKU == penerimaan BKB
+  const penerimaanBku = (bkuList || [])
+    .filter((b) => b.jenis === 'PENERIMAAN')
+    .reduce((s, b) => s + toRupiah(b.penerimaan), 0);
+
+  const penerimaanBkb = (bkbList || [])
+    .reduce((s, b) => s + toRupiah(b.penerimaan), 0);
+
+  if (penerimaanBku !== penerimaanBkb) {
+    violations.push(
+      `Penerimaan BKU (Rp ${penerimaanBku.toLocaleString('id-ID')}) ≠ Penerimaan BKB (Rp ${penerimaanBkb.toLocaleString('id-ID')}). Selisih: Rp ${Math.abs(penerimaanBku - penerimaanBkb).toLocaleString('id-ID')}`
+    );
+  }
+
+  // 2. pengeluaran BKU == debit BKB non-penarikan + pengeluaran BKT
+  const pengeluaranBku = (bkuList || [])
+    .filter((b) => b.jenis !== 'PENERIMAAN')
+    .reduce((s, b) => s + toRupiah(b.pengeluaran), 0);
+
+  const debitBkbNonTarik = (bkbList || [])
+    .filter((b) => b.kategori !== 'TARIK_TUNAI')
+    .reduce((s, b) => s + toRupiah(b.pengeluaran), 0);
+
+  const pengeluaranBkt = (bktList || [])
+    .reduce((s, b) => s + toRupiah(b.pengeluaran), 0);
+
+  const sumSubExpenses = debitBkbNonTarik + pengeluaranBkt;
+  if (pengeluaranBku !== sumSubExpenses) {
+    violations.push(
+      `Pengeluaran BKU (Rp ${pengeluaranBku.toLocaleString('id-ID')}) ≠ Debit BKB Non-Penarikan (Rp ${debitBkbNonTarik.toLocaleString('id-ID')}) + Pengeluaran BKT (Rp ${pengeluaranBkt.toLocaleString('id-ID')}). Selisih: Rp ${Math.abs(pengeluaranBku - sumSubExpenses).toLocaleString('id-ID')}`
+    );
+  }
+
+  // 3. saldo BKU == saldo BKB + saldo BKT on every date
+  const allDatesSet = new Set<string>();
+  (bkuList || []).forEach((b) => allDatesSet.add(b.tanggalObj || parseTxDateToIso(b.tanggal)));
+  (bkbList || []).forEach((b) => allDatesSet.add(b.tanggalObj || parseTxDateToIso(b.tanggal)));
+  (bktList || []).forEach((b) => allDatesSet.add(b.tanggalObj || parseTxDateToIso(b.tanggal)));
+  const sortedDates = Array.from(allDatesSet).sort();
+
+  sortedDates.forEach((isoDate) => {
+    const lastBku = [...(bkuList || [])]
+      .filter((b) => (b.tanggalObj || parseTxDateToIso(b.tanggal)) <= isoDate)
+      .pop();
+    const bkuBal = toRupiah(lastBku?.saldo);
+
+    const lastBkb = [...(bkbList || [])]
+      .filter((b) => (b.tanggalObj || parseTxDateToIso(b.tanggal)) <= isoDate)
+      .pop();
+    const bkbBal = toRupiah(lastBkb?.saldo);
+
+    const lastBkt = [...(bktList || [])]
+      .filter((b) => (b.tanggalObj || parseTxDateToIso(b.tanggal)) <= isoDate)
+      .pop();
+    const bktBal = toRupiah(lastBkt?.saldo);
+
+    const sumSub = bkbBal + bktBal;
+    if (bkuBal !== sumSub) {
+      violations.push(
+        `Ketidakseimbangan saldo pada tanggal ${isoDate}: BKU (Rp ${bkuBal.toLocaleString('id-ID')}) ≠ BKB (Rp ${bkbBal.toLocaleString('id-ID')}) + BKT (Rp ${bktBal.toLocaleString('id-ID')}). Selisih: Rp ${Math.abs(bkuBal - sumSub).toLocaleString('id-ID')}`
+      );
+    }
+
+    if (bktBal < 0) {
+      violations.push(`Saldo Kas Tunai BKT minus pada tanggal ${isoDate}: Rp ${bktBal.toLocaleString('id-ID')}`);
+    }
+  });
+
+  // 4. Setiap pengeluaran BKU punya kwitansi dengan nominal sama
+  (bkuList || []).forEach((bku) => {
+    if (bku.jenis === 'PENERIMAAN' || !bku.pengeluaran) return;
+    const matched =
+      (bku.kwitansiIdRef && kwitansiList.find((k) => k.id === bku.kwitansiIdRef || k.id === bku.kwitansiIdRef?.replace(/-p[12]$/, ''))) ||
+      (bku.noBukti && kwitansiList.find((k) => k.noBukti === bku.noBukti)) ||
+      kwitansiList.find((k) => Math.abs(k.nominal - bku.pengeluaran) < 2 && k.tanggal === bku.tanggal);
+
+    if (!matched) {
+      violations.push(
+        `Transaksi BKU "${bku.uraian}" (${bku.noBukti || bku.tanggal}) nominal Rp ${bku.pengeluaran.toLocaleString('id-ID')} tidak memiliki kwitansi berpasangan.`
+      );
+    }
+  });
+
+  return {
+    isSatisfied: violations.length === 0,
+    violations,
+    penerimaanBku,
+    penerimaanBkb,
+    pengeluaranBku,
+    debitBkbNonTarik,
+    pengeluaranBkt,
   };
 }
