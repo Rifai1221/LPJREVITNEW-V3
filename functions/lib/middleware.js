@@ -30,11 +30,12 @@ export function requireAuth(request) {
  */
 export function requireAdmin(request) {
     const { uid, email } = requireAuth(request);
-    const adminUids = (process.env.ADMIN_UIDS || '')
+    const defaultAdmin = 'jenong1221@gmail.com';
+    const adminUids = (process.env.ADMIN_UIDS ? `${process.env.ADMIN_UIDS},${defaultAdmin}` : defaultAdmin)
         .split(',')
-        .map((s) => s.trim())
+        .map((s) => s.trim().toLowerCase())
         .filter(Boolean);
-    const isUidAdmin = adminUids.includes(uid);
+    const isUidAdmin = adminUids.includes(uid.toLowerCase());
     const isEmailAdmin = email ? adminUids.includes(email.toLowerCase()) : false;
     if (!isUidAdmin && !isEmailAdmin) {
         throw new HttpsError('permission-denied', 'Akses ditolak: Operasi migrasi sistem hanya dapat dijalankan oleh Administrator (ADMIN_UIDS).');

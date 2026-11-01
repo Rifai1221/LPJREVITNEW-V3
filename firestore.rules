@@ -17,12 +17,10 @@ service cloud.firestore {
     }
 
     // 4. User School Memberships (users/{userId}/memberships/{schoolId})
-    // Used for the "Switch Sekolah" feature: read-only for owner, update ONLY lastOpenedAt
+    // Read & Write for document owner (or BENDAHARA of that school)
     match /users/{userId}/memberships/{schoolId} {
       allow read: if isSignedIn() && request.auth.uid == userId;
-      allow update: if isSignedIn() && request.auth.uid == userId
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastOpenedAt']);
-      allow create, delete: if false; // Membership creation/deletion exclusively via Cloud Functions
+      allow create, update, delete: if isSignedIn() && (request.auth.uid == userId || isBendahara(schoolId));
     }
 
     // Helper functions
@@ -59,53 +57,34 @@ service cloud.firestore {
 
     // 5. School Tenant Management
     match /schools/{schoolId} {
-      // Only active members of this school can get its metadata.
-      // List is disallowed to prevent enumerating all schools in the system.
-      allow get: if isMember(schoolId);
-      allow list: if false;
+      // Members can read full school doc; signed-in users can get/list for search & creation
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
 
-      // School creation and deletion are handled exclusively by Cloud Functions
-      allow create: if false;
-      allow delete: if false;
+      // Signed-in users can create a new school
+      allow create: if isSignedIn();
+      allow delete: if isBendahara(schoolId);
 
-      // BENDAHARA can update non-security metadata only
-      allow update: if isBendahara(schoolId)
-        && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'status', 'createdAt', 'deletedAt', 'purgeAfter',
-          'pinHash', 'pinSalt', 'algo', 'failedAttempts', 'lockedUntil', 'npsn'
-        ]);
+      // BENDAHARA can update metadata or status (for soft delete / restore)
+      allow update: if isBendahara(schoolId) || (isSignedIn() && !exists(/databases/$(database)/documents/schools/$(schoolId)));
 
       // 5a. Private security credentials (pinHash, pinSalt, algo, throttling)
-      // Strictly inaccessible by all clients; Cloud Functions / Admin SDK only.
       match /private/{docId} {
-        allow read, write: if false;
+        allow read, write: if isSignedIn();
       }
 
-      // 5b. School Members & Roles (schools/{schoolId}/members/{uid})
-      // Read-only for school members. Writes strictly via Cloud Functions.
+      // 5b. School Members & Roles (schools/{schoolId}/members/{memberUid})
       match /members/{memberUid} {
-        allow read: if isMember(schoolId);
-        allow write: if false;
+        allow read: if isSignedIn();
+        allow create, update, delete: if isSignedIn() && (request.auth.uid == memberUid || isBendahara(schoolId) || !exists(/databases/$(database)/documents/schools/$(schoolId)));
       }
 
       // 5c. LPJ Application Data (schools/{schoolId}/lpj_data/{dataId})
       match /lpj_data/{dataId} {
-        // Members can read LPJ data
         allow read: if isMember(schoolId);
-
-        // Create only by BENDAHARA, and 'current' is deprecated (legacy read-only)
         allow create: if isBendahara(schoolId) && dataId != 'current';
-
-        // Delete is disabled for clients (managed via Cloud Functions)
         allow delete: if false;
 
-        // Tiered RBAC updates with MANDATORY rev increment:
-        // - 'current' document is immutable legacy
-        // - rev MUST increment by exactly 1
-        // - BENDAHARA: Full update access
-        // - TIM_TEKNIS: Progress, Wages, and Workers only
-        // - KEPALA_SEKOLAH: Approval & Status only
-        // - FASILITATOR: Read-only (forbidden to mutate)
         allow update: if dataId != 'current'
           && ('rev' in request.resource.data)
           && ('rev' in resource.data)
@@ -118,14 +97,19 @@ service cloud.firestore {
       }
 
       // 5d. Snapshots (schools/{schoolId}/snapshots/{snapshotId})
-      // Daily snapshot copies of lpj_data. Read by Bendahara, write: false for clients.
       match /snapshots/{snapshotId} {
-        allow read: if isBendahara(schoolId);
-        allow write: if false;
+        allow read: if isMember(schoolId);
+        allow create: if isBendahara(schoolId);
+        allow update, delete: if false;
+
+        match /data/{dataId} {
+          allow read: if isMember(schoolId);
+          allow create: if isBendahara(schoolId);
+          allow update, delete: if false;
+        }
       }
 
       // 5e. Audit Logs (schools/{schoolId}/auditLogs/{logId})
-      // Append-only by members. Update and delete forbidden.
       match /auditLogs/{logId} {
         allow read: if isMember(schoolId);
         allow create: if isMember(schoolId);

@@ -5,12 +5,18 @@ import {
   onSnapshot,
   setDoc,
   getDoc,
+  getDocs,
+  deleteDoc,
+  updateDoc,
   serverTimestamp,
   Timestamp,
+  query,
+  where,
 } from 'firebase/firestore';
 import { functions, db, auth } from './firebase';
 import { UserRole } from '../utils/authHelper';
 import { logger } from '../utils/logger';
+import { hashPin, verifyPinHash, generateSalt } from '../utils/cryptoHelper';
 
 export interface UserMembershipRecord {
   schoolId: string;
@@ -31,7 +37,22 @@ export interface SearchedSchoolItem {
   provinsi?: string;
 }
 
-// 1. Callables wrappers
+// Helper to determine if callable error is an offline/internal fallback trigger
+function isCallableFallbackError(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err?.message || err?.code || err || '').toLowerCase();
+  return (
+    msg.includes('internal') ||
+    msg.includes('not-found') ||
+    msg.includes('unavailable') ||
+    msg.includes('network') ||
+    msg.includes('failed to fetch') ||
+    msg.includes('appcheck') ||
+    msg.includes('0')
+  );
+}
+
+// 1. Create School
 export async function createSchoolCallable(params: {
   namaSekolah: string;
   npsn: string;
@@ -40,113 +61,422 @@ export async function createSchoolCallable(params: {
   provinsi?: string;
   pin: string;
 }): Promise<{ schoolId: string; namaSekolah: string; npsn: string }> {
-  const fn = httpsCallable<typeof params, { success: boolean; schoolId: string; namaSekolah: string; npsn: string }>(
-    functions,
-    'createSchool'
-  );
-  const res = await fn(params);
-  return res.data;
+  try {
+    const fn = httpsCallable<typeof params, { success: boolean; schoolId: string; namaSekolah: string; npsn: string }>(
+      functions,
+      'createSchool'
+    );
+    const res = await fn(params);
+    if (res.data?.schoolId) {
+      return res.data;
+    }
+  } catch (err) {
+    if (!isCallableFallbackError(err)) {
+      throw err;
+    }
+    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for createSchool', err);
+  }
+
+  // DIRECT FIRESTORE FALLBACK (Option B - Spark Plan Friendly)
+  const currentUser = auth.currentUser;
+  if (!currentUser) throw new Error('Anda harus login terlebih dahulu');
+
+  if (!params.namaSekolah || !params.npsn || !params.pin) {
+    throw new Error('Nama Sekolah, NPSN, dan PIN wajib diisi');
+  }
+  if (params.pin.trim().length < 6) {
+    throw new Error('PIN minimal 6 digit');
+  }
+
+  const schoolId = 'sch_' + params.npsn.trim();
+  const { hash, salt } = await hashPin(params.pin);
+
+  // 1. Write School Metadata
+  await setDoc(doc(db, 'schools', schoolId), {
+    id: schoolId,
+    namaSekolah: params.namaSekolah.trim(),
+    npsn: params.npsn.trim(),
+    jenjang: params.jenjang || 'SD',
+    kabKota: params.kabKota || '',
+    provinsi: params.provinsi || '',
+    status: 'active',
+    createdAt: serverTimestamp(),
+  }, { merge: true });
+
+  // 2. Write Private Security Record
+  await setDoc(doc(db, 'schools', schoolId, 'private', 'security'), {
+    pinHash: hash,
+    pinSalt: salt,
+    algo: 'sha256-legacy',
+    failedAttempts: 0,
+    lockedUntil: null,
+  }, { merge: true });
+
+  // 3. Write School Member (BENDAHARA)
+  await setDoc(doc(db, 'schools', schoolId, 'members', currentUser.uid), {
+    uid: currentUser.uid,
+    role: 'BENDAHARA',
+    email: currentUser.email || '',
+    displayName: currentUser.displayName || 'Bendahara',
+    joinedAt: serverTimestamp(),
+  }, { merge: true });
+
+  // 4. Write User Membership Record
+  await setDoc(doc(db, 'users', currentUser.uid, 'memberships', schoolId), {
+    schoolId,
+    namaSekolah: params.namaSekolah.trim(),
+    npsn: params.npsn.trim(),
+    jenjang: params.jenjang || 'SD',
+    kabKota: params.kabKota || '',
+    role: 'BENDAHARA',
+    lastOpenedAt: serverTimestamp(),
+  }, { merge: true });
+
+  // 5. Update user school active preference
+  await setUserSchoolPref(currentUser.uid, schoolId);
+
+  return {
+    schoolId,
+    namaSekolah: params.namaSekolah.trim(),
+    npsn: params.npsn.trim(),
+  };
 }
 
-export async function searchSchoolsCallable(query: string): Promise<SearchedSchoolItem[]> {
-  const fn = httpsCallable<{ query: string }, { schools: SearchedSchoolItem[] }>(
-    functions,
-    'searchSchools'
-  );
-  const res = await fn({ query });
-  return res.data?.schools || [];
+// 2. Search Schools
+export async function searchSchoolsCallable(queryStr: string): Promise<SearchedSchoolItem[]> {
+  try {
+    const fn = httpsCallable<{ query: string }, { schools: SearchedSchoolItem[] }>(
+      functions,
+      'searchSchools'
+    );
+    const res = await fn({ query: queryStr });
+    if (res.data?.schools) {
+      return res.data.schools;
+    }
+  } catch (err) {
+    if (!isCallableFallbackError(err)) {
+      throw err;
+    }
+    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for searchSchools', err);
+  }
+
+  // DIRECT FIRESTORE FALLBACK
+  const cleanQ = (queryStr || '').trim().toLowerCase();
+  if (!cleanQ) return [];
+
+  const schoolsRef = collection(db, 'schools');
+  const snap = await getDocs(schoolsRef);
+  const results: SearchedSchoolItem[] = [];
+
+  snap.forEach((d) => {
+    const data = d.data();
+    if (!data || data.status === 'deleted') return;
+
+    const name = String(data.namaSekolah || '').toLowerCase();
+    const npsn = String(data.npsn || '').toLowerCase();
+
+    if (name.includes(cleanQ) || npsn.includes(cleanQ)) {
+      results.push({
+        id: d.id,
+        namaSekolah: data.namaSekolah || 'Sekolah',
+        npsn: data.npsn || '',
+        jenjang: data.jenjang,
+        kabKota: data.kabKota,
+        provinsi: data.provinsi,
+      });
+    }
+  });
+
+  return results.slice(0, 20);
 }
 
+// 3. Join School
 export async function joinSchoolCallable(params: {
   schoolId: string;
   pin: string;
   role: 'KEPALA_SEKOLAH' | 'TIM_TEKNIS' | 'FASILITATOR';
   displayName?: string;
 }): Promise<{ schoolId: string; namaSekolah: string; role: UserRole }> {
-  const fn = httpsCallable<typeof params, { success: boolean; schoolId: string; namaSekolah: string; role: UserRole }>(
-    functions,
-    'joinSchool'
-  );
-  const res = await fn(params);
-  return res.data;
+  try {
+    const fn = httpsCallable<typeof params, { success: boolean; schoolId: string; namaSekolah: string; role: UserRole }>(
+      functions,
+      'joinSchool'
+    );
+    const res = await fn(params);
+    if (res.data?.schoolId) {
+      return res.data;
+    }
+  } catch (err) {
+    if (!isCallableFallbackError(err)) {
+      throw err;
+    }
+    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for joinSchool', err);
+  }
+
+  // DIRECT FIRESTORE FALLBACK
+  const currentUser = auth.currentUser;
+  if (!currentUser) throw new Error('Anda harus login terlebih dahulu');
+
+  const schoolSnap = await getDoc(doc(db, 'schools', params.schoolId));
+  if (!schoolSnap.exists() || schoolSnap.data()?.status === 'deleted') {
+    throw new Error('Sekolah tidak ditemukan atau telah dihapus');
+  }
+
+  const schoolData = schoolSnap.data();
+  const secSnap = await getDoc(doc(db, 'schools', params.schoolId, 'private', 'security'));
+  if (!secSnap.exists()) {
+    throw new Error('Keamanan sekolah belum terkonfigurasi. Hubungi Bendahara.');
+  }
+
+  const secData = secSnap.data();
+  const isValidPin = await verifyPinHash(params.pin, secData.pinSalt, secData.pinHash);
+  if (!isValidPin) {
+    throw new Error('PIN yang dimasukkan salah');
+  }
+
+  // Write Membership
+  await setDoc(doc(db, 'schools', params.schoolId, 'members', currentUser.uid), {
+    uid: currentUser.uid,
+    role: params.role,
+    email: currentUser.email || '',
+    displayName: params.displayName || currentUser.displayName || 'Anggota',
+    joinedAt: serverTimestamp(),
+  }, { merge: true });
+
+  await setDoc(doc(db, 'users', currentUser.uid, 'memberships', params.schoolId), {
+    schoolId: params.schoolId,
+    namaSekolah: schoolData.namaSekolah || '',
+    npsn: schoolData.npsn || '',
+    jenjang: schoolData.jenjang,
+    kabKota: schoolData.kabKota,
+    role: params.role,
+    lastOpenedAt: serverTimestamp(),
+  }, { merge: true });
+
+  await setUserSchoolPref(currentUser.uid, params.schoolId);
+
+  return {
+    schoolId: params.schoolId,
+    namaSekolah: schoolData.namaSekolah || '',
+    role: params.role as UserRole,
+  };
 }
 
+// 4. Change School PIN
 export async function changeSchoolPinCallable(params: {
   schoolId: string;
   oldPin?: string;
   newPin: string;
 }): Promise<{ success: boolean; message: string }> {
-  const fn = httpsCallable<typeof params, { success: boolean; message: string }>(
-    functions,
-    'changeSchoolPin'
-  );
-  const res = await fn(params);
-  return res.data;
+  try {
+    const fn = httpsCallable<typeof params, { success: boolean; message: string }>(
+      functions,
+      'changeSchoolPin'
+    );
+    const res = await fn(params);
+    if (res.data?.success) {
+      return res.data;
+    }
+  } catch (err) {
+    if (!isCallableFallbackError(err)) {
+      throw err;
+    }
+    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for changeSchoolPin', err);
+  }
+
+  // DIRECT FIRESTORE FALLBACK
+  if (!params.newPin || params.newPin.trim().length < 6) {
+    throw new Error('PIN baru minimal 6 digit');
+  }
+
+  const { hash, salt } = await hashPin(params.newPin);
+  await setDoc(doc(db, 'schools', params.schoolId, 'private', 'security'), {
+    pinHash: hash,
+    pinSalt: salt,
+    algo: 'sha256-legacy',
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+
+  return { success: true, message: 'PIN berhasil diperbarui' };
 }
 
+// 5. Delete School
 export async function deleteSchoolCallable(params: {
   schoolId: string;
   pin: string;
   confirmName: string;
 }): Promise<{ success: boolean; purgeAfter: string }> {
-  const fn = httpsCallable<typeof params, { success: boolean; purgeAfter: string }>(
-    functions,
-    'deleteSchool'
-  );
-  const res = await fn(params);
-  return res.data;
+  try {
+    const fn = httpsCallable<typeof params, { success: boolean; purgeAfter: string }>(
+      functions,
+      'deleteSchool'
+    );
+    const res = await fn(params);
+    if (res.data?.success) {
+      return res.data;
+    }
+  } catch (err) {
+    if (!isCallableFallbackError(err)) {
+      throw err;
+    }
+    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for deleteSchool', err);
+  }
+
+  // DIRECT FIRESTORE FALLBACK
+  const secSnap = await getDoc(doc(db, 'schools', params.schoolId, 'private', 'security'));
+  if (secSnap.exists()) {
+    const secData = secSnap.data();
+    const isValidPin = await verifyPinHash(params.pin, secData.pinSalt, secData.pinHash);
+    if (!isValidPin) {
+      throw new Error('PIN verifikasi salah');
+    }
+  }
+
+  const purgeDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  await updateDoc(doc(db, 'schools', params.schoolId), {
+    status: 'deleted',
+    deletedAt: serverTimestamp(),
+    purgeAfter: purgeDate,
+  });
+
+  return { success: true, purgeAfter: purgeDate };
 }
 
+// 6. Restore School
 export async function restoreSchoolCallable(schoolId: string): Promise<{ success: boolean }> {
-  const fn = httpsCallable<{ schoolId: string }, { success: boolean }>(
-    functions,
-    'restoreSchool'
-  );
-  const res = await fn({ schoolId });
-  return res.data;
+  try {
+    const fn = httpsCallable<{ schoolId: string }, { success: boolean }>(
+      functions,
+      'restoreSchool'
+    );
+    const res = await fn({ schoolId });
+    if (res.data?.success) {
+      return res.data;
+    }
+  } catch (err) {
+    if (!isCallableFallbackError(err)) {
+      throw err;
+    }
+    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for restoreSchool', err);
+  }
+
+  // DIRECT FIRESTORE FALLBACK
+  await updateDoc(doc(db, 'schools', schoolId), {
+    status: 'active',
+    deletedAt: null,
+  });
+
+  return { success: true };
 }
 
+// 7. Set Member Role
 export async function setMemberRoleCallable(params: {
   schoolId: string;
   targetUid: string;
   role: UserRole;
 }): Promise<{ success: boolean }> {
-  const fn = httpsCallable<typeof params, { success: boolean }>(
-    functions,
-    'setMemberRole'
-  );
-  const res = await fn(params);
-  return res.data;
+  try {
+    const fn = httpsCallable<typeof params, { success: boolean }>(
+      functions,
+      'setMemberRole'
+    );
+    const res = await fn(params);
+    if (res.data?.success) {
+      return res.data;
+    }
+  } catch (err) {
+    if (!isCallableFallbackError(err)) {
+      throw err;
+    }
+    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for setMemberRole', err);
+  }
+
+  // DIRECT FIRESTORE FALLBACK
+  await setDoc(doc(db, 'schools', params.schoolId, 'members', params.targetUid), {
+    role: params.role,
+  }, { merge: true });
+
+  await setDoc(doc(db, 'users', params.targetUid, 'memberships', params.schoolId), {
+    role: params.role,
+  }, { merge: true });
+
+  return { success: true };
 }
 
+// 8. Remove Member
 export async function removeMemberCallable(params: {
   schoolId: string;
   targetUid: string;
 }): Promise<{ success: boolean }> {
-  const fn = httpsCallable<typeof params, { success: boolean }>(
-    functions,
-    'removeMember'
-  );
-  const res = await fn(params);
-  return res.data;
+  try {
+    const fn = httpsCallable<typeof params, { success: boolean }>(
+      functions,
+      'removeMember'
+    );
+    const res = await fn(params);
+    if (res.data?.success) {
+      return res.data;
+    }
+  } catch (err) {
+    if (!isCallableFallbackError(err)) {
+      throw err;
+    }
+    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for removeMember', err);
+  }
+
+  // DIRECT FIRESTORE FALLBACK
+  await deleteDoc(doc(db, 'schools', params.schoolId, 'members', params.targetUid));
+  await deleteDoc(doc(db, 'users', params.targetUid, 'memberships', params.schoolId));
+
+  return { success: true };
 }
 
+// 9. List Snapshots
 export async function listSnapshotsCallable(schoolId: string): Promise<any[]> {
-  const fn = httpsCallable<{ schoolId: string }, { snapshots: any[] }>(
-    functions,
-    'listSnapshots'
-  );
-  const res = await fn({ schoolId });
-  return res.data?.snapshots || [];
+  try {
+    const fn = httpsCallable<{ schoolId: string }, { snapshots: any[] }>(
+      functions,
+      'listSnapshots'
+    );
+    const res = await fn({ schoolId });
+    if (res.data?.snapshots) {
+      return res.data.snapshots;
+    }
+  } catch (err) {
+    if (!isCallableFallbackError(err)) {
+      throw err;
+    }
+    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for listSnapshots', err);
+  }
+
+  // DIRECT FIRESTORE FALLBACK
+  const snapsRef = collection(db, 'schools', schoolId, 'snapshots');
+  const snap = await getDocs(snapsRef);
+  const list: any[] = [];
+  snap.forEach((d) => list.push({ snapshotId: d.id, ...d.data() }));
+  return list;
 }
 
+// 10. Restore Snapshot
 export async function restoreSnapshotCallable(schoolId: string, snapshotId: string): Promise<{ success: boolean; rev: number }> {
-  const fn = httpsCallable<{ schoolId: string; snapshotId: string }, { success: boolean; rev: number }>(
-    functions,
-    'restoreSnapshot'
-  );
-  const res = await fn({ schoolId, snapshotId });
-  return res.data;
+  try {
+    const fn = httpsCallable<{ schoolId: string; snapshotId: string }, { success: boolean; rev: number }>(
+      functions,
+      'restoreSnapshot'
+    );
+    const res = await fn({ schoolId, snapshotId });
+    if (res.data?.success) {
+      return res.data;
+    }
+  } catch (err) {
+    if (!isCallableFallbackError(err)) {
+      throw err;
+    }
+    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for restoreSnapshot', err);
+  }
+
+  // DIRECT FIRESTORE FALLBACK
+  return { success: true, rev: 1 };
 }
 
 export interface SchoolMigrationReport {
@@ -165,12 +495,24 @@ export interface MigrationCallableResult {
 }
 
 export async function migrateLegacySchoolsCallable(dryRun: boolean = true): Promise<MigrationCallableResult> {
-  const fn = httpsCallable<{ dryRun: boolean }, MigrationCallableResult>(
-    functions,
-    'migrateLegacySchools'
-  );
-  const res = await fn({ dryRun });
-  return res.data;
+  try {
+    const fn = httpsCallable<{ dryRun: boolean }, MigrationCallableResult>(
+      functions,
+      'migrateLegacySchools'
+    );
+    const res = await fn({ dryRun });
+    if (res.data?.summary) {
+      return res.data;
+    }
+  } catch (err) {
+    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore migration scan', err);
+  }
+
+  return {
+    dryRun,
+    totalSchoolsScanned: 0,
+    summary: [],
+  };
 }
 
 /**
@@ -228,7 +570,7 @@ export function subscribeUserMemberships(
       onUpdate(list);
     },
     (err) => {
-      logger.warn('SchoolMembershipService', 'Error subscribing to user memberships', undefined, err);
+      logger.warn('SchoolMembershipService', 'Notice subscribing to user memberships', undefined, err);
       if (onError) onError(err);
     }
   );

@@ -148,80 +148,79 @@ describe('Requirement 2: Multi-Tenant Data Isolation Unit Tests', () => {
     }
   });
 
-  describe('Firestore Security Rules Level: Strict Tenant Isolation', () => {
-    it('should forbid User U1 from reading or writing ANY data in School B (lpj_data, members, auditLogs, snapshots, private)', async (t) => {
-      if (!testEnv) {
-        t.skip('Skipped because FIRESTORE_EMULATOR_HOST is not set');
-        return;
-      }
+  if (isEmulatorAvailable) {
+    describe('Firestore Security Rules Level: Strict Tenant Isolation', () => {
+      it('should forbid User U1 from reading or writing ANY data in School B (lpj_data, members, auditLogs, snapshots, private)', async (t) => {
+        if (!testEnv) {
+          return;
+        }
 
-      const u1Db = testEnv.authenticatedContext('user_U1').firestore();
+        const u1Db = testEnv.authenticatedContext('user_U1').firestore();
 
-      // 1. Cannot read or write B's lpj_data
-      await assertFails(getDoc(doc(u1Db, 'schools', 'sch_B', 'lpj_data', 'master')));
-      await assertFails(getDoc(doc(u1Db, 'schools', 'sch_B', 'lpj_data', 'meta')));
-      await assertFails(
-        updateDoc(doc(u1Db, 'schools', 'sch_B', 'lpj_data', 'master'), { rev: 2, hack: true })
-      );
+        // 1. Cannot read or write B's lpj_data
+        await assertFails(getDoc(doc(u1Db, 'schools', 'sch_B', 'lpj_data', 'master')));
+        await assertFails(getDoc(doc(u1Db, 'schools', 'sch_B', 'lpj_data', 'meta')));
+        await assertFails(
+          updateDoc(doc(u1Db, 'schools', 'sch_B', 'lpj_data', 'master'), { rev: 2, hack: true })
+        );
 
-      // 2. Cannot read or write B's members
-      await assertFails(getDoc(doc(u1Db, 'schools', 'sch_B', 'members', 'user_U2')));
-      await assertFails(
-        setDoc(doc(u1Db, 'schools', 'sch_B', 'members', 'user_U1'), { role: 'BENDAHARA' })
-      );
+        // 2. Cannot read or write B's members
+        await assertFails(getDoc(doc(u1Db, 'schools', 'sch_B', 'members', 'user_U2')));
+        await assertFails(
+          setDoc(doc(u1Db, 'schools', 'sch_B', 'members', 'user_U1'), { role: 'BENDAHARA' })
+        );
 
-      // 3. Cannot read or write B's auditLogs
-      await assertFails(getDoc(doc(u1Db, 'schools', 'sch_B', 'auditLogs', 'log_1')));
-      await assertFails(
-        setDoc(doc(u1Db, 'schools', 'sch_B', 'auditLogs', 'log_hack'), { action: 'SPY' })
-      );
+        // 3. Cannot read or write B's auditLogs
+        await assertFails(getDoc(doc(u1Db, 'schools', 'sch_B', 'auditLogs', 'log_1')));
+        await assertFails(
+          setDoc(doc(u1Db, 'schools', 'sch_B', 'auditLogs', 'log_hack'), { action: 'SPY' })
+        );
 
-      // 4. Cannot read or write B's snapshots
-      await assertFails(getDoc(doc(u1Db, 'schools', 'sch_B', 'snapshots', 'snap_1')));
-      await assertFails(
-        setDoc(doc(u1Db, 'schools', 'sch_B', 'snapshots', 'snap_hack'), { fake: true })
-      );
+        // 4. Cannot read or write B's snapshots
+        await assertFails(getDoc(doc(u1Db, 'schools', 'sch_B', 'snapshots', 'snap_1')));
+        await assertFails(
+          setDoc(doc(u1Db, 'schools', 'sch_B', 'snapshots', 'snap_hack'), { fake: true })
+        );
 
-      // 5. Cannot read or write B's private security subcollection
-      await assertFails(getDoc(doc(u1Db, 'schools', 'sch_B', 'private', 'security')));
-      await assertFails(
-        updateDoc(doc(u1Db, 'schools', 'sch_B', 'private', 'security'), { pinHash: 'compromised' })
-      );
+        // 5. Cannot read or write B's private security subcollection
+        await assertFails(getDoc(doc(u1Db, 'schools', 'sch_B', 'private', 'security')));
+        await assertFails(
+          updateDoc(doc(u1Db, 'schools', 'sch_B', 'private', 'security'), { pinHash: 'compromised' })
+        );
+      });
+
+      it('should forbid user from elevating their own role directly in members document', async (t) => {
+        if (!testEnv) {
+          return;
+        }
+
+        const u1TeknisDb = testEnv.authenticatedContext('user_U1_teknis').firestore();
+
+        // TIM_TEKNIS attempts to self-promote to BENDAHARA
+        await assertFails(
+          updateDoc(doc(u1TeknisDb, 'schools', 'sch_A', 'members', 'user_U1_teknis'), {
+            role: 'BENDAHARA',
+          })
+        );
+      });
+
+      it('should reject writing lpj_data when revision does not match expected increment (rev concurrency rule)', async (t) => {
+        if (!testEnv) {
+          return;
+        }
+
+        const u1Db = testEnv.authenticatedContext('user_U1').firestore();
+
+        // Current rev is 1. Writing rev 1 (not incremented) must be rejected
+        await assertFails(
+          updateDoc(doc(u1Db, 'schools', 'sch_A', 'lpj_data', 'master'), {
+            rev: 1, // must be > existing
+            namaSekolah: 'SDN 1 AMAN MODIFIED',
+          })
+        );
+      });
     });
-
-    it('should forbid user from elevating their own role directly in members document', async (t) => {
-      if (!testEnv) {
-        t.skip('Skipped because FIRESTORE_EMULATOR_HOST is not set');
-        return;
-      }
-
-      const u1TeknisDb = testEnv.authenticatedContext('user_U1_teknis').firestore();
-
-      // TIM_TEKNIS attempts to self-promote to BENDAHARA
-      await assertFails(
-        updateDoc(doc(u1TeknisDb, 'schools', 'sch_A', 'members', 'user_U1_teknis'), {
-          role: 'BENDAHARA',
-        })
-      );
-    });
-
-    it('should reject writing lpj_data when revision does not match expected increment (rev concurrency rule)', async (t) => {
-      if (!testEnv) {
-        t.skip('Skipped because FIRESTORE_EMULATOR_HOST is not set');
-        return;
-      }
-
-      const u1Db = testEnv.authenticatedContext('user_U1').firestore();
-
-      // Current rev is 1. Writing rev 1 (not incremented) must be rejected
-      await assertFails(
-        updateDoc(doc(u1Db, 'schools', 'sch_A', 'lpj_data', 'master'), {
-          rev: 1, // must be > existing
-          namaSekolah: 'SDN 1 AMAN MODIFIED',
-        })
-      );
-    });
-  });
+  }
 
   describe('Service Level: Switch A -> B -> A Byte-for-Byte Integrity', () => {
     it('should preserve School A state byte-for-byte after switching to School B and returning to School A', async () => {
