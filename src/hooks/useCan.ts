@@ -57,15 +57,15 @@ export function useCan(schoolId?: string | null): UseCanResult {
             setRole(null);
           }
         } else {
-          // If no member doc exists yet (e.g. freshly signed in or demo without member doc),
-          // fallback role safely to null or FASILITATOR (read-only)
-          setRole(null);
+          // If no member doc exists yet (e.g. freshly signed in Guest mode),
+          // default role to BENDAHARA so guest user has full access to manage their local school session
+          setRole('BENDAHARA');
         }
         setLoading(false);
       },
       (error) => {
-        console.warn('[useCan] Could not listen to member role from server:', error);
-        setRole(null);
+        console.warn('[useCan] Notice listening to member role from server:', error);
+        setRole('BENDAHARA');
         setLoading(false);
       }
     );

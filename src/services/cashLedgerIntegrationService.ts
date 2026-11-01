@@ -1014,7 +1014,8 @@ export function harmonizeBkbRecordsWithSiplah(
   });
 
   // 2. Find all SIPLAH BKU transactions
-  const siplahBkuTxs = (bkuList || []).filter((tx) => {
+  const bkuArray = Array.isArray(bkuList) ? bkuList : [];
+  const siplahBkuTxs = bkuArray.filter((tx) => {
     if (tx.jenis === 'PENERIMAAN') return false;
     return (
       tx.metodeBayar === 'BANK' ||
@@ -1077,25 +1078,32 @@ export function migrateAndTransformAppState(restored: any): any {
   if (!restored || typeof restored !== 'object') return restored;
 
   const school = restored.school || {};
-  const progressWeeks = restored.progressWeeks || [];
+  const progressWeeks = Array.isArray(restored.progressWeeks) ? restored.progressWeeks : [];
   const bkuWeekLimit = restored.bkuWeekLimit || 14;
 
-  // 1. Ensure bkbRecords exist and are up to date
-  let bkbRecords = restored.bkbRecords || [];
-  if (!bkbRecords || bkbRecords.length === 0) {
-    bkbRecords = generateStandardBkbRecords(school, progressWeeks, bkuWeekLimit);
-  } else {
-    bkbRecords = harmonizeBkbRecordsWithSiplah(bkbRecords, school);
-  }
+  const bkuTransactions = Array.isArray(restored.bkuTransactions)
+    ? restored.bkuTransactions
+    : Array.isArray(restored.manualBkuTransactions)
+    ? restored.manualBkuTransactions
+    : [];
+  const kwitansiList = Array.isArray(restored.kwitansiList) ? restored.kwitansiList : [];
+  const taxRecords = Array.isArray(restored.taxRecords)
+    ? restored.taxRecords
+    : Array.isArray(restored.manualTaxRecords)
+    ? restored.manualTaxRecords
+    : [];
+  const rpdItems = Array.isArray(restored.rpdItems) ? restored.rpdItems : [];
+  const stores = Array.isArray(restored.stores) ? restored.stores : [];
+  const workers = Array.isArray(restored.workers) ? restored.workers : [];
+  const wageReports = Array.isArray(restored.wageReports) ? restored.wageReports : [];
 
-  // 2. Ensure other key arrays exist
-  const bkuTransactions = restored.bkuTransactions || [];
-  const kwitansiList = restored.kwitansiList || [];
-  const taxRecords = restored.taxRecords || [];
-  const rpdItems = restored.rpdItems || [];
-  const stores = restored.stores || [];
-  const workers = restored.workers || [];
-  const wageReports = restored.wageReports || [];
+  // 1. Ensure bkbRecords exist and are up to date
+  let bkbRecords = Array.isArray(restored.bkbRecords) ? restored.bkbRecords : [];
+  if (!bkbRecords || bkbRecords.length === 0) {
+    bkbRecords = generateStandardBkbRecords(school, progressWeeks, bkuWeekLimit, bkuTransactions);
+  } else {
+    bkbRecords = harmonizeBkbRecordsWithSiplah(bkbRecords, bkuTransactions, school);
+  }
 
   return {
     ...restored,
@@ -1104,8 +1112,10 @@ export function migrateAndTransformAppState(restored: any): any {
     bkuWeekLimit,
     bkbRecords,
     bkuTransactions,
+    manualBkuTransactions: restored.manualBkuTransactions || bkuTransactions,
     kwitansiList,
     taxRecords,
+    manualTaxRecords: restored.manualTaxRecords || taxRecords,
     rpdItems,
     stores,
     workers,
