@@ -139,9 +139,13 @@ export function createSchoolStateForTenant(tenant: SchoolTenant, baseType: 'full
       })),
       progressWeeks: initialProgressWeeks,
       kwitansiList: [],
+      deletedKwitansiIds: [],
       wageReports: [],
       bkbRecords: [],
       manualBkuTransactions: [],
+      deletedBkuIds: [],
+      manualTaxRecords: [],
+      deletedTaxIds: [],
       realSchoolData: defaultRealSchoolData,
     };
   }
@@ -211,10 +215,13 @@ export function createSchoolStateForTenant(tenant: SchoolTenant, baseType: 'full
       stores: initialStores,
       progressWeeks: cleanProgressWeeks,
       kwitansiList: [],
+      deletedKwitansiIds: [],
       wageReports: [],
       bkbRecords: [],
       manualBkuTransactions: [],
       deletedBkuIds: [],
+      manualTaxRecords: [],
+      deletedTaxIds: [],
       realSchoolData: schoolRealData,
     };
   }
@@ -227,9 +234,13 @@ export function createSchoolStateForTenant(tenant: SchoolTenant, baseType: 'full
     stores: initialStores,
     progressWeeks: cleanProgressWeeks,
     kwitansiList: [],
+    deletedKwitansiIds: [],
     wageReports: [],
     bkbRecords: [],
     manualBkuTransactions: [],
+    deletedBkuIds: [],
+    manualTaxRecords: [],
+    deletedTaxIds: [],
     realSchoolData: schoolRealData,
   };
 }

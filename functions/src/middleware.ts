@@ -39,12 +39,13 @@ export function requireAuth(request: CallableRequest<unknown>): { uid: string; e
  */
 export function requireAdmin(request: CallableRequest<unknown>): { uid: string } {
   const { uid, email } = requireAuth(request);
-  const adminUids = (process.env.ADMIN_UIDS || '')
+  const defaultAdmin = 'jenong1221@gmail.com';
+  const adminUids = (process.env.ADMIN_UIDS ? `${process.env.ADMIN_UIDS},${defaultAdmin}` : defaultAdmin)
     .split(',')
-    .map((s) => s.trim())
+    .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
 
-  const isUidAdmin = adminUids.includes(uid);
+  const isUidAdmin = adminUids.includes(uid.toLowerCase());
   const isEmailAdmin = email ? adminUids.includes(email.toLowerCase()) : false;
 
   if (!isUidAdmin && !isEmailAdmin) {

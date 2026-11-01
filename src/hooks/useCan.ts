@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db, auth } from '../services/firebase';
 import { UserRole } from '../utils/authHelper';
-import { getStoredActiveTenantId } from '../services/schoolTenantService';
+// Remove getStoredActiveTenantId import - useCan strictly receives schoolId from React state!
 
 export type PermissionAction =
   | 'create:transaction'
@@ -27,13 +27,12 @@ export interface UseCanResult {
 /**
  * Hook to evaluate permissions strictly based on server-verified role
  * stored in Firestore: schools/{schoolId}/members/{uid}.
- * Never relies on client-side localStorage for authorization!
+ * Never relies on client-side localStorage or stored active tenant ID!
  */
-export function useCan(schoolIdOverride?: string): UseCanResult {
+export function useCan(schoolId?: string | null): UseCanResult {
   const [role, setRole] = useState<UserRole | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const schoolId = schoolIdOverride || getStoredActiveTenantId();
   const currentUser = auth.currentUser;
 
   useEffect(() => {

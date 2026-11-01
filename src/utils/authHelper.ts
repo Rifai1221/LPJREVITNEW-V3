@@ -67,8 +67,9 @@ export function isSchoolPinConfigured(school?: {
 }
 
 /**
- * Verifies entered PIN against the school's cryptographic salted hash.
- * Completely eliminates '123456' and '4-digit NPSN' insecure fallbacks.
+ * @deprecated Verifikasi PIN di klien telah dipensiunkan demi keamanan data.
+ * Verifikasi PIN sekarang dilakukan di server melalui Cloud Function `joinSchool`.
+ * Fungsi ini dipertahankan hanya untuk kompatibilitas ke belakang tanpa validasi offline.
  */
 export async function verifySchoolPinSecure(
   enteredPin: string,
@@ -78,6 +79,7 @@ export async function verifySchoolPinSecure(
     mustResetPin?: boolean;
   } | null
 ): Promise<{ isValid: boolean; mustResetPin?: boolean; reason?: string }> {
+  console.warn('[DEPRECATED] verifySchoolPinSecure dipanggil di klien. Gunakan Cloud Function joinSchool.');
   const cleanPin = (enteredPin || '').trim();
   if (!cleanPin) {
     return { isValid: false, reason: 'PIN tidak boleh kosong.' };

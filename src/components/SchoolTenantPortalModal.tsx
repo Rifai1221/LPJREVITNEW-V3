@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Building2,
   ShieldCheck,
@@ -6,648 +6,1177 @@ import {
   Database,
   CheckCircle2,
   Search,
-  ExternalLink,
-  Layers,
-  Sparkles,
   School,
   Lock,
   ArrowRight,
   Info,
   X,
-  Server,
-  CloudCheck,
   Trash2,
   LogOut,
+  Users,
+  KeyRound,
+  ShieldAlert,
+  UserCheck,
+  Sparkles,
+  RefreshCw,
 } from 'lucide-react';
+import { collection, onSnapshot } from 'firebase/firestore';
+import { db, auth } from '../services/firebase';
 import { SchoolTenant } from '../data/tenantPresets';
+import {
+  UserMembershipRecord,
+  searchSchoolsCallable,
+  joinSchoolCallable,
+  createSchoolCallable,
+  setMemberRoleCallable,
+  removeMemberCallable,
+  changeSchoolPinCallable,
+  deleteSchoolCallable,
+  SearchedSchoolItem,
+  isAdminUser,
+} from '../services/schoolMembershipService';
+import { USER_ROLES, UserRole } from '../utils/authHelper';
+import { useToast } from '../context/ToastContext';
+import { getSchoolColorTheme, getRoleBadgeConfig } from './SchoolSwitcher';
+import { AdminMigrationModal } from './AdminMigrationModal';
 
 interface SchoolTenantPortalModalProps {
   isOpen: boolean;
   onClose: () => void;
   currentTenant: SchoolTenant;
-  tenants: SchoolTenant[];
-  onSelectTenant: (tenant: SchoolTenant) => void;
-  onDeleteTenant?: (tenant: SchoolTenant) => void;
-  onRegisterSchool: (data: {
+  memberships: UserMembershipRecord[];
+  onSelectSchool: (tenant: SchoolTenant) => void;
+  onRegisterSchool?: (data: {
     namaSekolah: string;
     npsn: string;
     jenjang: 'TK/PAUD' | 'SD' | 'SMP/MTs' | 'SMA/SMK' | string;
     kabKota: string;
     provinsi: string;
-    email: string;
-    password?: string;
+    email?: string;
+    pin: string;
     templateType: 'full' | 'blank';
   }) => Promise<void>;
-  cloudDatabaseId: string;
+  onCreateDemoSchool?: () => Promise<void>;
+  cloudDatabaseId?: string;
   onLogout?: () => void;
+  initialTab?: 'switch' | 'join' | 'create' | 'members' | 'pin';
+  currentRole?: UserRole | null;
+}
+
+interface MemberItem {
+  uid: string;
+  role: UserRole;
+  email: string;
+  displayName: string;
+  joinedAt?: any;
 }
 
 export const SchoolTenantPortalModal: React.FC<SchoolTenantPortalModalProps> = ({
   isOpen,
   onClose,
   currentTenant,
-  tenants,
-  onSelectTenant,
-  onDeleteTenant,
+  memberships,
+  onSelectSchool,
   onRegisterSchool,
-  cloudDatabaseId,
+  onCreateDemoSchool,
   onLogout,
+  initialTab = 'switch',
+  currentRole,
 }) => {
-  const [activeTab, setActiveTab] = useState<'switch' | 'register' | 'architecture'>('switch');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
+  const toast = useToast();
+  const [activeTab, setActiveTab] = useState<'switch' | 'join' | 'create' | 'members' | 'pin'>(initialTab);
+  const currentUser = auth.currentUser;
+  const [isAdminMigrationOpen, setIsAdminMigrationOpen] = useState(false);
 
-  // Register Form State
-  const [namaSekolah, setNamaSekolah] = useState('');
-  const [npsn, setNpsn] = useState('');
-  const [jenjang, setJenjang] = useState<'TK/PAUD' | 'SD' | 'SMP/MTs' | 'SMA/SMK' | string>('TK/PAUD');
-  const [kabKota, setKabKota] = useState('');
-  const [provinsi, setProvinsi] = useState('Prov. Aceh');
-  const [email, setEmail] = useState('');
-  const [templateType, setTemplateType] = useState<'full' | 'blank'>('full');
-
-  // Demo visibility filter state - default to TRUE (clean production)
-  const [hideDemo, setHideDemo] = useState<boolean>(() => {
-    try {
-      const val = localStorage.getItem('LPJ_HIDE_DEMO_DATA');
-      if (val === 'false') return false;
-      return true; // Default hide demo
-    } catch {
-      return true;
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
     }
-  });
+  }, [initialTab, isOpen]);
 
-  const handleToggleHideDemo = (val: boolean) => {
-    setHideDemo(val);
-    try {
-      localStorage.setItem('LPJ_HIDE_DEMO_DATA', val ? 'true' : 'false');
-    } catch {}
-    // Reload list
-    window.location.reload();
-  };
+  // Search & Join state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<SearchedSchoolItem[]>([]);
+  const [selectedTargetSchool, setSelectedTargetSchool] = useState<SearchedSchoolItem | null>(null);
+  const [joinPin, setJoinPin] = useState('');
+  const [joinRole, setJoinRole] = useState<'KEPALA_SEKOLAH' | 'TIM_TEKNIS' | 'FASILITATOR'>('TIM_TEKNIS');
+  const [joinDisplayName, setJoinDisplayName] = useState(currentUser?.displayName || '');
+  const [isJoining, setIsJoining] = useState(false);
+
+  // Register New School state
+  const [createNamaSekolah, setCreateNamaSekolah] = useState('');
+  const [createNpsn, setCreateNpsn] = useState('');
+  const [createJenjang, setCreateJenjang] = useState<'TK/PAUD' | 'SD' | 'SMP/MTs' | 'SMA/SMK' | string>('SD');
+  const [createKabKota, setCreateKabKota] = useState('');
+  const [createProvinsi, setCreateProvinsi] = useState('Prov. Aceh');
+  const [createPin, setCreatePin] = useState('');
+  const [createConfirmPin, setCreateConfirmPin] = useState('');
+  const [createTemplateType, setCreateTemplateType] = useState<'full' | 'blank'>('blank');
+  const [isCreating, setIsCreating] = useState(false);
+
+  // Member Management state (Bendahara only)
+  const [schoolMembers, setSchoolMembers] = useState<MemberItem[]>([]);
+  const [isLoadingMembers, setIsLoadingMembers] = useState(false);
+
+  // Change PIN state (Bendahara only)
+  const [oldPinInput, setOldPinInput] = useState('');
+  const [newPinInput, setNewPinInput] = useState('');
+  const [confirmNewPinInput, setConfirmNewPinInput] = useState('');
+  const [isChangingPin, setIsChangingPin] = useState(false);
+
+  // Delete School state (Bendahara only)
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [deleteConfirmName, setDeleteConfirmName] = useState('');
+  const [deletePinInput, setDeletePinInput] = useState('');
+  const [isDeletingSchool, setIsDeletingSchool] = useState(false);
+
+  // Realtime school members subscription when members tab is active
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'members' || !currentTenant.id) return;
+
+    setIsLoadingMembers(true);
+    const membersColRef = collection(db, 'schools', currentTenant.id, 'members');
+    const unsub = onSnapshot(
+      membersColRef,
+      (snapshot) => {
+        const list: MemberItem[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data();
+          if (data && data.uid) {
+            list.push({
+              uid: data.uid,
+              role: data.role as UserRole,
+              email: data.email || '-',
+              displayName: data.displayName || 'Anggota',
+              joinedAt: data.joinedAt,
+            });
+          }
+        });
+        setSchoolMembers(list);
+        setIsLoadingMembers(false);
+      },
+      (err) => {
+        console.warn('Failed to load members:', err);
+        setIsLoadingMembers(false);
+      }
+    );
+
+    return () => unsub();
+  }, [isOpen, activeTab, currentTenant.id]);
 
   if (!isOpen) return null;
 
-  const filteredTenants = tenants.filter((t) => {
-    if (hideDemo && t.isDemo) return false;
-    return (
-      t.namaSekolah.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      t.npsn.includes(searchQuery) ||
-      t.kabKota.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-  });
+  const isBendahara = currentRole === 'BENDAHARA';
 
-  const handleRegisterSubmit = async (e: React.FormEvent) => {
+  // Handle Search Schools
+  const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMsg('');
-
-    if (!namaSekolah.trim()) {
-      setErrorMsg('Nama sekolah wajib diisi.');
+    if (!searchQuery.trim() || searchQuery.trim().length < 3) {
+      toast.warning('Ketik minimal 3 karakter untuk mencari sekolah.');
       return;
     }
-    if (!npsn.trim() || npsn.trim().length < 8) {
-      setErrorMsg('NPSN minimal 8 digit angka.');
-      return;
-    }
-    if (!kabKota.trim()) {
-      setErrorMsg('Kabupaten/Kota wajib diisi.');
-      return;
-    }
-
+    setIsSearching(true);
     try {
-      setIsSubmitting(true);
-      await onRegisterSchool({
-        namaSekolah,
-        npsn,
-        jenjang,
-        kabKota,
-        provinsi,
-        email: email || `${npsn}@sekolah.id`,
-        templateType,
+      const results = await searchSchoolsCallable(searchQuery.trim());
+      setSearchResults(results);
+      if (results.length === 0) {
+        toast.info('Tidak ada sekolah yang cocok dengan pencarian.');
+      }
+    } catch (err: any) {
+      toast.error('Gagal mencari sekolah: ' + (err?.message || err));
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  // Handle Join School
+  const handleJoinSchool = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedTargetSchool) return;
+    if (!joinPin.trim() || joinPin.trim().length < 6) {
+      toast.warning('Masukkan PIN sekolah minimal 6 digit.');
+      return;
+    }
+
+    setIsJoining(true);
+    try {
+      const joined = await joinSchoolCallable({
+        schoolId: selectedTargetSchool.id,
+        pin: joinPin.trim(),
+        role: joinRole,
+        displayName: joinDisplayName.trim() || currentUser?.displayName || 'Anggota',
       });
-      setIsSubmitting(false);
+
+      toast.success(`Berhasil bergabung ke ${joined.namaSekolah} sebagai ${joined.role}!`);
+      // Select the joined school
+      onSelectSchool({
+        id: joined.schoolId,
+        namaSekolah: joined.namaSekolah,
+        npsn: selectedTargetSchool.npsn,
+        jenjang: (selectedTargetSchool.jenjang || 'SD') as any,
+        kabKota: selectedTargetSchool.kabKota || '-',
+        provinsi: selectedTargetSchool.provinsi || '-',
+        email: '-',
+        isDemo: false,
+        createdAt: new Date().toISOString(),
+        lastLogin: new Date().toISOString(),
+      });
       onClose();
     } catch (err: any) {
-      setIsSubmitting(false);
-      setErrorMsg(err.message || 'Gagal mendaftarkan sekolah baru.');
+      toast.error('Gagal bergabung: ' + (err?.message || 'PIN salah atau akses ditolak.'));
+    } finally {
+      setIsJoining(false);
+    }
+  };
+
+  // Handle Create School
+  const handleCreateSchoolSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!createNamaSekolah.trim()) {
+      toast.warning('Nama sekolah wajib diisi.');
+      return;
+    }
+    if (!createNpsn.trim() || createNpsn.trim().length < 8) {
+      toast.warning('NPSN minimal 8 digit angka.');
+      return;
+    }
+    if (createPin.length < 6 || !/^\d{6,}$/.test(createPin)) {
+      toast.warning('PIN harus berupa minimal 6 digit angka.');
+      return;
+    }
+    if (createPin !== createConfirmPin) {
+      toast.warning('Konfirmasi PIN tidak cocok.');
+      return;
+    }
+
+    setIsCreating(true);
+    try {
+      if (onRegisterSchool) {
+        await onRegisterSchool({
+          namaSekolah: createNamaSekolah.trim(),
+          npsn: createNpsn.trim(),
+          jenjang: createJenjang,
+          kabKota: createKabKota.trim(),
+          provinsi: createProvinsi.trim(),
+          pin: createPin.trim(),
+          templateType: createTemplateType,
+        });
+      } else {
+        await createSchoolCallable({
+          namaSekolah: createNamaSekolah.trim(),
+          npsn: createNpsn.trim(),
+          jenjang: createJenjang,
+          kabKota: createKabKota.trim(),
+          provinsi: createProvinsi.trim(),
+          pin: createPin.trim(),
+        });
+      }
+      toast.success(`Sekolah ${createNamaSekolah.toUpperCase()} berhasil dibuat!`);
+      onClose();
+    } catch (err: any) {
+      toast.error('Gagal membuat sekolah: ' + (err?.message || err));
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  // Handle Set Member Role
+  const handleSetRole = async (targetUid: string, role: UserRole) => {
+    try {
+      await setMemberRoleCallable({
+        schoolId: currentTenant.id,
+        targetUid,
+        role,
+      });
+      toast.success('Peran anggota berhasil diperbarui.');
+    } catch (err: any) {
+      toast.error('Gagal mengubah peran: ' + (err?.message || err));
+    }
+  };
+
+  // Handle Remove Member
+  const handleRemoveMember = async (targetUid: string, targetName: string) => {
+    if (!confirm(`Keluarkan ${targetName} dari keanggotaan sekolah ini?`)) return;
+    try {
+      await removeMemberCallable({
+        schoolId: currentTenant.id,
+        targetUid,
+      });
+      toast.success(`${targetName} berhasil dikeluarkan dari sekolah.`);
+    } catch (err: any) {
+      toast.error('Gagal mengeluarkan anggota: ' + (err?.message || err));
+    }
+  };
+
+  // Handle Change PIN
+  const handleChangePin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newPinInput.length < 6 || !/^\d{6,}$/.test(newPinInput)) {
+      toast.warning('PIN baru harus berupa angka minimal 6 digit.');
+      return;
+    }
+    if (newPinInput !== confirmNewPinInput) {
+      toast.warning('Konfirmasi PIN baru tidak cocok.');
+      return;
+    }
+
+    setIsChangingPin(true);
+    try {
+      await changeSchoolPinCallable({
+        schoolId: currentTenant.id,
+        oldPin: oldPinInput.trim() || undefined,
+        newPin: newPinInput.trim(),
+      });
+      toast.success('PIN sekolah berhasil diubah.');
+      setOldPinInput('');
+      setNewPinInput('');
+      setConfirmNewPinInput('');
+    } catch (err: any) {
+      toast.error('Gagal mengubah PIN: ' + (err?.message || err));
+    } finally {
+      setIsChangingPin(false);
+    }
+  };
+
+  // Handle Delete School (Soft-delete via Cloud Function with 30-day retention)
+  const handleDeleteSchool = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (deleteConfirmName.trim().toUpperCase() !== currentTenant.namaSekolah.trim().toUpperCase()) {
+      toast.warning('Nama sekolah yang diketikkan tidak sesuai persis.');
+      return;
+    }
+    if (!deletePinInput.trim()) {
+      toast.warning('Masukkan PIN sekolah untuk otorisasi penghapusan.');
+      return;
+    }
+
+    setIsDeletingSchool(true);
+    try {
+      const res = await deleteSchoolCallable({
+        schoolId: currentTenant.id,
+        pin: deletePinInput.trim(),
+        confirmName: deleteConfirmName.trim(),
+      });
+      toast.success(
+        `Sekolah ${currentTenant.namaSekolah} berhasil dihapus (dapat dipulihkan hingga ${new Date(
+          res.purgeAfter
+        ).toLocaleDateString('id-ID')}).`
+      );
+      setIsDeleteDialogOpen(false);
+      onClose();
+      // Select another membership if available
+      const remaining = memberships.filter((m) => m.schoolId !== currentTenant.id);
+      if (remaining.length > 0) {
+        const next = remaining[0];
+        onSelectSchool({
+          id: next.schoolId,
+          namaSekolah: next.namaSekolah,
+          npsn: next.npsn,
+          jenjang: (next.jenjang || 'SD') as any,
+          kabKota: next.kabKota || '-',
+          provinsi: '-',
+          email: '-',
+          isDemo: false,
+          createdAt: new Date().toISOString(),
+          lastLogin: new Date().toISOString(),
+        });
+      }
+    } catch (err: any) {
+      toast.error('Gagal menghapus sekolah: ' + (err?.message || err));
+    } finally {
+      setIsDeletingSchool(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-3xl overflow-hidden flex flex-col max-h-[92vh] animate-in fade-in zoom-in-95 duration-200">
-        
-        {/* Header Bar */}
-        <div className="bg-gradient-to-r from-slate-900 via-blue-950 to-slate-900 text-white p-5 flex items-start justify-between border-b border-blue-900/50">
-          <div className="flex items-center gap-3.5">
-            <div className="w-12 h-12 rounded-xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/30 text-white">
-              <Database className="w-6 h-6" />
+    <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+        {/* Header */}
+        <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white p-5 flex items-center justify-between border-b border-slate-800">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-md shadow-blue-500/30">
+              <Building2 className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-lg font-bold">Portal Database Multi-Sekolah</h2>
-                <span className="text-[11px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 px-2 py-0.5 rounded-full flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  Cloud Firestore Aktif
-                </span>
-              </div>
-              <p className="text-xs text-slate-300 mt-0.5">
-                Arsitektur Terisolasi: Setiap sekolah memiliki ruang penyimpanan mandiri tanpa tercampur
+              <h2 className="text-base sm:text-lg font-bold tracking-tight">Portal Sekolah & Akses Pengguna</h2>
+              <p className="text-xs text-slate-300">
+                Pindah sekolah, bergabung via PIN, atau kelola keanggotaan tim sekolah
               </p>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition"
+            className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Current Active School Badge */}
-        <div className="bg-blue-50 border-b border-blue-100 px-5 py-2.5 flex items-center justify-between text-xs">
-          <div className="flex items-center gap-2 text-slate-700">
-            <span className="text-slate-500 font-medium">Sekolah Sedang Aktif:</span>
-            <span className="font-bold text-blue-900 flex items-center gap-1">
-              <Building2 className="w-3.5 h-3.5 text-blue-600" />
-              {currentTenant.namaSekolah}
-            </span>
-            <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-[11px] font-mono">
-              NPSN: {currentTenant.npsn}
-            </span>
-          </div>
-          <div className="text-slate-500 text-[11px] hidden sm:block">
-            Wilayah: {currentTenant.kabKota}
-          </div>
-        </div>
-
-        {/* Tabs Bar */}
-        <div className="flex border-b border-slate-200 bg-slate-50 px-5 pt-3 gap-2">
+        {/* Navigation Tabs */}
+        <div className="bg-slate-100 border-b border-slate-200 px-4 flex gap-1 overflow-x-auto">
           <button
+            type="button"
             onClick={() => setActiveTab('switch')}
-            className={`px-4 py-2 text-xs font-semibold rounded-t-lg transition border-b-2 flex items-center gap-2 ${
+            className={`px-3.5 py-2.5 text-xs font-bold border-b-2 transition cursor-pointer whitespace-nowrap ${
               activeTab === 'switch'
-                ? 'bg-white border-blue-600 text-blue-600 shadow-sm'
+                ? 'border-blue-600 text-blue-700 bg-white'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
             }`}
           >
-            <School className="w-4 h-4" />
-            Pilih Database Sekolah ({tenants.length})
+            Sekolah Saya ({memberships.length})
           </button>
+
           <button
-            onClick={() => setActiveTab('register')}
-            className={`px-4 py-2 text-xs font-semibold rounded-t-lg transition border-b-2 flex items-center gap-2 ${
-              activeTab === 'register'
-                ? 'bg-white border-blue-600 text-blue-600 shadow-sm'
+            type="button"
+            onClick={() => setActiveTab('join')}
+            className={`px-3.5 py-2.5 text-xs font-bold border-b-2 transition cursor-pointer whitespace-nowrap ${
+              activeTab === 'join'
+                ? 'border-blue-600 text-blue-700 bg-white'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
             }`}
           >
-            <PlusCircle className="w-4 h-4" />
-            Daftarkan Sekolah Baru
+            Gabung Sekolah
           </button>
+
           <button
-            onClick={() => setActiveTab('architecture')}
-            className={`px-4 py-2 text-xs font-semibold rounded-t-lg transition border-b-2 flex items-center gap-2 ${
-              activeTab === 'architecture'
-                ? 'bg-white border-blue-600 text-blue-600 shadow-sm'
+            type="button"
+            onClick={() => setActiveTab('create')}
+            className={`px-3.5 py-2.5 text-xs font-bold border-b-2 transition cursor-pointer whitespace-nowrap ${
+              activeTab === 'create'
+                ? 'border-blue-600 text-blue-700 bg-white'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
             }`}
           >
-            <ShieldCheck className="w-4 h-4" />
-            Struktur Keamanan & Isolasi
+            + Buat Sekolah Baru
           </button>
+
+          {isBendahara && (
+            <>
+              <button
+                type="button"
+                onClick={() => setActiveTab('members')}
+                className={`px-3.5 py-2.5 text-xs font-bold border-b-2 transition cursor-pointer whitespace-nowrap ${
+                  activeTab === 'members'
+                    ? 'border-blue-600 text-blue-700 bg-white'
+                    : 'border-transparent text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Anggota & Role
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveTab('pin')}
+                className={`px-3.5 py-2.5 text-xs font-bold border-b-2 transition cursor-pointer whitespace-nowrap ${
+                  activeTab === 'pin'
+                    ? 'border-blue-600 text-blue-700 bg-white'
+                    : 'border-transparent text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Keamanan & PIN
+              </button>
+            </>
+          )}
+
+          {isAdminUser(currentUser) && (
+            <button
+              type="button"
+              onClick={() => setIsAdminMigrationOpen(true)}
+              className="px-3.5 py-2.5 text-xs font-bold border-b-2 border-transparent transition cursor-pointer whitespace-nowrap text-amber-700 hover:text-amber-900 bg-amber-50/80 hover:bg-amber-100/80 ml-auto"
+              title="Khusus Administrator: Migrasi format sekolah lama ke arsitektur multi-sekolah baru"
+            >
+              ⚙️ Migrasi Sekolah Lama
+            </button>
+          )}
         </div>
 
-        {/* Modal Body */}
-        <div className="p-5 overflow-y-auto flex-1 bg-slate-50/50">
-          
-          {/* TAB 1: SWITCH TENANT */}
+        {/* Tab Content */}
+        <div className="p-5 max-h-[70vh] overflow-y-auto">
+          {/* TAB 1: SEKOLAH SAYA */}
           {activeTab === 'switch' && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between gap-3">
-                <div className="relative flex-1">
-                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                  <input
-                    type="text"
-                    placeholder="Cari nama sekolah, NPSN, atau kota..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Pilih Sekolah yang Anda Kelola</h3>
+                  <p className="text-xs text-slate-500">
+                    Satu akun untuk mengelola beberapa sekolah revitalisasi sekaligus
+                  </p>
                 </div>
-                <button
-                  onClick={() => setActiveTab('register')}
-                  className="bg-blue-600 hover:bg-blue-700 text-white text-xs px-3.5 py-2 rounded-lg font-medium flex items-center gap-1.5 shadow-sm transition whitespace-nowrap cursor-pointer"
-                >
-                  <PlusCircle className="w-3.5 h-3.5" />
-                  Tambah Sekolah
-                </button>
+                {onCreateDemoSchool && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await onCreateDemoSchool();
+                      onClose();
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 transition cursor-pointer"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Buat Sekolah Contoh</span>
+                  </button>
+                )}
               </div>
 
-              {/* Mode Publish & Demo Filter Bar */}
-              <div className="bg-slate-100/80 border border-slate-200 rounded-lg px-3 py-2 flex items-center justify-between text-xs text-slate-600">
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold text-slate-700">Filter Data Mode:</span>
-                  <span className="text-[11px] text-slate-500">
-                    {hideDemo ? 'Mode Live (Data Contoh/Demo Disembunyikan)' : 'Mode Pengembangan (Data Contoh Ditampilkan)'}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleToggleHideDemo(!hideDemo)}
-                  className={`px-2.5 py-1 rounded text-[11px] font-bold border transition cursor-pointer ${
-                    hideDemo
-                      ? 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200'
-                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
-                  }`}
-                >
-                  {hideDemo ? '✓ Demo Disembunyikan (Aktifkan Demo)' : 'Sembunyikan Data Demo'}
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 gap-3">
-                {filteredTenants.map((tenant) => {
-                  const isActive = tenant.id === currentTenant.id;
-                  return (
-                    <div
-                      key={tenant.id}
-                      className={`p-4 rounded-xl border transition-all ${
-                        isActive
-                          ? 'bg-blue-50/90 border-blue-400 shadow-sm ring-1 ring-blue-400/40'
-                          : 'bg-white border-slate-200 hover:border-blue-300 hover:shadow-sm'
-                      }`}
+              {memberships.length === 0 ? (
+                <div className="text-center py-8 bg-slate-50 border border-dashed border-slate-200 rounded-xl space-y-2">
+                  <School className="w-10 h-10 mx-auto text-slate-400" />
+                  <p className="text-sm font-bold text-slate-700">Belum Ada Sekolah yang Terdaftar</p>
+                  <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                    Anda belum terdaftar di sekolah mana pun. Silakan bergabung ke sekolah yang sudah ada atau buat sekolah baru.
+                  </p>
+                  <div className="flex items-center justify-center gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('join')}
+                      className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition cursor-pointer"
                     >
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="flex items-start gap-3">
+                      Gabung Sekolah
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('create')}
+                      className="px-3.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg text-xs font-bold transition cursor-pointer"
+                    >
+                      Buat Sekolah Baru
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid gap-2.5">
+                  {memberships.map((m) => {
+                    const isSelected = m.schoolId === currentTenant.id;
+                    const roleBadge = getRoleBadgeConfig(m.role);
+                    const theme = getSchoolColorTheme(m.schoolId);
+
+                    return (
+                      <div
+                        key={m.schoolId}
+                        onClick={() => {
+                          if (!isSelected) {
+                            onSelectSchool({
+                              id: m.schoolId,
+                              namaSekolah: m.namaSekolah,
+                              npsn: m.npsn,
+                              jenjang: (m.jenjang || 'SD') as any,
+                              kabKota: m.kabKota || '-',
+                              provinsi: '-',
+                              email: '-',
+                              isDemo: false,
+                              createdAt: typeof m.lastOpenedAt === 'string' ? m.lastOpenedAt : new Date().toISOString(),
+                              lastLogin: typeof m.lastOpenedAt === 'string' ? m.lastOpenedAt : new Date().toISOString(),
+                            });
+                            onClose();
+                          }
+                        }}
+                        className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 cursor-pointer transition ${
+                          isSelected
+                            ? 'bg-blue-50/70 border-blue-400 ring-2 ring-blue-500/20 shadow-xs'
+                            : 'bg-white border-slate-200 hover:bg-slate-50 hover:border-slate-300'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
                           <div
-                            className={`w-10 h-10 rounded-lg flex items-center justify-center font-bold text-sm ${
-                              isActive
-                                ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
-                                : 'bg-slate-100 text-slate-600'
-                            }`}
+                            className={`w-9 h-9 rounded-lg bg-gradient-to-br ${theme.gradientFrom} ${theme.gradientTo} flex items-center justify-center font-bold text-sm text-white shrink-0`}
                           >
                             <Building2 className="w-5 h-5" />
                           </div>
-                          <div>
+                          <div className="min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
-                              <h3 className="font-bold text-sm text-slate-900">
-                                {tenant.namaSekolah}
-                              </h3>
-                              <span className="text-[10px] font-semibold bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded border border-slate-200">
-                                {tenant.jenjang}
-                              </span>
-                              {tenant.isDemo && (
-                                <span className="text-[10px] font-medium bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded border border-amber-200">
-                                  Contoh Resmi
-                                </span>
-                              )}
-                              {isActive && (
-                                <span className="text-[10px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full flex items-center gap-1">
-                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                  Database Aktif
+                              <h4 className="text-xs sm:text-sm font-bold text-slate-900 truncate">
+                                {m.namaSekolah}
+                              </h4>
+                              {isSelected && (
+                                <span className="text-[10px] bg-blue-600 text-white px-2 py-0.2 rounded-full font-bold">
+                                  Aktif Sekarang
                                 </span>
                               )}
                             </div>
-                            <div className="flex items-center gap-3 text-xs text-slate-500 mt-1 flex-wrap">
-                              <span>NPSN: <b className="font-mono text-slate-700">{tenant.npsn}</b></span>
-                              <span>•</span>
-                              <span>{tenant.kabKota}, {tenant.provinsi}</span>
-                            </div>
-                            <div className="text-[11px] text-slate-400 mt-1 flex items-center gap-1 font-mono">
-                              <Lock className="w-3 h-3 text-emerald-600" />
-                              ID Koleksi Cloud: <span className="text-slate-600">schools/{tenant.id}/lpj_data</span>
+                            <div className="flex items-center gap-2 text-xs text-slate-500 font-mono mt-0.5">
+                              <span>NPSN: {m.npsn}</span>
+                              {m.kabKota && <span>• {m.kabKota}</span>}
                             </div>
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2">
-                          {isActive ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span
+                            className={`text-[10px] px-2 py-0.5 rounded font-semibold border ${roleBadge.colorClass}`}
+                          >
+                            {roleBadge.label}
+                          </span>
+                          {!isSelected && (
                             <button
-                              disabled
-                              className="text-xs bg-emerald-600 text-white font-medium px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 opacity-90 cursor-default"
+                              type="button"
+                              className="px-2.5 py-1 text-xs font-bold text-blue-600 hover:bg-blue-50 rounded-lg transition"
                             >
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              Sedang Digunakan
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => {
-                                onSelectTenant(tenant);
-                                onClose();
-                              }}
-                              className="text-xs bg-slate-900 hover:bg-blue-600 text-white font-medium px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition shadow-sm cursor-pointer"
-                            >
-                              Masuk Database Ini
-                              <ArrowRight className="w-3.5 h-3.5" />
+                              Pindah &rarr;
                             </button>
                           )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
-                          {onDeleteTenant && (
+          {/* TAB 2: GABUNG SEKOLAH */}
+          {activeTab === 'join' && (
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">Gabung ke Sekolah yang Sudah Ada</h3>
+                <p className="text-xs text-slate-500">
+                  Cari nama sekolah atau NPSN, lalu masukkan PIN yang diberikan oleh Bendahara/Kepala Sekolah
+                </p>
+              </div>
+
+              {/* Search input */}
+              <form onSubmit={handleSearch} className="flex gap-2">
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Ketik nama sekolah atau nomor NPSN..."
+                    className="w-full pl-9 pr-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={isSearching}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  {isSearching ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                  <span>Cari</span>
+                </button>
+              </form>
+
+              {/* Search Results */}
+              {searchResults.length > 0 && (
+                <div className="border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100 max-h-48 overflow-y-auto">
+                  {searchResults.map((s) => (
+                    <div
+                      key={s.id}
+                      onClick={() => setSelectedTargetSchool(s)}
+                      className={`p-3 text-xs flex items-center justify-between cursor-pointer transition ${
+                        selectedTargetSchool?.id === s.id
+                          ? 'bg-blue-50/80 border-l-4 border-blue-600'
+                          : 'hover:bg-slate-50'
+                      }`}
+                    >
+                      <div>
+                        <p className="font-bold text-slate-900">{s.namaSekolah}</p>
+                        <p className="text-[11px] text-slate-500 font-mono">
+                          NPSN: {s.npsn} • {s.kabKota || '-'} ({s.jenjang || 'SD'})
+                        </p>
+                      </div>
+                      <span className="text-blue-600 font-semibold text-[11px]">
+                        {selectedTargetSchool?.id === s.id ? 'Dipilih' : 'Pilih'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Join form if school selected */}
+              {selectedTargetSchool && (
+                <form onSubmit={handleJoinSchool} className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center gap-2 pb-2 border-b border-slate-200">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    <div>
+                      <p className="text-xs font-bold text-slate-800">
+                        Sekolah Tujuan: {selectedTargetSchool.namaSekolah}
+                      </p>
+                      <p className="text-[10px] text-slate-500">NPSN: {selectedTargetSchool.npsn}</p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Peran Anda di Sekolah Ini:
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: 'TIM_TEKNIS', label: 'Tim Teknis / Pelaksana' },
+                        { id: 'KEPALA_SEKOLAH', label: 'Kepala Sekolah' },
+                        { id: 'FASILITATOR', label: 'Fasilitator / Tamu' },
+                      ].map((r) => (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => setJoinRole(r.id as any)}
+                          className={`p-2 text-left rounded-lg border text-xs font-semibold transition cursor-pointer ${
+                            joinRole === r.id
+                              ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                              : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          {r.label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      *Role Bendahara memiliki kendali penuh dan hanya dapat ditugaskan oleh pembuat awal sekolah atau bendahara aktif.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Nama Lengkap Petugas:
+                    </label>
+                    <input
+                      type="text"
+                      value={joinDisplayName}
+                      onChange={(e) => setJoinDisplayName(e.target.value)}
+                      placeholder="Contoh: Budi Santoso, S.Pd"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-hidden bg-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      PIN Keamanan Sekolah (6 digit angka):
+                    </label>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                      <input
+                        type="password"
+                        value={joinPin}
+                        onChange={(e) => setJoinPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                        placeholder="Masukkan 6 digit PIN sekolah..."
+                        className="w-full pl-9 pr-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-hidden bg-white tracking-widest font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isJoining}
+                    className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                  >
+                    {isJoining ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Memverifikasi PIN di Server...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Verifikasi & Bergabung ke Sekolah</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              )}
+            </div>
+          )}
+
+          {/* TAB 3: BUAT SEKOLAH BARU */}
+          {activeTab === 'create' && (
+            <form onSubmit={handleCreateSchoolSubmit} className="space-y-3.5">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">Pendaftaran Sekolah Revitalisasi Baru</h3>
+                <p className="text-xs text-slate-500">
+                  Anda akan otomatis terdaftar sebagai <b>Bendahara</b> sekolah ini.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Nama Sekolah Lengkap: *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={createNamaSekolah}
+                    onChange={(e) => setCreateNamaSekolah(e.target.value)}
+                    placeholder="Contoh: SDN 1 MUARA DUA"
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-hidden uppercase"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    NPSN (8 digit): *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={createNpsn}
+                    onChange={(e) => setCreateNpsn(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                    placeholder="10105685"
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-hidden font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Jenjang Sekolah:
+                  </label>
+                  <select
+                    value={createJenjang}
+                    onChange={(e) => setCreateJenjang(e.target.value)}
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-hidden bg-white"
+                  >
+                    <option value="TK/PAUD">TK / PAUD</option>
+                    <option value="SD">SD (Sekolah Dasar)</option>
+                    <option value="SMP/MTs">SMP / MTs</option>
+                    <option value="SMA/SMK">SMA / SMK</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Kabupaten / Kota: *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={createKabKota}
+                    onChange={(e) => setCreateKabKota(e.target.value)}
+                    placeholder="Contoh: Kota Lhokseumawe"
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Provinsi:
+                  </label>
+                  <input
+                    type="text"
+                    value={createProvinsi}
+                    onChange={(e) => setCreateProvinsi(e.target.value)}
+                    placeholder="Contoh: Prov. Aceh"
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                  />
+                </div>
+              </div>
+
+              {/* PIN Settings */}
+              <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3.5 space-y-2.5">
+                <div className="flex items-center gap-2 text-amber-900 font-bold text-xs">
+                  <KeyRound className="w-4 h-4 text-amber-600" />
+                  <span>Buat PIN Keamanan Sekolah (6+ Digit Angka)</span>
+                </div>
+                <p className="text-[11px] text-amber-800">
+                  PIN ini akan dibagikan kepada Kepala Sekolah & Tim Teknis saat mereka ingin bergabung ke sekolah ini.
+                </p>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      PIN Baru:
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={createPin}
+                      onChange={(e) => setCreatePin(e.target.value.replace(/\D/g, ''))}
+                      placeholder="Minimal 6 angka"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:outline-hidden bg-white tracking-widest font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Konfirmasi PIN:
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={createConfirmPin}
+                      onChange={(e) => setCreateConfirmPin(e.target.value.replace(/\D/g, ''))}
+                      placeholder="Ketik ulang PIN"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:outline-hidden bg-white tracking-widest font-mono"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Template Data Awal:
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCreateTemplateType('blank')}
+                    className={`p-2.5 text-left rounded-lg border text-xs font-semibold transition cursor-pointer ${
+                      createTemplateType === 'blank'
+                        ? 'bg-blue-50 border-blue-600 text-blue-900 ring-1 ring-blue-500'
+                        : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    <p className="font-bold">Formulir Kosong Bersih</p>
+                    <p className="text-[10px] text-slate-500 font-normal">Mulai isi data dari awal untuk proyek nyata</p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCreateTemplateType('full')}
+                    className={`p-2.5 text-left rounded-lg border text-xs font-semibold transition cursor-pointer ${
+                      createTemplateType === 'full'
+                        ? 'bg-blue-50 border-blue-600 text-blue-900 ring-1 ring-blue-500'
+                        : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    <p className="font-bold">Sertakan Contoh Standar</p>
+                    <p className="text-[10px] text-slate-500 font-normal">Pra-isi data contoh untuk panduan penyusunan</p>
+                  </button>
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isCreating}
+                className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+              >
+                {isCreating ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Mendaftarkan Sekolah di Cloud...</span>
+                  </>
+                ) : (
+                  <>
+                    <PlusCircle className="w-4 h-4" />
+                    <span>Daftarkan & Buka Sekolah Baru</span>
+                  </>
+                )}
+              </button>
+            </form>
+          )}
+
+          {/* TAB 4: KELOLA ANGGOTA & ROLE (BENDAHARA ONLY) */}
+          {activeTab === 'members' && isBendahara && (
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Anggota Terdaftar ({currentTenant.namaSekolah})
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Atur hak akses atau keluarkan pengguna dari sekolah ini
+                </p>
+              </div>
+
+              {isLoadingMembers ? (
+                <div className="py-8 text-center text-xs text-slate-500">
+                  <RefreshCw className="w-6 h-6 animate-spin mx-auto text-blue-600 mb-2" />
+                  <span>Memuat daftar anggota...</span>
+                </div>
+              ) : schoolMembers.length === 0 ? (
+                <p className="text-xs text-slate-500 text-center py-6">Tidak ada anggota lain.</p>
+              ) : (
+                <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 overflow-hidden">
+                  {schoolMembers.map((m) => {
+                    const isSelf = m.uid === currentUser?.uid;
+
+                    return (
+                      <div key={m.uid} className="p-3 text-xs flex items-center justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-slate-900">{m.displayName}</span>
+                            {isSelf && (
+                              <span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.2 rounded font-medium">
+                                (Anda)
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-slate-500">{m.email}</p>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <select
+                            value={m.role}
+                            disabled={isSelf}
+                            onChange={(e) => handleSetRole(m.uid, e.target.value as UserRole)}
+                            className="px-2 py-1 text-xs border border-slate-300 rounded-lg bg-white disabled:bg-slate-100 font-semibold"
+                          >
+                            <option value="BENDAHARA">Bendahara</option>
+                            <option value="KEPALA_SEKOLAH">Kepala Sekolah</option>
+                            <option value="TIM_TEKNIS">Tim Teknis</option>
+                            <option value="FASILITATOR">Fasilitator</option>
+                          </select>
+
+                          {!isSelf && (
                             <button
-                              onClick={() => onDeleteTenant(tenant)}
-                              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 rounded-lg transition cursor-pointer"
-                              title={`Hapus database ${tenant.namaSekolah}`}
+                              type="button"
+                              onClick={() => handleRemoveMember(m.uid, m.displayName)}
+                              title="Keluarkan dari sekolah"
+                              className="p-1 text-rose-600 hover:bg-rose-50 rounded-lg transition"
                             >
                               <Trash2 className="w-4 h-4" />
                             </button>
                           )}
                         </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {filteredTenants.length === 0 && (
-                <div className="text-center py-8 bg-white rounded-xl border border-slate-200">
-                  <p className="text-xs text-slate-500">Tidak ada sekolah yang cocok dengan pencarian.</p>
+                    );
+                  })}
                 </div>
               )}
             </div>
           )}
 
-          {/* TAB 2: REGISTER NEW SCHOOL */}
-          {activeTab === 'register' && (
-            <form onSubmit={handleRegisterSubmit} className="space-y-4">
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-3.5 text-xs text-blue-800 flex items-start gap-2.5">
-                <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-bold">Pembuatan Ruang Database Sekolah Baru</p>
-                  <p className="text-blue-700 mt-0.5">
-                    Ketika Anda mendaftarkan sekolah baru, sistem secara otomatis membuat koleksi dokumen tersendiri di Google Cloud Firestore. Data tidak akan terlihat atau bercampur dengan sekolah lain.
-                  </p>
+          {/* TAB 5: KEAMANAN & PIN (BENDAHARA ONLY) */}
+          {activeTab === 'pin' && isBendahara && (
+            <div className="space-y-6">
+              {/* Form Ganti PIN */}
+              <form onSubmit={handleChangePin} className="space-y-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <div className="flex items-center gap-2 text-slate-900 font-bold text-xs pb-2 border-b border-slate-200">
+                  <KeyRound className="w-4 h-4 text-blue-600" />
+                  <span>Ubah PIN Keamanan Sekolah</span>
                 </div>
-              </div>
-
-              {errorMsg && (
-                <div className="bg-rose-50 border border-rose-200 text-rose-700 text-xs p-3 rounded-lg">
-                  {errorMsg}
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                <div className="md:col-span-2">
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Nama Satuan Pendidikan / Sekolah *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="Contoh: SMP NEGERI 5 LHOKSEUMAWE"
-                    value={namaSekolah}
-                    onChange={(e) => setNamaSekolah(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none uppercase"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Nomor Pokok Sekolah Nasional (NPSN) *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={8}
-                    placeholder="Contoh: 10108899"
-                    value={npsn}
-                    onChange={(e) => setNpsn(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none font-mono"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Jenjang Satuan Pendidikan *
-                  </label>
-                  <select
-                    value={jenjang}
-                    onChange={(e: any) => setJenjang(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  >
-                    <option value="TK/PAUD">TK/PAUD</option>
-                    <option value="SD">SD</option>
-                    <option value="SMP/MTs">SMP/MTs</option>
-                    <option value="SMA/SMK">SMA/SMK</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Kabupaten / Kota *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="Contoh: Kota Lhokseumawe"
-                    value={kabKota}
-                    onChange={(e) => setKabKota(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Provinsi *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="Contoh: Prov. Aceh"
-                    value={provinsi}
-                    onChange={(e) => setProvinsi(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-
-                <div className="md:col-span-2">
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Email Resmi Sekolah / Penanggung Jawab LPJ
-                  </label>
-                  <input
-                    type="email"
-                    placeholder="Contoh: smpn5lhokseumawe@sekolah.id"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-
-                <div className="md:col-span-2">
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Template Awal LPJ
-                  </label>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <label
-                      className={`p-3 rounded-lg border cursor-pointer flex items-start gap-2.5 transition ${
-                        templateType === 'full'
-                          ? 'border-blue-500 bg-blue-50/70 ring-1 ring-blue-500'
-                          : 'border-slate-200 bg-white hover:border-slate-300'
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="templateType"
-                        checked={templateType === 'full'}
-                        onChange={() => setTemplateType('full')}
-                        className="mt-0.5 text-blue-600"
-                      />
-                      <div>
-                        <p className="text-xs font-bold text-slate-900">
-                          Template Revitalisasi Standar (Rekomendasi)
-                        </p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
-                          Telah dilengkapi struktur RPD, contoh uraian kwitansi, dan master panitia siap edit.
-                        </p>
-                      </div>
-                    </label>
-
-                    <label
-                      className={`p-3 rounded-lg border cursor-pointer flex items-start gap-2.5 transition ${
-                        templateType === 'blank'
-                          ? 'border-blue-500 bg-blue-50/70 ring-1 ring-blue-500'
-                          : 'border-slate-200 bg-white hover:border-slate-300'
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="templateType"
-                        checked={templateType === 'blank'}
-                        onChange={() => setTemplateType('blank')}
-                        className="mt-0.5 text-blue-600"
-                      />
-                      <div>
-                        <p className="text-xs font-bold text-slate-900">
-                          Format Bersih Kosong
-                        </p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
-                          Mulai dari nol (tanpa daftar barang/kwitansi bawaan).
-                        </p>
-                      </div>
-                    </label>
-                  </div>
-                </div>
-              </div>
-
-              <div className="pt-2 flex justify-end gap-2 border-t border-slate-200">
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('switch')}
-                  className="px-4 py-2 text-xs font-medium text-slate-600 hover:text-slate-800 bg-slate-100 rounded-lg hover:bg-slate-200 transition cursor-pointer"
-                >
-                  Batal
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-md transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                >
-                  {isSubmitting ? (
-                    <>Menyiapkan Ruang Cloud Database...</>
-                  ) : (
-                    <>
-                      <Sparkles className="w-3.5 h-3.5" />
-                      Buat Database Sekolah Baru
-                    </>
-                  )}
-                </button>
-              </div>
-            </form>
-          )}
-
-          {/* TAB 3: ARCHITECTURE & SECURITY */}
-          {activeTab === 'architecture' && (
-            <div className="space-y-4">
-              <div className="bg-white p-4 rounded-xl border border-slate-200">
-                <h3 className="font-bold text-sm text-slate-900 mb-2 flex items-center gap-2">
-                  <Server className="w-4 h-4 text-blue-600" />
-                  Bagaimana Data Antar-Sekolah Dipisahkan Secara Aman (Opsi A)
-                </h3>
-                <p className="text-xs text-slate-600 leading-relaxed">
-                  Aplikasi ini mengimplementasikan konsep <b>Multi-Tenancy Data Isolation</b> berbasis <b>Google Cloud Firestore</b>. Setiap sekolah diperlakukan sebagai satu entitas penyewa (*Tenant*) mandiri dengan jalur penyimpanan (*Path Hierarchy*) tersendiri:
+                <p className="text-[11px] text-slate-500">
+                  PIN baru akan disimpan aman dengan algoritma scrypt di server.
                 </p>
 
-                {/* Visual Tree */}
-                <div className="mt-4 bg-slate-900 text-slate-200 p-4 rounded-xl font-mono text-xs overflow-x-auto">
-                  <div className="text-emerald-400 font-bold mb-2">// Cloud Firestore: {cloudDatabaseId}</div>
-                  <div className="text-slate-400">root/</div>
-                  <div className="pl-4 text-blue-400">├── schools/</div>
-                  <div className="pl-8 text-amber-300">├── sch_10105685/ (SDN 1 Muara Dua)</div>
-                  <div className="pl-12 text-slate-300">└── lpj_data/current <span className="text-emerald-400">→ [BKU, BKT, Kwitansi, RPD, Upah SDN 1]</span></div>
-                  <div className="pl-8 text-amber-300">├── sch_10101234/ (SMPN 2 Banda Aceh)</div>
-                  <div className="pl-12 text-slate-300">└── lpj_data/current <span className="text-emerald-400">→ [BKU, BKT, Kwitansi, RPD, Upah SMPN 2]</span></div>
-                  <div className="pl-8 text-purple-300">└── sch_&lt;NPSN_ANDA&gt;/ (Sekolah Baru)</div>
-                  <div className="pl-12 text-slate-300">└── lpj_data/current <span className="text-emerald-400">→ [Database Terisolasi Milik Sekolah Anda]</span></div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="bg-white p-3.5 rounded-xl border border-slate-200">
-                  <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center mb-2">
-                    <ShieldCheck className="w-4 h-4" />
-                  </div>
-                  <h4 className="font-bold text-xs text-slate-800">1. Data Tidak Tercampur</h4>
-                  <p className="text-[11px] text-slate-500 mt-1">
-                    Setiap mutasi kas, kwitansi, atau perubahan panitia hanya disimpan di bawah ID sekolah yang sedang aktif.
-                  </p>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                    PIN Lama (Opsional bila sebelumnya sudah disetel):
+                  </label>
+                  <input
+                    type="password"
+                    value={oldPinInput}
+                    onChange={(e) => setOldPinInput(e.target.value)}
+                    placeholder="Masukkan PIN lama..."
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-hidden bg-white font-mono"
+                  />
                 </div>
 
-                <div className="bg-white p-3.5 rounded-xl border border-slate-200">
-                  <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center mb-2">
-                    <Database className="w-4 h-4" />
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      PIN Baru (6+ angka):
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={newPinInput}
+                      onChange={(e) => setNewPinInput(e.target.value.replace(/\D/g, ''))}
+                      placeholder="6 digit angka"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-hidden bg-white font-mono"
+                    />
                   </div>
-                  <h4 className="font-bold text-xs text-slate-800">2. Penyimpanan Cloud Real-Time</h4>
-                  <p className="text-[11px] text-slate-500 mt-1">
-                    Setiap ketikan data otomatis tersinkronisasi ke Google Cloud Firestore tanpa perlu klik simpan manual.
-                  </p>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Konfirmasi PIN Baru:
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={confirmNewPinInput}
+                      onChange={(e) => setConfirmNewPinInput(e.target.value.replace(/\D/g, ''))}
+                      placeholder="Ketik ulang PIN"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-hidden bg-white font-mono"
+                    />
+                  </div>
                 </div>
 
-                <div className="bg-white p-3.5 rounded-xl border border-slate-200">
-                  <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center mb-2">
-                    <Layers className="w-4 h-4" />
-                  </div>
-                  <h4 className="font-bold text-xs text-slate-800">3. Mudah Ganti Sekolah</h4>
-                  <p className="text-[11px] text-slate-500 mt-1">
-                    Pengawas Dinas atau staf yayasan dapat berpindah profil sekolah kapan saja secara instan untuk verifikasi.
-                  </p>
+                <button
+                  type="submit"
+                  disabled={isChangingPin}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  {isChangingPin ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5" />}
+                  <span>Simpan PIN Baru</span>
+                </button>
+              </form>
+
+              {/* Danger Zone: Hapus Sekolah */}
+              <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 space-y-3">
+                <div className="flex items-center gap-2 text-rose-700 font-bold text-xs">
+                  <ShieldAlert className="w-4 h-4 text-rose-600" />
+                  <span>Zona Bahaya: Hapus Sekolah Ini</span>
                 </div>
+                <p className="text-[11px] text-rose-800">
+                  Sekolah akan di-soft-delete dan disembunyikan. Data tersimpan selama <b>30 hari</b> sebelum dihapus permanen oleh sistem, dan dapat dipulihkan oleh Administrator jika terjadi kesalahan.
+                </p>
+
+                {!isDeleteDialogOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsDeleteDialogOpen(true)}
+                    className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Hapus Sekolah ({currentTenant.namaSekolah})</span>
+                  </button>
+                ) : (
+                  <form onSubmit={handleDeleteSchool} className="space-y-2.5 pt-2 border-t border-rose-200">
+                    <p className="text-xs font-bold text-slate-800">
+                      Ketikkan persis nama sekolah: <span className="text-rose-700 select-all font-mono">{currentTenant.namaSekolah}</span>
+                    </p>
+                    <input
+                      type="text"
+                      required
+                      value={deleteConfirmName}
+                      onChange={(e) => setDeleteConfirmName(e.target.value)}
+                      placeholder="Ketik nama sekolah persis di sini..."
+                      className="w-full px-3 py-1.5 text-xs border border-rose-300 rounded-lg focus:ring-2 focus:ring-rose-500 focus:outline-hidden bg-white"
+                    />
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        PIN Sekolah untuk Otorisasi:
+                      </label>
+                      <input
+                        type="password"
+                        required
+                        value={deletePinInput}
+                        onChange={(e) => setDeletePinInput(e.target.value)}
+                        placeholder="PIN sekolah..."
+                        className="w-full px-3 py-1.5 text-xs border border-rose-300 rounded-lg focus:ring-2 focus:ring-rose-500 focus:outline-hidden bg-white font-mono"
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setIsDeleteDialogOpen(false)}
+                        className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg"
+                      >
+                        Batal
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isDeletingSchool}
+                        className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                      >
+                        {isDeletingSchool ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                        <span>Konfirmasi Hapus Sekolah</span>
+                      </button>
+                    </div>
+                  </form>
+                )}
               </div>
             </div>
           )}
-
         </div>
 
         {/* Footer */}
-        <div className="bg-slate-100 border-t border-slate-200 px-5 py-3 flex items-center justify-between text-xs text-slate-500 flex-wrap gap-2">
-          <div className="flex items-center gap-1.5">
-            <Lock className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Multi-Tenant Data Encryption & Firestore Rules Enforced</span>
-          </div>
-          <div className="flex items-center gap-2">
-            {onLogout && (
-              <button
-                type="button"
-                onClick={() => {
-                  onClose();
-                  onLogout();
-                }}
-                className="px-3.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-lg font-bold transition flex items-center gap-1.5 cursor-pointer"
-                title="Keluar dari sekolah saat ini dan kembali ke Portal Login"
-              >
-                <LogOut className="w-3.5 h-3.5 text-rose-600" />
-                <span>Keluar ke Portal Login</span>
-              </button>
-            )}
+        <div className="bg-slate-50 border-t border-slate-200 px-5 py-3 flex items-center justify-between text-xs text-slate-500">
+          <span>Sistem Multi-Sekolah Terisolasi</span>
+          {onLogout && (
             <button
-              onClick={onClose}
-              className="px-4 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg font-medium transition cursor-pointer"
+              type="button"
+              onClick={onLogout}
+              className="flex items-center gap-1.5 text-rose-600 hover:text-rose-700 font-semibold cursor-pointer"
             >
-              Tutup
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Keluar dari Akun</span>
             </button>
-          </div>
+          )}
         </div>
-
       </div>
+
+      <AdminMigrationModal
+        isOpen={isAdminMigrationOpen}
+        onClose={() => setIsAdminMigrationOpen(false)}
+        userEmail={currentUser?.email}
+      />
     </div>
   );
 };

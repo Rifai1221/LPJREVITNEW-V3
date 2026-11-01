@@ -30,5 +30,17 @@ jobs:
       - name: Run Automated Unit Tests
         run: npm test
 
+      - name: Setup Java (for Firebase Emulators)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Run Firestore Security Rules Tests
+        run: npm run test:rules
+
+      - name: Run Cloud Functions Tests
+        run: npm run test:functions
+
       - name: Build Application
         run: npm run build

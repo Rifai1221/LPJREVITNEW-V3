@@ -1,23 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import {
   Building2,
-  FileSpreadsheet,
   Lock,
   ArrowRight,
-  ShieldCheck,
-  CheckCircle2,
   School,
   KeyRound,
   UserCheck,
-  Eye,
-  EyeOff,
-  AlertCircle,
   Search,
-  Check,
-  Info,
-  LogOut,
+  CheckCircle2,
+  RefreshCw,
+  PlusCircle,
+  Sparkles,
   Mail,
   UserPlus,
+  LogIn,
+  AlertCircle,
+  Shield,
 } from 'lucide-react';
 import {
   signInWithEmailAndPassword,
@@ -28,61 +26,67 @@ import { auth } from '../services/firebase';
 import { SchoolTenant } from '../data/tenantPresets';
 import { GoogleUserProfile } from '../services/googleAuthService';
 import {
-  USER_ROLES,
-  UserRole,
-  verifySchoolPinSecure,
-  isSchoolPinConfigured,
-  setLocalUserSession,
-  LocalUserSession,
-} from '../utils/authHelper';
-import {
-  updateSchoolPinHash,
-  upsertSchoolMember,
-} from '../services/schoolTenantService';
+  UserMembershipRecord,
+  searchSchoolsCallable,
+  joinSchoolCallable,
+  createSchoolCallable,
+  SearchedSchoolItem,
+} from '../services/schoolMembershipService';
+import { useToast } from '../context/ToastContext';
 
 interface LoginPortalProps {
-  tenants: SchoolTenant[];
-  currentTenant: SchoolTenant;
+  memberships: UserMembershipRecord[];
   onSelectTenant: (tenant: SchoolTenant) => void;
   onOpenCreateSchool: () => void;
   onGoogleSignIn: () => Promise<void>;
   isSigningInGoogle: boolean;
   currentUser: GoogleUserProfile | null;
-  onProceedToDashboard: (sessionData?: LocalUserSession) => void;
+  onProceedToDashboard: (targetTenant?: SchoolTenant) => void;
+  onCreateDemoSchool?: () => Promise<void>;
+  isCreatingDemo?: boolean;
 }
 
 export const LoginPortal: React.FC<LoginPortalProps> = ({
-  tenants,
-  currentTenant,
+  memberships,
   onSelectTenant,
   onOpenCreateSchool,
   onGoogleSignIn,
   isSigningInGoogle,
   currentUser,
   onProceedToDashboard,
+  onCreateDemoSchool,
+  isCreatingDemo = false,
 }) => {
-  // Step 1: Firebase Auth User state
+  const toast = useToast();
   const [firebaseUser, setFirebaseUser] = useState(auth.currentUser);
 
-  // Email/Password states
+  // Email/Password state
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [isRegisterMode, setIsRegisterMode] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(false);
 
-  // Step 2: School and Role selection
-  const [selectedTenantId, setSelectedTenantId] = useState<string>(currentTenant.id);
-  const [schoolSearchQuery, setSchoolSearchQuery] = useState('');
-  const [selectedRole, setSelectedRole] = useState<UserRole>('BENDAHARA');
-  const [officerName, setOfficerName] = useState('');
+  // Zero-membership onboarding state: 'choice' | 'search' | 'create'
+  const [onboardView, setOnboardView] = useState<'choice' | 'search' | 'create'>('choice');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<SearchedSchoolItem[]>([]);
+  const [selectedTargetSchool, setSelectedTargetSchool] = useState<SearchedSchoolItem | null>(null);
+  const [joinPin, setJoinPin] = useState('');
+  const [joinRole, setJoinRole] = useState<'KEPALA_SEKOLAH' | 'TIM_TEKNIS' | 'FASILITATOR'>('TIM_TEKNIS');
+  const [joinDisplayName, setJoinDisplayName] = useState('');
+  const [isJoining, setIsJoining] = useState(false);
 
-  // Step 3: PIN Verification & Reset
-  const [pinInput, setPinInput] = useState('');
-  const [confirmPinInput, setConfirmPinInput] = useState('');
-  const [showPin, setShowPin] = useState(false);
-  const [pinError, setPinError] = useState<string | null>(null);
-  const [isPinSubmitting, setIsPinSubmitting] = useState(false);
+  // Create school in onboarding
+  const [createNamaSekolah, setCreateNamaSekolah] = useState('');
+  const [createNpsn, setCreateNpsn] = useState('');
+  const [createJenjang, setCreateJenjang] = useState<'SD' | 'SMP/MTs' | 'SMA/SMK' | string>('SD');
+  const [createKabKota, setCreateKabKota] = useState('');
+  const [createProvinsi, setCreateProvinsi] = useState('Prov. Aceh');
+  const [createPin, setCreatePin] = useState('');
+  const [createConfirmPin, setCreateConfirmPin] = useState('');
+  const [isCreatingSchool, setIsCreatingSchool] = useState(false);
 
   useEffect(() => {
     const unsub = auth.onAuthStateChanged((user) => {
@@ -91,22 +95,27 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
     return () => unsub();
   }, []);
 
-  const selectedTenant = tenants.find((t) => t.id === selectedTenantId) || currentTenant;
-  const isPinConfigured = isSchoolPinConfigured(selectedTenant);
-  const isMandatoryReset = !isPinConfigured || Boolean(selectedTenant.mustResetPin);
+  // When logged in and memberships >= 1, automatically proceed to dashboard
+  useEffect(() => {
+    if (firebaseUser && memberships.length > 0) {
+      const topSchool = memberships[0];
+      const targetTenant: SchoolTenant = {
+        id: topSchool.schoolId,
+        namaSekolah: topSchool.namaSekolah,
+        npsn: topSchool.npsn,
+        jenjang: (topSchool.jenjang || 'SD') as any,
+        kabKota: topSchool.kabKota || '-',
+        provinsi: '-',
+        email: '-',
+        isDemo: false,
+        createdAt: new Date().toISOString(),
+        lastLogin: new Date().toISOString(),
+      };
+      onProceedToDashboard(targetTenant);
+    }
+  }, [firebaseUser, memberships]);
 
-  // Filtered tenants list
-  const filteredTenants = tenants.filter((t) => {
-    if (!schoolSearchQuery.trim()) return true;
-    const q = schoolSearchQuery.toLowerCase();
-    return (
-      t.namaSekolah.toLowerCase().includes(q) ||
-      (t.npsn && t.npsn.includes(q)) ||
-      (t.kabKota && t.kabKota.toLowerCase().includes(q))
-    );
-  });
-
-  // Handle Email/Password Login or Register
+  // Handle Email Auth
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
@@ -115,16 +124,20 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
     try {
       if (isRegisterMode) {
         await createUserWithEmailAndPassword(auth, authEmail.trim(), authPassword);
+        toast.success('Pendaftaran akun berhasil!');
       } else {
         await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword);
+        toast.success('Login berhasil!');
       }
     } catch (err: any) {
       console.error('Firebase Auth error:', err);
       let msg = err?.message || 'Gagal autentikasi.';
-      if (err?.code === 'auth/user-not-found' || err?.code === 'auth/wrong-password' || err?.code === 'auth/invalid-credential') {
+      if (
+        err?.code === 'auth/user-not-found' ||
+        err?.code === 'auth/wrong-password' ||
+        err?.code === 'auth/invalid-credential'
+      ) {
         msg = 'Email atau password salah. Silakan periksa kembali.';
-      } else if (err?.code === 'auth/operation-not-allowed') {
-        msg = 'Metode autentikasi Email/Password belum diaktifkan di konsol Firebase proyek ini. Silakan aktifkan Sign-in method Email/Password di Firebase Console -> Authentication -> Sign-in method.';
       } else if (err?.code === 'auth/email-already-in-use') {
         msg = 'Email sudah terdaftar. Silakan masuk menggunakan password Anda.';
       } else if (err?.code === 'auth/weak-password') {
@@ -138,8 +151,118 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
     }
   };
 
-  // Sign out from primary Firebase Auth
-  const handleSignOutPrimary = async () => {
+  // Handle Search for Onboarding
+  const handleSearchOnboard = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!searchQuery.trim() || searchQuery.trim().length < 3) {
+      toast.warning('Ketik minimal 3 karakter untuk mencari sekolah.');
+      return;
+    }
+    setIsSearching(true);
+    try {
+      const res = await searchSchoolsCallable(searchQuery.trim());
+      setSearchResults(res);
+      if (res.length === 0) {
+        toast.info('Tidak ada sekolah yang cocok.');
+      }
+    } catch (err: any) {
+      toast.error('Gagal mencari sekolah: ' + (err?.message || err));
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  // Handle Join in Onboarding
+  const handleJoinOnboard = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedTargetSchool) return;
+    if (!joinPin.trim() || joinPin.trim().length < 6) {
+      toast.warning('Masukkan PIN sekolah minimal 6 digit.');
+      return;
+    }
+
+    setIsJoining(true);
+    try {
+      const joined = await joinSchoolCallable({
+        schoolId: selectedTargetSchool.id,
+        pin: joinPin.trim(),
+        role: joinRole,
+        displayName: joinDisplayName.trim() || firebaseUser?.displayName || 'Anggota',
+      });
+
+      toast.success(`Berhasil bergabung ke ${joined.namaSekolah}!`);
+      onProceedToDashboard({
+        id: joined.schoolId,
+        namaSekolah: joined.namaSekolah,
+        npsn: selectedTargetSchool.npsn,
+        jenjang: (selectedTargetSchool.jenjang || 'SD') as any,
+        kabKota: selectedTargetSchool.kabKota || '-',
+        provinsi: selectedTargetSchool.provinsi || '-',
+        email: '-',
+        isDemo: false,
+        createdAt: new Date().toISOString(),
+        lastLogin: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      toast.error('Gagal bergabung: ' + (err?.message || 'PIN salah atau akses ditolak.'));
+    } finally {
+      setIsJoining(false);
+    }
+  };
+
+  // Handle Create in Onboarding
+  const handleCreateOnboard = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!createNamaSekolah.trim()) {
+      toast.warning('Nama sekolah wajib diisi.');
+      return;
+    }
+    if (!createNpsn.trim() || createNpsn.trim().length < 8) {
+      toast.warning('NPSN minimal 8 digit angka.');
+      return;
+    }
+    if (createPin.length < 6 || !/^\d{6,}$/.test(createPin)) {
+      toast.warning('PIN baru harus berupa angka minimal 6 digit.');
+      return;
+    }
+    if (createPin !== createConfirmPin) {
+      toast.warning('Konfirmasi PIN tidak cocok.');
+      return;
+    }
+
+    setIsCreatingSchool(true);
+    try {
+      const created = await createSchoolCallable({
+        namaSekolah: createNamaSekolah.trim(),
+        npsn: createNpsn.trim(),
+        jenjang: createJenjang,
+        kabKota: createKabKota.trim(),
+        provinsi: createProvinsi.trim(),
+        pin: createPin.trim(),
+      });
+
+      toast.success(`Sekolah ${created.namaSekolah} berhasil dibuat!`);
+      onProceedToDashboard({
+        id: created.schoolId,
+        namaSekolah: created.namaSekolah,
+        npsn: created.npsn,
+        jenjang: createJenjang as any,
+        kabKota: createKabKota.trim(),
+        provinsi: createProvinsi.trim(),
+        email: '-',
+        isDemo: false,
+        createdAt: new Date().toISOString(),
+        lastLogin: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      toast.error('Gagal membuat sekolah: ' + (err?.message || err));
+    } finally {
+      setIsCreatingSchool(false);
+    }
+  };
+
+  // Sign out
+  const handleSignOut = async () => {
     try {
       await signOut(auth);
       setFirebaseUser(null);
@@ -148,594 +271,441 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
     }
   };
 
-  // Handle Step 2 & 3: PIN Verification or First-Time Mandatory Reset
-  const handleSubmitPinStep = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setPinError(null);
-    setIsPinSubmitting(true);
-
-    try {
-      const activeUid = firebaseUser?.uid;
-      if (!activeUid) {
-        setPinError('Sesi autentikasi utama kadaluwarsa. Silakan masuk kembali.');
-        setIsPinSubmitting(false);
-        return;
-      }
-
-      // Case A: Mandatory PIN creation on first login or missing hash
-      if (isMandatoryReset) {
-        const cleanPin = pinInput.trim();
-        const cleanConfirm = confirmPinInput.trim();
-
-        if (cleanPin.length < 6 || !/^\d{6,}$/.test(cleanPin)) {
-          setPinError('PIN baru harus berupa minimal 6 digit angka.');
-          setIsPinSubmitting(false);
-          return;
-        }
-
-        if (cleanPin !== cleanConfirm) {
-          setPinError('Konfirmasi PIN tidak cocok. Pastikan kedua PIN sama.');
-          setIsPinSubmitting(false);
-          return;
-        }
-
-        // Store salted PBKDF2/SHA-256 hash in school doc
-        await updateSchoolPinHash(selectedTenant.id, cleanPin);
-        selectedTenant.mustResetPin = false;
-      } else {
-        // Case B: Verify against existing salted hash in school doc
-        const verification = await verifySchoolPinSecure(pinInput, selectedTenant);
-        if (!verification.isValid) {
-          setPinError(verification.reason || 'PIN yang dimasukkan salah.');
-          setIsPinSubmitting(false);
-          return;
-        }
-      }
-
-      // Step C: Update server-side member document (Zero-Trust RBAC in Firestore)
-      const roleObj = USER_ROLES.find((r) => r.id === selectedRole);
-      const finalOfficerName = officerName.trim() || roleObj?.title || 'Petugas Sekolah';
-
-      await upsertSchoolMember(selectedTenant.id, {
-        uid: activeUid,
-        role: selectedRole,
-        email: firebaseUser?.email || '',
-        displayName: finalOfficerName,
-      });
-
-      // Step D: Create session and proceed
-      const session: LocalUserSession = {
-        authMode: firebaseUser?.providerData?.[0]?.providerId === 'google.com' ? 'google' : 'mandiri',
-        role: selectedRole,
-        roleLabel: roleObj?.title || 'Bendahara Revitalisasi',
-        officerName: finalOfficerName,
-        schoolId: selectedTenant.id,
-        schoolName: selectedTenant.namaSekolah,
-        loginAt: new Date().toISOString(),
-        uid: activeUid,
-        email: firebaseUser?.email || undefined,
-      };
-
-      setLocalUserSession(session);
-      onSelectTenant(selectedTenant);
-      onProceedToDashboard(session);
-    } catch (err: any) {
-      console.error('PIN submit error:', err);
-      setPinError(`Terjadi kesalahan: ${err?.message || err}`);
-    } finally {
-      setIsPinSubmitting(false);
-    }
-  };
-
-  return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between selection:bg-blue-600 selection:text-white">
-      {/* Background ambient lighting */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none z-0">
-        <div className="absolute -top-40 -left-40 w-96 h-96 bg-blue-600/15 rounded-full blur-3xl"></div>
-        <div className="absolute top-1/3 -right-40 w-96 h-96 bg-emerald-600/10 rounded-full blur-3xl"></div>
-        <div className="absolute -bottom-40 left-1/3 w-96 h-96 bg-indigo-600/15 rounded-full blur-3xl"></div>
-      </div>
-
-      {/* Top Header Brand */}
-      <header className="relative z-10 border-b border-slate-800/80 bg-slate-900/70 backdrop-blur-md px-6 py-4">
-        <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center font-bold text-white shadow-lg shadow-blue-500/20">
-              <Building2 className="w-5 h-5" />
+  // VIEW 2: User is Authenticated, but has 0 memberships (Onboarding Screen)
+  if (firebaseUser && memberships.length === 0) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 flex items-center justify-center p-4">
+        <div className="w-full max-w-lg bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+          {/* Header */}
+          <div className="bg-gradient-to-r from-blue-700 to-indigo-800 text-white p-6 text-center">
+            <div className="w-12 h-12 rounded-2xl bg-white/10 backdrop-blur-md flex items-center justify-center mx-auto mb-3 shadow-inner">
+              <School className="w-6 h-6 text-white" />
             </div>
-            <div>
-              <h1 className="text-sm sm:text-base font-bold text-white tracking-tight flex items-center gap-2">
-                <span>LPJ REVITALISASI SATUAN PENDIDIKAN</span>
-                <span className="text-[10px] bg-blue-500/20 text-blue-300 font-mono px-2 py-0.5 rounded border border-blue-400/30">
-                  Firebase Auth & RBAC
-                </span>
-              </h1>
-              <p className="text-[11px] text-slate-400">
-                Sistem BKU, BKT, BKB, Pajak, Kwitansi, SPB, Bon Toko & Progres Mingguan Terproteksi
-              </p>
-            </div>
+            <h2 className="text-xl font-black tracking-tight">Selamat Datang di LPJ Revit!</h2>
+            <p className="text-xs text-blue-100 mt-1">
+              Akun: <b className="text-white">{firebaseUser.email || firebaseUser.displayName}</b>
+            </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-[11px] text-emerald-300 font-medium shadow-xs">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span>Sistem Siap Operasi</span>
-            </span>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Container */}
-      <main className="relative z-10 max-w-5xl mx-auto px-4 py-8 w-full">
-        {/* Title */}
-        <div className="text-center max-w-2xl mx-auto mb-8">
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-300 border border-blue-500/20 mb-3">
-            <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
-            <span>Autentikasi Bertingkat • Identitas Utama & PIN Kriptografis</span>
-          </span>
-          <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-            Masuk ke Ruang Kerja LPJ Sekolah
-          </h2>
-          <p className="text-sm text-slate-400 mt-2">
-            Login dengan identitas akun resmi Anda, kemudian pilih sekolah dan masukkan PIN keamanan sekolah Anda.
-          </p>
-        </div>
-
-        {/* STEP 1: If user is not authenticated with Firebase Auth */}
-        {!firebaseUser ? (
-          <div className="max-w-md mx-auto bg-slate-900/90 backdrop-blur-md rounded-2xl border border-slate-800 p-6 sm:p-8 shadow-2xl space-y-6 animate-in fade-in duration-300">
-            <div className="text-center">
-              <span className="text-[11px] font-bold text-blue-400 uppercase tracking-wider block">
-                Langkah 1 • Identitas Utama
-              </span>
-              <h3 className="text-lg font-bold text-white mt-1">
-                Masuk Akun Petugas
-              </h3>
-              <p className="text-xs text-slate-400 mt-1">
-                Gunakan Akun Google resmi atau Email & Password Anda
-              </p>
-            </div>
-
-            {/* Google Sign In Button */}
-            <div>
-              <button
-                type="button"
-                onClick={onGoogleSignIn}
-                disabled={isSigningInGoogle}
-                className="w-full flex items-center justify-center gap-3 py-3 px-4 bg-white hover:bg-slate-100 text-slate-800 font-bold text-xs rounded-xl shadow-md transition disabled:opacity-50 cursor-pointer"
-              >
-                <svg className="w-4 h-4" viewBox="0 0 24 24">
-                  <path
-                    fill="#4285F4"
-                    d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                  />
-                  <path
-                    fill="#34A853"
-                    d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                  />
-                  <path
-                    fill="#FBBC05"
-                    d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
-                  />
-                  <path
-                    fill="#EA4335"
-                    d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
-                  />
-                </svg>
-                <span>{isSigningInGoogle ? 'Menghubungkan...' : 'Lanjut dengan Akun Google'}</span>
-              </button>
-            </div>
-
-            <div className="relative flex py-1 items-center">
-              <div className="flex-grow border-t border-slate-800"></div>
-              <span className="flex-shrink mx-4 text-[10px] text-slate-500 uppercase tracking-widest font-semibold">
-                Atau Email & Password
-              </span>
-              <div className="flex-grow border-t border-slate-800"></div>
-            </div>
-
-            {/* Email & Password Form */}
-            <form onSubmit={handleEmailAuth} className="space-y-4">
-              <div className="space-y-1.5">
-                <label className="block text-xs font-semibold text-slate-300">
-                  Alamat Email:
-                </label>
-                <div className="relative">
-                  <Mail className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="email"
-                    required
-                    placeholder="nama@sekolah.id"
-                    value={authEmail}
-                    onChange={(e) => setAuthEmail(e.target.value)}
-                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-blue-500 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 outline-none transition"
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="block text-xs font-semibold text-slate-300">
-                  Password:
-                </label>
-                <div className="relative">
-                  <Lock className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="password"
-                    required
-                    placeholder="Minimal 6 karakter"
-                    value={authPassword}
-                    onChange={(e) => setAuthPassword(e.target.value)}
-                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-blue-500 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 outline-none transition"
-                  />
-                </div>
-              </div>
-
-              {authError && (
-                <div className="flex items-center gap-1.5 text-rose-400 text-[11px] bg-rose-950/40 p-2.5 rounded-lg border border-rose-800/40">
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                  <span>{authError}</span>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={isAuthLoading}
-                className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold text-xs shadow-md shadow-blue-600/30 transition flex items-center justify-center gap-2 cursor-pointer"
-              >
-                {isAuthLoading ? (
-                  <span>Memproses...</span>
-                ) : isRegisterMode ? (
-                  <>
-                    <UserPlus className="w-4 h-4" />
-                    <span>Daftarkan Akun Baru</span>
-                  </>
-                ) : (
-                  <>
-                    <ArrowRight className="w-4 h-4" />
-                    <span>Masuk dengan Email</span>
-                  </>
-                )}
-              </button>
-
-              <div className="text-center">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsRegisterMode(!isRegisterMode);
-                    setAuthError(null);
-                  }}
-                  className="text-[11px] text-blue-400 hover:text-blue-300 underline cursor-pointer"
-                >
-                  {isRegisterMode
-                    ? 'Sudah punya akun? Masuk di sini'
-                    : 'Belum punya akun? Buat akun baru'}
-                </button>
-              </div>
-            </form>
-          </div>
-        ) : (
-          /* STEP 2 & 3: When authenticated with Firebase Auth */
-          <div className="space-y-6 animate-in fade-in duration-300">
-            {/* Authenticated User Badge */}
-            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-lg">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center font-bold text-blue-300">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-white">
-                      {firebaseUser.displayName || firebaseUser.email}
-                    </span>
-                    <span className="text-[10px] bg-emerald-500/20 text-emerald-300 font-medium px-2 py-0.5 rounded border border-emerald-500/30">
-                      Terautentikasi
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 font-mono">
-                    UID: {firebaseUser.uid} • {firebaseUser.email || 'Google Auth'}
+          <div className="p-6">
+            {onboardView === 'choice' && (
+              <div className="space-y-4">
+                <div className="text-center space-y-1">
+                  <h3 className="text-sm font-bold text-slate-800">
+                    Anda belum terdaftar di sekolah revitalisasi mana pun.
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Pilih salah satu opsi di bawah untuk memulai:
                   </p>
                 </div>
-              </div>
 
-              <button
-                type="button"
-                onClick={handleSignOutPrimary}
-                className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-rose-300 hover:bg-rose-500/10 px-3 py-1.5 rounded-lg border border-slate-800 transition cursor-pointer"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Ganti Akun</span>
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              {/* Step 2: Pilih Ruang Kerja Sekolah (5 cols) */}
-              <div className="lg:col-span-5 bg-slate-900/80 backdrop-blur-md rounded-2xl border border-slate-800 p-5 shadow-xl space-y-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="text-[11px] font-bold text-blue-400 uppercase tracking-wider block">
-                      Langkah 2
-                    </span>
-                    <h3 className="text-sm font-bold text-white flex items-center gap-2 mt-0.5">
-                      <School className="w-4 h-4 text-blue-400" />
-                      <span>Pilih Sekolah Anda</span>
-                    </h3>
-                  </div>
+                <div className="grid gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setOnboardView('search')}
+                    className="p-4 rounded-2xl border-2 border-slate-200 hover:border-blue-500 hover:bg-blue-50/50 text-left transition flex items-center justify-between group cursor-pointer"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center font-bold">
+                        <Search className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-900 group-hover:text-blue-700">
+                          Gabung ke Sekolah yang Sudah Ada
+                        </p>
+                        <p className="text-[11px] text-slate-500">
+                          Masukkan PIN dari Bendahara / Kepala Sekolah
+                        </p>
+                      </div>
+                    </div>
+                    <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-blue-600 transition" />
+                  </button>
 
                   <button
                     type="button"
-                    onClick={onOpenCreateSchool}
-                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-400 hover:text-blue-300 bg-blue-500/10 hover:bg-blue-500/20 px-2.5 py-1 rounded-lg border border-blue-500/20 transition cursor-pointer"
+                    onClick={() => setOnboardView('create')}
+                    className="p-4 rounded-2xl border-2 border-slate-200 hover:border-emerald-500 hover:bg-emerald-50/50 text-left transition flex items-center justify-between group cursor-pointer"
                   >
-                    <span>+ Sekolah Baru</span>
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
+                        <PlusCircle className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-900 group-hover:text-emerald-700">
+                          Daftarkan Sekolah Baru
+                        </p>
+                        <p className="text-[11px] text-slate-500">
+                          Daftarkan sekolah Anda dan mulai pembukuan sebagai Bendahara
+                        </p>
+                      </div>
+                    </div>
+                    <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-emerald-600 transition" />
                   </button>
+
+                  {onCreateDemoSchool && (
+                    <button
+                      type="button"
+                      disabled={isCreatingDemo}
+                      onClick={onCreateDemoSchool}
+                      className="p-4 rounded-2xl border border-amber-200 bg-amber-50/60 hover:bg-amber-100/70 text-left transition flex items-center justify-between group cursor-pointer disabled:opacity-50"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-amber-200 text-amber-900 flex items-center justify-center font-bold">
+                          {isCreatingDemo ? (
+                            <RefreshCw className="w-5 h-5 animate-spin text-amber-700" />
+                          ) : (
+                            <Sparkles className="w-5 h-5 text-amber-700" />
+                          )}
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-amber-950">
+                            {isCreatingDemo ? 'Sedang Menyiapkan...' : 'Buat Sekolah Contoh (Template Lengkap)'}
+                          </p>
+                          <p className="text-[11px] text-amber-800">
+                            Langsung coba fitur LPJ dengan data simulasi 100% lengkap
+                          </p>
+                        </div>
+                      </div>
+                      <ArrowRight className="w-4 h-4 text-amber-600" />
+                    </button>
+                  )}
                 </div>
 
-                {/* Search filter */}
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <div className="pt-4 border-t border-slate-100 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={handleSignOut}
+                    className="text-xs font-semibold text-rose-600 hover:text-rose-700 flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>Ganti Akun / Logout</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Sub-view: Search & Join */}
+            {onboardView === 'search' && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => setOnboardView('choice')}
+                    className="text-xs font-bold text-blue-600 hover:underline cursor-pointer"
+                  >
+                    &larr; Kembali
+                  </button>
+                  <span className="text-xs font-bold text-slate-700">Gabung Sekolah</span>
+                </div>
+
+                <form onSubmit={handleSearchOnboard} className="flex gap-2">
                   <input
                     type="text"
-                    placeholder="Cari nama sekolah / NPSN / Kota..."
-                    value={schoolSearchQuery}
-                    onChange={(e) => setSchoolSearchQuery(e.target.value)}
-                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-blue-500 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 outline-none transition"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Nama sekolah atau NPSN..."
+                    className="flex-1 px-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isSearching}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+                  >
+                    {isSearching ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                    <span>Cari</span>
+                  </button>
+                </form>
+
+                {searchResults.length > 0 && (
+                  <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-40 overflow-y-auto">
+                    {searchResults.map((s) => (
+                      <div
+                        key={s.id}
+                        onClick={() => setSelectedTargetSchool(s)}
+                        className={`p-2.5 text-xs flex items-center justify-between cursor-pointer transition ${
+                          selectedTargetSchool?.id === s.id ? 'bg-blue-50 border-l-4 border-blue-600' : 'hover:bg-slate-50'
+                        }`}
+                      >
+                        <div>
+                          <p className="font-bold text-slate-900">{s.namaSekolah}</p>
+                          <p className="text-[10px] text-slate-500 font-mono">NPSN: {s.npsn}</p>
+                        </div>
+                        <span className="text-blue-600 font-semibold text-[11px]">
+                          {selectedTargetSchool?.id === s.id ? 'Dipilih' : 'Pilih'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {selectedTargetSchool && (
+                  <form onSubmit={handleJoinOnboard} className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-2.5">
+                    <p className="text-xs font-bold text-slate-800">Sekolah: {selectedTargetSchool.namaSekolah}</p>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">Peran Anda:</label>
+                      <select
+                        value={joinRole}
+                        onChange={(e) => setJoinRole(e.target.value as any)}
+                        className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                      >
+                        <option value="TIM_TEKNIS">Tim Teknis / Pelaksana</option>
+                        <option value="KEPALA_SEKOLAH">Kepala Sekolah</option>
+                        <option value="FASILITATOR">Fasilitator / Tamu</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">PIN Sekolah (6 digit):</label>
+                      <input
+                        type="password"
+                        required
+                        value={joinPin}
+                        onChange={(e) => setJoinPin(e.target.value.replace(/\D/g, ''))}
+                        placeholder="PIN sekolah..."
+                        className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white font-mono"
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={isJoining}
+                      className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      {isJoining ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                      <span>Bergabung Sekarang</span>
+                    </button>
+                  </form>
+                )}
+              </div>
+            )}
+
+            {/* Sub-view: Create */}
+            {onboardView === 'create' && (
+              <form onSubmit={handleCreateOnboard} className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => setOnboardView('choice')}
+                    className="text-xs font-bold text-blue-600 hover:underline cursor-pointer"
+                  >
+                    &larr; Kembali
+                  </button>
+                  <span className="text-xs font-bold text-slate-700">Daftarkan Sekolah Baru</span>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">Nama Sekolah: *</label>
+                  <input
+                    type="text"
+                    required
+                    value={createNamaSekolah}
+                    onChange={(e) => setCreateNamaSekolah(e.target.value)}
+                    placeholder="SDN 1 MUARA DUA"
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg uppercase"
                   />
                 </div>
 
-                {/* School Cards List */}
-                <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1">
-                  {filteredTenants.length === 0 ? (
-                    <div className="p-4 rounded-xl border border-dashed border-slate-800 text-center text-xs text-slate-400">
-                      Sekolah tidak ditemukan.
-                    </div>
-                  ) : (
-                    filteredTenants.map((t) => {
-                      const isSelected = t.id === selectedTenantId;
-                      return (
-                        <div
-                          key={t.id}
-                          onClick={() => {
-                            setSelectedTenantId(t.id);
-                            onSelectTenant(t);
-                            setPinError(null);
-                            setPinInput('');
-                            setConfirmPinInput('');
-                          }}
-                          className={`p-3 rounded-xl border transition cursor-pointer flex items-center justify-between gap-3 ${
-                            isSelected
-                              ? 'bg-blue-950/50 border-blue-500 shadow-md shadow-blue-500/10'
-                              : 'bg-slate-950/40 border-slate-800/80 hover:border-slate-700 hover:bg-slate-900/60'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5 overflow-hidden">
-                            <div
-                              className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 ${
-                                isSelected
-                                  ? 'bg-blue-600 text-white'
-                                  : 'bg-slate-800 text-slate-400'
-                              }`}
-                            >
-                              <Building2 className="w-4 h-4" />
-                            </div>
-                            <div className="overflow-hidden">
-                              <h4 className="text-xs font-bold text-white truncate">
-                                {t.namaSekolah}
-                              </h4>
-                              <div className="flex items-center gap-1.5 text-[10px] text-slate-400 flex-wrap mt-0.5">
-                                <span className="font-mono text-blue-300">NPSN: {t.npsn || '-'}</span>
-                                <span>•</span>
-                                <span>{t.kabKota || 'Indonesia'}</span>
-                              </div>
-                            </div>
-                          </div>
-
-                          {isSelected && (
-                            <div className="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center shrink-0">
-                              <Check className="w-3 h-3 stroke-[3]" />
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-
-                <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
-                  <span>Total Sekolah Terdaftar:</span>
-                  <span className="font-mono font-bold text-white">{tenants.length} Unit</span>
-                </div>
-              </div>
-
-              {/* Step 3: Peran Petugas & PIN Kriptografis (7 cols) */}
-              <div className="lg:col-span-7 bg-slate-900/80 backdrop-blur-md rounded-2xl border border-slate-800 p-6 shadow-xl space-y-6">
-                <div>
-                  <span className="text-[11px] font-bold text-indigo-400 uppercase tracking-wider block">
-                    Langkah 3 • Verifikasi Ruang Kerja & Peran
-                  </span>
-                  <h3 className="text-base font-bold text-white flex items-center gap-2 mt-0.5">
-                    <UserCheck className="w-4 h-4 text-indigo-400" />
-                    <span>Identitas Peran & PIN Keamanan Sekolah</span>
-                  </h3>
-                  <p className="text-xs text-slate-400 mt-1">
-                    Sekolah aktif:{' '}
-                    <strong className="text-blue-300">{selectedTenant.namaSekolah}</strong>
-                  </p>
-                </div>
-
-                <form onSubmit={handleSubmitPinStep} className="space-y-5">
-                  {/* Pilihan Peran */}
-                  <div className="space-y-2">
-                    <label className="block text-xs font-semibold text-slate-300">
-                      Pilih Peran Jabatan Anda:
-                    </label>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {USER_ROLES.map((role) => {
-                        const isSelected = selectedRole === role.id;
-                        return (
-                          <button
-                            key={role.id}
-                            type="button"
-                            onClick={() => setSelectedRole(role.id)}
-                            className={`p-3 rounded-xl border text-left transition flex items-start gap-2.5 cursor-pointer ${
-                              isSelected
-                                ? 'bg-indigo-950/60 border-indigo-500 shadow-md shadow-indigo-500/10'
-                                : 'bg-slate-950/40 border-slate-800 hover:border-slate-700'
-                            }`}
-                          >
-                            <span className="text-xl shrink-0">{role.icon}</span>
-                            <div className="overflow-hidden">
-                              <span className="text-xs font-bold text-white block">
-                                {role.title}
-                              </span>
-                              <span className="text-[10px] text-slate-400 line-clamp-1 block mt-0.5">
-                                {role.desc}
-                              </span>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {/* Input Nama Petugas */}
-                  <div className="space-y-1.5">
-                    <label className="block text-xs font-semibold text-slate-300">
-                      Nama Petugas (Opsional):
-                    </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">NPSN: *</label>
                     <input
                       type="text"
-                      placeholder="Contoh: Budi Santoso, S.Pd (atau kosongkan)"
-                      value={officerName}
-                      onChange={(e) => setOfficerName(e.target.value)}
-                      className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 outline-none transition"
+                      required
+                      value={createNpsn}
+                      onChange={(e) => setCreateNpsn(e.target.value.replace(/\D/g, ''))}
+                      placeholder="10105685"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg font-mono"
                     />
                   </div>
-
-                  {/* Kondisi A: Wajib Atur PIN Baru pada Login Pertama */}
-                  {isMandatoryReset ? (
-                    <div className="bg-amber-950/40 border border-amber-500/40 rounded-xl p-4 space-y-3">
-                      <div className="flex items-center gap-2 text-amber-300 text-xs font-bold">
-                        <KeyRound className="w-4 h-4 text-amber-400 shrink-0" />
-                        <span>Kewajiban Pengaturan PIN Baru Sekolah (6 Digit)</span>
-                      </div>
-                      <p className="text-[11px] text-amber-200/80 leading-relaxed">
-                        Demi perlindungan data revitalisasi, sekolah ini belum memiliki PIN terdaftar atau diwajibkan memperbarui PIN. Silakan tentukan 6 digit PIN baru yang akan disimpan terenkripsi (salted hash PBKDF2).
-                      </p>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                        <div>
-                          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
-                            PIN Baru (6 Digit):
-                          </label>
-                          <input
-                            type={showPin ? 'text' : 'password'}
-                            maxLength={8}
-                            placeholder="6 Digit Angka"
-                            value={pinInput}
-                            onChange={(e) => {
-                              setPinInput(e.target.value);
-                              setPinError(null);
-                            }}
-                            className="w-full bg-slate-950 border border-amber-500/40 focus:border-amber-400 rounded-lg px-3 py-2 text-xs font-mono tracking-widest text-white outline-none"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
-                            Konfirmasi PIN:
-                          </label>
-                          <input
-                            type={showPin ? 'text' : 'password'}
-                            maxLength={8}
-                            placeholder="Ulangi 6 Digit"
-                            value={confirmPinInput}
-                            onChange={(e) => {
-                              setConfirmPinInput(e.target.value);
-                              setPinError(null);
-                            }}
-                            className="w-full bg-slate-950 border border-amber-500/40 focus:border-amber-400 rounded-lg px-3 py-2 text-xs font-mono tracking-widest text-white outline-none"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    /* Kondisi B: Verifikasi PIN yang sudah terdaftar */
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <label className="block text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                          <Lock className="w-3.5 h-3.5 text-amber-400" />
-                          <span>PIN Keamanan Sekolah (6 Digit):</span>
-                        </label>
-                        <span className="text-[10px] bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 px-2 py-0.5 rounded font-mono">
-                          Salted Hash Aktif
-                        </span>
-                      </div>
-
-                      <div className="relative">
-                        <input
-                          type={showPin ? 'text' : 'password'}
-                          placeholder="Masukkan PIN keamanan sekolah..."
-                          value={pinInput}
-                          onChange={(e) => {
-                            setPinInput(e.target.value);
-                            setPinError(null);
-                          }}
-                          className={`w-full bg-slate-950/70 border rounded-xl pl-4 pr-11 py-2.5 text-xs text-white placeholder-slate-500 outline-none transition font-mono tracking-wider ${
-                            pinError ? 'border-rose-500 focus:border-rose-400' : 'border-slate-800 focus:border-indigo-500'
-                          }`}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowPin(!showPin)}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
-                        >
-                          {showPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {pinError && (
-                    <div className="flex items-center gap-1.5 text-rose-400 text-[11px] bg-rose-950/40 p-2.5 rounded-lg border border-rose-800/40">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                      <span>{pinError}</span>
-                    </div>
-                  )}
-
-                  {/* Tombol Masuk */}
-                  <div className="pt-2">
-                    <button
-                      type="submit"
-                      disabled={isPinSubmitting}
-                      className="w-full py-3.5 px-5 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 text-white font-bold text-xs sm:text-sm shadow-lg shadow-blue-500/25 transition flex items-center justify-center gap-2 cursor-pointer"
-                    >
-                      {isPinSubmitting ? (
-                        <span>Memverifikasi Otorisasi...</span>
-                      ) : (
-                        <>
-                          <span>
-                            {isMandatoryReset
-                              ? `Simpan PIN & Buka LPJ ${selectedTenant.namaSekolah}`
-                              : `Buka Ruang Kerja LPJ ${selectedTenant.namaSekolah}`}
-                          </span>
-                          <ArrowRight className="w-4 h-4" />
-                        </>
-                      )}
-                    </button>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">Kab/Kota: *</label>
+                    <input
+                      type="text"
+                      required
+                      value={createKabKota}
+                      onChange={(e) => setCreateKabKota(e.target.value)}
+                      placeholder="Kota Lhokseumawe"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
+                    />
                   </div>
-                </form>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">PIN Baru: *</label>
+                    <input
+                      type="password"
+                      required
+                      value={createPin}
+                      onChange={(e) => setCreatePin(e.target.value.replace(/\D/g, ''))}
+                      placeholder="Min 6 angka"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">Konfirmasi PIN: *</label>
+                    <input
+                      type="password"
+                      required
+                      value={createConfirmPin}
+                      onChange={(e) => setCreateConfirmPin(e.target.value.replace(/\D/g, ''))}
+                      placeholder="Ketik ulang"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg font-mono"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isCreatingSchool}
+                  className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
+                >
+                  {isCreatingSchool ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <PlusCircle className="w-3.5 h-3.5" />}
+                  <span>Daftarkan & Masuk</span>
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // VIEW 1: Unauthenticated User (Firebase Auth Login / Register)
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 flex items-center justify-center p-4">
+      <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+        {/* Header */}
+        <div className="bg-gradient-to-r from-blue-700 via-indigo-700 to-blue-800 text-white p-6 text-center">
+          <div className="w-14 h-14 rounded-2xl bg-white/10 backdrop-blur-md flex items-center justify-center mx-auto mb-3 shadow-inner">
+            <Building2 className="w-7 h-7 text-white" />
+          </div>
+          <h2 className="text-xl font-black tracking-tight">LPJ Revitalisasi Sekolah</h2>
+          <p className="text-xs text-blue-100 mt-1 font-medium">
+            Sistem Multi-Sekolah Terintegrasi • DAK Fisik & Kemendikdasmen RI
+          </p>
+        </div>
+
+        <div className="p-6 space-y-4">
+          {authError && (
+            <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{authError}</span>
+            </div>
+          )}
+
+          {/* Google Sign In Button */}
+          <button
+            type="button"
+            onClick={onGoogleSignIn}
+            disabled={isSigningInGoogle}
+            className="w-full py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 border-2 border-slate-200 hover:border-blue-400 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2.5 shadow-xs cursor-pointer disabled:opacity-50"
+          >
+            {isSigningInGoogle ? (
+              <RefreshCw className="w-4 h-4 animate-spin text-blue-600" />
+            ) : (
+              <svg className="w-4 h-4" viewBox="0 0 24 24">
+                <path
+                  fill="#4285F4"
+                  d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                />
+                <path
+                  fill="#34A853"
+                  d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                />
+                <path
+                  fill="#FBBC05"
+                  d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                />
+                <path
+                  fill="#EA4335"
+                  d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                />
+              </svg>
+            )}
+            <span>{isSigningInGoogle ? 'Menghubungkan...' : 'Masuk dengan Akun Google'}</span>
+          </button>
+
+          <div className="relative flex items-center justify-center">
+            <div className="border-t border-slate-200 w-full"></div>
+            <span className="bg-white px-3 text-[11px] font-semibold text-slate-400 absolute">
+              atau gunakan Email & Password
+            </span>
+          </div>
+
+          {/* Email / Password Form */}
+          <form onSubmit={handleEmailAuth} className="space-y-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Alamat Email:</label>
+              <div className="relative">
+                <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                <input
+                  type="email"
+                  required
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  placeholder="bendahara@sekolah.sch.id"
+                  className="w-full pl-9 pr-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                />
               </div>
             </div>
-          </div>
-        )}
-      </main>
 
-      {/* Footer */}
-      <footer className="relative z-10 border-t border-slate-800/80 bg-slate-900/60 backdrop-blur-md px-6 py-3 text-center text-xs text-slate-500">
-        <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>&copy; 2026 LPJ Revit Cloud • Revitalisasi Satuan Pendidikan</span>
-          <span>Zero-Trust Architecture • Firebase Auth & Server-Side RBAC Enforced</span>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Kata Sandi:</label>
+              <div className="relative">
+                <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                <input
+                  type="password"
+                  required
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  placeholder="Minimal 6 karakter"
+                  className="w-full pl-9 pr-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={isAuthLoading}
+              className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+            >
+              {isAuthLoading ? (
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              ) : isRegisterMode ? (
+                <UserPlus className="w-4 h-4" />
+              ) : (
+                <LogIn className="w-4 h-4" />
+              )}
+              <span>{isAuthLoading ? 'Memproses...' : isRegisterMode ? 'Daftar Akun Baru' : 'Masuk ke Aplikasi'}</span>
+            </button>
+          </form>
+
+          {/* Toggle Register / Login */}
+          <div className="text-center pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                setIsRegisterMode(!isRegisterMode);
+                setAuthError(null);
+              }}
+              className="text-xs font-semibold text-blue-600 hover:underline cursor-pointer"
+            >
+              {isRegisterMode ? 'Sudah punya akun? Masuk di sini' : 'Belum punya akun? Buat akun baru'}
+            </button>
+          </div>
+
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-[11px] text-slate-600 space-y-1">
+            <div className="flex items-center gap-1.5 font-bold text-slate-800">
+              <Shield className="w-3.5 h-3.5 text-blue-600" />
+              <span>Satu Akun untuk Semua Sekolah</span>
+            </div>
+            <p>
+              Setelah masuk, Anda dapat langsung memilih sekolah binaan atau bergabung ke sekolah baru tanpa harus logout.
+            </p>
+          </div>
         </div>
-      </footer>
+      </div>
     </div>
   );
 };

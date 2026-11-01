@@ -10,9 +10,10 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit && (cd functions && npm run lint)",
-    "test": "node --import tsx --test tests/storage.test.ts tests/money.test.ts tests/e2e_pipeline.test.ts tests/wage_material_100_percent.test.ts tests/pintu_jendela_fur.test.ts tests/bku_bkb_bkt_reconciliation.test.ts",
-    "test:rules": "FIRESTORE_EMULATOR_HOST=127.0.0.1:8089 npx firebase emulators:exec --only firestore \"node --import tsx --test tests/firestore.rules.test.ts\"",
-    "test:all": "FIRESTORE_EMULATOR_HOST=127.0.0.1:8089 npx firebase emulators:exec --only firestore \"node --import tsx --test tests/storage.test.ts tests/money.test.ts tests/e2e_pipeline.test.ts tests/wage_material_100_percent.test.ts tests/pintu_jendela_fur.test.ts tests/bku_bkb_bkt_reconciliation.test.ts tests/firestore.rules.test.ts\""
+    "test": "node --import tsx --test tests/storage.test.ts tests/money.test.ts tests/e2e_pipeline.test.ts tests/wage_material_100_percent.test.ts tests/pintu_jendela_fur.test.ts tests/bku_bkb_bkt_reconciliation.test.ts tests/school_switch_and_atomic_save.test.ts tests/tenant_isolation.test.ts tests/functions.test.ts",
+    "test:rules": "FIRESTORE_EMULATOR_HOST=127.0.0.1:8089 npx firebase emulators:exec --only firestore \"node --import tsx --test tests/firestore.rules.test.ts tests/tenant_isolation.test.ts\"",
+    "test:functions": "FIRESTORE_EMULATOR_HOST=127.0.0.1:8089 npx firebase emulators:exec --only firestore \"node --import tsx --test tests/functions.test.ts\"",
+    "test:all": "FIRESTORE_EMULATOR_HOST=127.0.0.1:8089 npx firebase emulators:exec --only firestore \"node --import tsx --test tests/storage.test.ts tests/money.test.ts tests/e2e_pipeline.test.ts tests/wage_material_100_percent.test.ts tests/pintu_jendela_fur.test.ts tests/bku_bkb_bkt_reconciliation.test.ts tests/school_switch_and_atomic_save.test.ts tests/tenant_isolation.test.ts tests/firestore.rules.test.ts tests/functions.test.ts\""
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

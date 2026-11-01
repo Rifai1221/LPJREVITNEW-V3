@@ -10,6 +10,7 @@ import {
   type Firestore,
 } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
+import { getFunctions } from 'firebase/functions';
 import firebaseConfigData from '../../firebase-applet-config.json';
 
 // Suppress Firestore verbose SDK warnings when daily write quota is reached
@@ -107,3 +108,6 @@ if (typeof window !== 'undefined') {
 
 // Initialize Firebase Auth
 export const auth = getAuth(app);
+
+// Initialize Firebase Functions (Cloud Functions v2)
+export const functions = getFunctions(app, 'asia-southeast2');

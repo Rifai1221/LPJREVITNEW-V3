@@ -49,23 +49,35 @@ import {
   createSchoolStateForTenant,
 } from './data/tenantPresets';
 import {
-  getAllSchoolTenants,
   getStoredActiveTenantId,
   setStoredActiveTenantId,
   getGlobalActiveTenantId,
   loadSchoolTenantAppState,
   saveSchoolTenantAppState,
   registerNewSchoolTenant,
-  deleteSchoolTenant,
   checkIsQuotaExhausted,
   startSyncRetryWorker,
   subscribeSyncStatus,
   isTenantPendingSync,
   getStoredTenantRev,
-  writeDomainDocuments,
   setCloudAutosaveBlocked,
+  mapMembershipsToTenants,
+  clearUserTenantCacheAndQueue,
+  getPendingSyncCount,
+  getGoogleSheetStorageKey,
   CloudSyncStatus,
 } from './services/schoolTenantService';
+import {
+  subscribeUserMemberships,
+  updateMembershipLastOpenedAt,
+  getUserSchoolPref,
+  setUserSchoolPref,
+  createSchoolCallable,
+  UserMembershipRecord,
+} from './services/schoolMembershipService';
+import { doc, getDoc } from 'firebase/firestore';
+import { db, auth } from './services/firebase';
+import { useCan } from './hooks/useCan';
 import { detectDataAnomalies, DataAnomalyProposal } from './services/storageService';
 import { ConflictResolutionModal } from './components/ConflictResolutionModal';
 import { AnomalyReviewModal } from './components/AnomalyReviewModal';
@@ -120,14 +132,42 @@ import { ReconciliationBanner } from './components/ReconciliationBanner';
 import { useToast } from './context/ToastContext';
 
 export default function App() {
-  // Multi-Tenant States
-  const [tenants, setTenants] = useState<SchoolTenant[]>(DEFAULT_PRESET_TENANTS);
+  // Multi-Tenant & User Memberships States (Requirement 1 & 2)
+  const [memberships, setMemberships] = useState<UserMembershipRecord[]>([]);
+  const tenants = useMemo(() => mapMembershipsToTenants(memberships), [memberships]);
   const [currentTenant, setCurrentTenant] = useState<SchoolTenant>(() => {
     const savedId = getStoredActiveTenantId();
-    const found = DEFAULT_PRESET_TENANTS.find((t) => t.id === savedId);
-    return found || PRESET_SDN1_MUARA_DUA;
+    return {
+      id: savedId || 'sch_loading',
+      namaSekolah: 'MEMUAT SEKOLAH...',
+      npsn: '',
+      jenjang: 'SD',
+      kabKota: '',
+      provinsi: '',
+      email: '',
+      isDemo: false,
+      createdAt: new Date().toISOString(),
+      lastLogin: new Date().toISOString(),
+    };
   });
+  const currentTenantRef = useRef(currentTenant);
+  useEffect(() => {
+    currentTenantRef.current = currentTenant;
+  }, [currentTenant]);
+
+  const membershipsRef = useRef(memberships);
+  useEffect(() => {
+    membershipsRef.current = memberships;
+  }, [memberships]);
+
   const [isSchoolPortalOpen, setIsSchoolPortalOpen] = useState(false);
+  const [schoolPortalInitialTab, setSchoolPortalInitialTab] = useState<'switch' | 'join' | 'create' | 'members' | 'pin'>('switch');
+  const [isSwitchingOverlay, setIsSwitchingOverlay] = useState(false);
+  const [switchingTargetName, setSwitchingTargetName] = useState('');
+  const switchRequestId = useRef(0);
+  const [hasLegacyNeedsMigration, setHasLegacyNeedsMigration] = useState(false);
+  const [isCreatingDemo, setIsCreatingDemo] = useState(false);
+
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncedText, setLastSyncedText] = useState('Otomatis');
   const toast = useToast();
@@ -223,7 +263,7 @@ export default function App() {
   // Debounce ref and protection flags
   const saveTimeoutRef = useRef<any>(null);
 
-  // Listen to background sync retry queue worker (Requirement 1)
+  // Listen to background sync retry queue worker (Requirement 1 & 6)
   useEffect(() => {
     startSyncRetryWorker();
     const unsub = subscribeSyncStatus((count) => {
@@ -235,68 +275,103 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 1. Initial Load of Tenants and School Data from Cloud Firestore
-  // CRITICAL: Prioritizes existing Cloud Firestore documents so data from previous deploys/publishes is never lost!
+  // 1. Listen to Firebase Auth state
   useEffect(() => {
-    let isMounted = true;
-
-    async function initializeTenantData() {
-      try {
-        const tenantList = await getAllSchoolTenants();
-        if (!isMounted) return;
-        setTenants(tenantList);
-
-        // Check global active school pointer from Firestore first, then local storage, then fallback
-        let targetTenant: SchoolTenant | undefined;
-        const globalActiveId = await getGlobalActiveTenantId();
-        if (globalActiveId) {
-          targetTenant = tenantList.find((t) => t.id === globalActiveId);
-        }
-
-        if (!targetTenant) {
-          const savedId = getStoredActiveTenantId();
-          targetTenant = tenantList.find((t) => t.id === savedId);
-        }
-
-        const activeT = targetTenant || tenantList[0] || PRESET_SDN1_MUARA_DUA;
-        setCurrentTenant(activeT);
-        setStoredActiveTenantId(activeT.id);
-
-        // Load isolated school state from Firestore
-        const loaded = await loadSchoolTenantAppState(activeT);
-        if (!isMounted) return;
-
-        // Load 100% raw saved state on initial load/refresh without forced auto-overwrite
-        _setAppState(loaded.state);
-        isLoadedRef.current = true;
-        isDirtyRef.current = false; // Initial load is clean, never dirty!
-        savedCounterRef.current = changeCounterRef.current;
+    const unsubAuth = auth.onAuthStateChanged((user) => {
+      if (user) {
+        setIsLoggedIn(true);
+        setCurrentUser({
+          uid: user.uid,
+          email: user.email || '',
+          displayName: user.displayName || user.email || 'Pengguna',
+          photoURL: user.photoURL || null,
+        });
+        localStorage.setItem('LPJ_USER_SESSION_ACTIVE', 'true');
+      } else {
+        setIsLoggedIn(false);
+        setCurrentUser(null);
+        setMemberships([]);
         setIsInitialLoading(false);
-        setIsCloudAutosaveBlocked(Boolean(loaded.isCloudAutosaveBlocked));
-        setCloudStatus(loaded.source === 'cloud' ? 'ok' : 'failed');
-        setLastSyncedText(
-          loaded.source === 'cloud'
-            ? 'Cloud Firestore'
-            : loaded.source === 'cache'
-            ? 'Memori Offline'
-            : 'Template Awal'
-        );
-
-        // Detect anomalies non-destructively (Requirement 5)
-        const detected = detectDataAnomalies(loaded.state);
-        setAnomalies(detected);
-      } catch (err) {
-        console.error('Initialization error:', err);
-        if (isMounted) setIsInitialLoading(false);
+        localStorage.removeItem('LPJ_USER_SESSION_ACTIVE');
       }
+    });
+    return () => unsubAuth();
+  }, []);
+
+  // 2. Listen to User Memberships when logged in (Requirement 1 & 2)
+  useEffect(() => {
+    if (!currentUser?.uid) {
+      setMemberships([]);
+      return;
     }
 
-    initializeTenantData();
+    const unsubMem = subscribeUserMemberships(currentUser.uid, async (mList) => {
+      setMemberships(mList);
 
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+      if (mList.length === 0) {
+        setIsInitialLoading(false);
+        // Check legacy access needing migration (Requirement 9)
+        try {
+          const pref = await getUserSchoolPref(currentUser.uid);
+          if (pref) {
+            setHasLegacyNeedsMigration(true);
+          }
+        } catch {}
+        return;
+      }
+
+      setHasLegacyNeedsMigration(false);
+
+      // Determine active school: user's pref if still member, else top membership (newest opened)
+      const savedPrefId = await getUserSchoolPref(currentUser.uid);
+      const targetMem = mList.find((m) => m.schoolId === savedPrefId) || mList[0];
+
+      if (targetMem) {
+        const tenantObj: SchoolTenant = {
+          id: targetMem.schoolId,
+          namaSekolah: targetMem.namaSekolah,
+          npsn: targetMem.npsn,
+          jenjang: (targetMem.jenjang || 'SD') as any,
+          kabKota: targetMem.kabKota || '-',
+          provinsi: '-',
+          email: '-',
+          isDemo: false,
+          createdAt: typeof targetMem.lastOpenedAt === 'string' ? targetMem.lastOpenedAt : new Date().toISOString(),
+          lastLogin: typeof targetMem.lastOpenedAt === 'string' ? targetMem.lastOpenedAt : new Date().toISOString(),
+        };
+
+        if (!isLoadedRef.current || currentTenantRef.current.id !== tenantObj.id) {
+          setCurrentTenant(tenantObj);
+          setStoredActiveTenantId(tenantObj.id);
+
+          try {
+            const loaded = await loadSchoolTenantAppState(tenantObj);
+            _setAppState(loaded.state);
+            isLoadedRef.current = true;
+            isDirtyRef.current = false;
+            savedCounterRef.current = changeCounterRef.current;
+            setIsInitialLoading(false);
+            setIsCloudAutosaveBlocked(Boolean(loaded.isCloudAutosaveBlocked));
+            setCloudStatus(loaded.source === 'cloud' ? 'ok' : 'failed');
+            setLastSyncedText(
+              loaded.source === 'cloud'
+                ? 'Cloud Firestore'
+                : loaded.source === 'cache'
+                ? 'Memori Offline'
+                : 'Template Awal'
+            );
+            const detected = detectDataAnomalies(loaded.state);
+            setAnomalies(detected);
+          } catch (err) {
+            console.error('Initial load error:', err);
+            setIsInitialLoading(false);
+          }
+        }
+      }
+    });
+
+    return () => unsubMem();
+  }, [currentUser?.uid]);
 
   // Listen to Google Auth & refresh linked spreadsheet name for current active school
   useEffect(() => {
@@ -307,7 +382,8 @@ export default function App() {
           setCurrentUser(user);
         }
         try {
-          const saved = localStorage.getItem(`GOOGLE_SHEET_INFO_${currentTenant.id}`);
+          const key = getGoogleSheetStorageKey(currentTenant.id, currentUser?.uid);
+          const saved = localStorage.getItem(key);
           if (saved) {
             const parsed = JSON.parse(saved);
             setGoogleSheetName(parsed.name);
@@ -322,9 +398,9 @@ export default function App() {
       }
     );
     return () => unsub();
-  }, [currentTenant.id]);
+  }, [currentTenant.id, currentUser?.uid]);
 
-  // 2. Real-time Cloud Auto-Save on state change with Counter Concurrency Guard (Requirement 1, 2, 3)
+  // 3. Real-time Cloud Auto-Save on state change with Counter Concurrency Guard (Requirement 1, 2, 4, 5)
   // CRITICAL: NEVER auto-save unless data has been successfully loaded AND user has explicitly modified it!
   useEffect(() => {
     if (!isLoadedRef.current || !isDirtyRef.current) {
@@ -336,16 +412,17 @@ export default function App() {
     }
 
     setIsSyncing(true);
+    const tenantIdAtClosure = currentTenant.id;
     saveTimeoutRef.current = setTimeout(async () => {
       try {
         const versionAtStart = changeCounterRef.current;
-        const currentRev = getStoredTenantRev(currentTenant.id);
-        const res = await saveSchoolTenantAppState(currentTenant.id, appState, currentRev);
+        const currentRev = getStoredTenantRev(tenantIdAtClosure, currentUser?.uid);
+        const res = await saveSchoolTenantAppState(tenantIdAtClosure, appState, currentRev, currentUser?.uid);
 
         setIsSyncing(false);
         setCloudStatus(res.cloud);
 
-        // Check for concurrency conflict (Requirement 3)
+        // Check for concurrency conflict (Requirement 3 & 5)
         if (res.error === 'CONCURRENCY_CONFLICT') {
           setConflictState({
             isOpen: true,
@@ -355,7 +432,7 @@ export default function App() {
           });
         }
 
-        // Only mark clean if no new changes happened while save was executing (Requirement 2)
+        // Only mark clean if no new changes happened while save was executing
         if (changeCounterRef.current === versionAtStart) {
           isDirtyRef.current = false;
           savedCounterRef.current = versionAtStart;
@@ -374,7 +451,8 @@ export default function App() {
         // Auto-sync to user's Google Spreadsheet if enabled
         if (isAutoSyncToGoogleSheets && isGoogleConnected) {
           try {
-            const saved = localStorage.getItem(`GOOGLE_SHEET_INFO_${currentTenant.id}`);
+            const key = getGoogleSheetStorageKey(tenantIdAtClosure, currentUser?.uid);
+            const saved = localStorage.getItem(key);
             const token = await getAccessToken();
             if (saved && token) {
               const parsed = JSON.parse(saved);
@@ -397,28 +475,87 @@ export default function App() {
         clearTimeout(saveTimeoutRef.current);
       }
     };
-  }, [appState, currentTenant.id, isAutoSyncToGoogleSheets, isGoogleConnected]);
+  }, [appState, currentTenant.id, isAutoSyncToGoogleSheets, isGoogleConnected, currentUser?.uid]);
 
-  // Handle switching to a different school database
-  const handleSelectTenant = async (targetTenant: SchoolTenant) => {
-    if (targetTenant.id === currentTenant.id) return;
+  // 4. Safe School Switch Protocol (Requirement 3: Atomic Flush, Token, Isolation, and State Reset)
+  const switchSchool = async (targetTenant: SchoolTenant) => {
+    if (targetTenant.id === currentTenantRef.current.id) return;
 
-    if (saveTimeoutRef.current) {
-      clearTimeout(saveTimeoutRef.current);
-    }
-    isDirtyRef.current = false;
-    isLoadedRef.current = false;
-    setIsSyncing(true);
-    setStoredActiveTenantId(targetTenant.id);
-    setCurrentTenant(targetTenant);
+    const oldTenantId = currentTenantRef.current.id;
+    const oldStateSnapshot = appState;
+    const requestId = ++switchRequestId.current;
+
+    setIsSwitchingOverlay(true);
+    setSwitchingTargetName(targetTenant.namaSekolah);
 
     try {
+      // Step B: FLUSH old state if dirty
+      if (isDirtyRef.current) {
+        if (saveTimeoutRef.current) {
+          clearTimeout(saveTimeoutRef.current);
+          saveTimeoutRef.current = null;
+        }
+        const currentRev = getStoredTenantRev(oldTenantId, currentUser?.uid);
+        try {
+          const saveRes = await saveSchoolTenantAppState(oldTenantId, oldStateSnapshot, currentRev, currentUser?.uid);
+          if (saveRes.cloud !== 'ok') {
+            const proceed = confirm(
+              `Penyimpanan cloud untuk ${currentTenantRef.current.namaSekolah} tertunda (tersimpan aman di memori perangkat ini). Tetap berpindah ke ${targetTenant.namaSekolah}?`
+            );
+            if (!proceed) {
+              setIsSwitchingOverlay(false);
+              return;
+            }
+          }
+        } catch (err: any) {
+          console.warn('Flush error before switch:', err);
+        }
+      }
+
+      // Step D: Verify target school membership
+      if (currentUser?.uid) {
+        const isMember = membershipsRef.current.some((m) => m.schoolId === targetTenant.id);
+        if (!isMember) {
+          try {
+            const memDoc = await getDoc(doc(db, 'schools', targetTenant.id, 'members', currentUser.uid));
+            if (!memDoc.exists()) {
+              toast.error(`Akses Ditolak: Anda bukan anggota dari ${targetTenant.namaSekolah}.`);
+              setIsSwitchingOverlay(false);
+              return;
+            }
+          } catch {
+            toast.error(`Akses Ditolak: Anda bukan anggota dari ${targetTenant.namaSekolah}.`);
+            setIsSwitchingOverlay(false);
+            return;
+          }
+        }
+      }
+
+      // Step E: Reset ALL tenant-derived state before setting new state
+      isDirtyRef.current = false;
+      isLoadedRef.current = false;
+      setAnomalies([]);
+      setConflictState({ isOpen: false, serverRev: 1, localRev: 1 });
+      setCloudStatus('ok');
+      setIsCloudAutosaveBlocked(false);
+      setGoogleSheetName(undefined);
+      _setAppState(createSchoolStateForTenant(targetTenant, 'blank'));
+      setCurrentTenant(targetTenant);
+      setStoredActiveTenantId(targetTenant.id);
+
+      // Load data for target tenant
       const loaded = await loadSchoolTenantAppState(targetTenant);
+
+      // Step C: Stale switch request ignored if a newer request arrived
+      if (switchRequestId.current !== requestId) {
+        console.warn(`[App] Stale switch request ${requestId} ignored; current is ${switchRequestId.current}`);
+        return;
+      }
+
       _setAppState(loaded.state);
       isLoadedRef.current = true;
       isDirtyRef.current = false;
       savedCounterRef.current = changeCounterRef.current;
-      setIsSyncing(false);
       setIsCloudAutosaveBlocked(Boolean(loaded.isCloudAutosaveBlocked));
       setCloudStatus(loaded.source === 'cloud' ? 'ok' : 'failed');
       setLastSyncedText(
@@ -428,14 +565,33 @@ export default function App() {
           ? 'Memori Offline'
           : 'Template Awal'
       );
+
+      // Reload Google Sheet connection for new tenant
+      try {
+        const key = getGoogleSheetStorageKey(targetTenant.id, currentUser?.uid);
+        const savedSheet = localStorage.getItem(key);
+        if (savedSheet) {
+          const parsed = JSON.parse(savedSheet);
+          setGoogleSheetName(parsed.name);
+        }
+      } catch {}
+
       // Detect anomalies non-destructively for switched tenant
       const detected = detectDataAnomalies(loaded.state);
       setAnomalies(detected);
-      setSwitchNotification(`Berhasil beralih ke database ${targetTenant.namaSekolah}. Data terisolasi aman.`);
-      setTimeout(() => setSwitchNotification(null), 5000);
-    } catch (err) {
-      console.error('Error switching tenant:', err);
-      setIsSyncing(false);
+
+      // Step F: Update lastOpenedAt & prefs/school
+      if (currentUser?.uid) {
+        updateMembershipLastOpenedAt(currentUser.uid, targetTenant.id);
+        setUserSchoolPref(currentUser.uid, targetTenant.id);
+      }
+
+      toast.success(`Berhasil beralih ke database ${targetTenant.namaSekolah}.`);
+    } catch (err: any) {
+      console.error('Error in switchSchool:', err);
+      toast.error(`Gagal beralih ke ${targetTenant.namaSekolah}: ${err?.message || err}`);
+    } finally {
+      setIsSwitchingOverlay(false);
     }
   };
 
@@ -446,8 +602,8 @@ export default function App() {
     jenjang: 'TK/PAUD' | 'SD' | 'SMP/MTs' | 'SMA/SMK' | string;
     kabKota: string;
     provinsi: string;
-    email: string;
-    password?: string;
+    email?: string;
+    pin: string;
     templateType: 'full' | 'blank';
   }) => {
     if (saveTimeoutRef.current) {
@@ -459,12 +615,7 @@ export default function App() {
 
     try {
       const result = await registerNewSchoolTenant(data);
-      setTenants((prev) => [...prev.filter((t) => t.id !== result.tenant.id), result.tenant]);
-      setCurrentTenant(result.tenant);
-      setStoredActiveTenantId(result.tenant.id);
-      setAppState(result.state);
-      isLoadedRef.current = true;
-      isDirtyRef.current = false;
+      await switchSchool(result.tenant);
       setIsSyncing(false);
       setLastSyncedText('Database Baru Tersimpan');
       setSwitchNotification(`Database baru untuk ${result.tenant.namaSekolah} berhasil dibuat & tersimpan aman!`);
@@ -480,91 +631,28 @@ export default function App() {
     }
   };
 
-  // Delete School Tenant Confirmation Modal State
-  const [tenantToDeleteConfirm, setTenantToDeleteConfirm] = useState<SchoolTenant | null>(null);
-  const [isDeletingTenantLoading, setIsDeletingTenantLoading] = useState(false);
-
-  // Trigger in-app confirmation modal for deleting school
-  const handleDeleteTenant = (tenantToDelete: SchoolTenant) => {
-    setTenantToDeleteConfirm(tenantToDelete);
-  };
-
-  // Execute permanent deletion of selected school and its database (Requirement 6)
-  const handleConfirmDeleteTenant = async () => {
-    if (!tenantToDeleteConfirm) return;
-    const tenantToDelete = tenantToDeleteConfirm;
-    setIsDeletingTenantLoading(true);
-
-    // 1. Delete from Cloud Firestore FIRST with Tombstone; if it fails, abort!
-    const cloudSuccess = await deleteSchoolTenant(tenantToDelete.id);
-    if (!cloudSuccess) {
-      setIsDeletingTenantLoading(false);
-      setTenantToDeleteConfirm(null);
-      toast.error('Gagal menghapus database sekolah dari Cloud Firestore. Penghapusan dibatalkan demi keamanan data.');
-      return;
-    }
-
-    // 2. Remove the tenant from local state
-    let updatedTenants = tenants.filter((t) => t.id !== tenantToDelete.id);
-
-    // If no tenants left, automatically spawn a clean blank school database
-    let nextTenant: SchoolTenant;
-    if (updatedTenants.length === 0) {
-      nextTenant = {
-        id: `sch_${Date.now()}`,
-        npsn: '',
-        namaSekolah: 'SEKOLAH SAYA (LENGKAPI IDENTITAS)',
+  // Create Demo School Handler (Requirement 2)
+  const handleCreateDemoSchool = async () => {
+    setIsCreatingDemo(true);
+    try {
+      const demoNpsn = `1010${Math.floor(1000 + Math.random() * 9000)}`;
+      const demoResult = await registerNewSchoolTenant({
+        namaSekolah: 'SDN 1 MUARA DUA (CONTOH SIMULASI)',
+        npsn: demoNpsn,
         jenjang: 'SD',
-        kabKota: '',
-        provinsi: '',
-        email: '',
-        isDemo: false,
-        createdAt: new Date().toISOString(),
-        lastLogin: new Date().toISOString(),
-      };
-      updatedTenants = [nextTenant];
-    } else {
-      nextTenant = updatedTenants[0];
+        kabKota: 'Kota Lhokseumawe',
+        provinsi: 'Prov. Aceh',
+        email: 'demo@revitalisasi.sch.id',
+        pin: '123456',
+        templateType: 'full',
+      });
+      await switchSchool(demoResult.tenant);
+      toast.success('Sekolah contoh berhasil dibuat dengan data simulasi 100% lengkap!');
+    } catch (err: any) {
+      toast.error('Gagal membuat sekolah contoh: ' + (err?.message || err));
+    } finally {
+      setIsCreatingDemo(false);
     }
-
-    setTenants(updatedTenants);
-
-    // 3. If the active tenant was deleted, switch immediately in UI
-    if (tenantToDelete.id === currentTenant.id) {
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current);
-      }
-      isDirtyRef.current = false;
-      isLoadedRef.current = false;
-      setIsSyncing(true);
-      setStoredActiveTenantId(nextTenant.id);
-      setCurrentTenant(nextTenant);
-
-      try {
-        const loaded = await loadSchoolTenantAppState(nextTenant);
-        _setAppState(loaded.state);
-        isLoadedRef.current = true;
-        isDirtyRef.current = false;
-        savedCounterRef.current = changeCounterRef.current;
-        setIsSyncing(false);
-        setCloudStatus(loaded.source === 'cloud' ? 'ok' : 'failed');
-        setLastSyncedText(
-          loaded.source === 'cloud'
-            ? 'Cloud Firestore'
-            : loaded.source === 'cache'
-            ? 'Memori Offline'
-            : 'Template Awal'
-        );
-      } catch (err) {
-        console.error('Error switching tenant during delete:', err);
-        setIsSyncing(false);
-      }
-    }
-
-    setIsDeletingTenantLoading(false);
-    setTenantToDeleteConfirm(null);
-    setSwitchNotification(`Database sekolah "${tenantToDelete.namaSekolah}" berhasil dihapus beserta databasenya dan ditandai tombstone di cloud.`);
-    setTimeout(() => setSwitchNotification(null), 5000);
   };
 
   // Manual save trigger for instant user peace of mind
@@ -572,8 +660,41 @@ export default function App() {
     setIsSyncing(true);
     try {
       const versionAtStart = changeCounterRef.current;
-      const currentRev = getStoredTenantRev(currentTenant.id);
-      const res = await saveSchoolTenantAppState(currentTenant.id, appState, currentRev);
+      const currentRev = getStoredTenantRev(currentTenant.id, currentUser?.uid);
+      const res = await saveSchoolTenantAppState(currentTenant.id, appState, currentRev, currentUser?.uid);
+
+      setCloudStatus(res.cloud);
+
+      if (res.error === 'CONCURRENCY_CONFLICT') {
+        setConflictState({
+          isOpen: true,
+          serverRev: res.rev || currentRev + 1,
+          localRev: currentRev,
+          serverState: res.serverState,
+        });
+      }
+
+      if (changeCounterRef.current === versionAtStart) {
+        isDirtyRef.current = false;
+        savedCounterRef.current = versionAtStart;
+      }
+
+      // Also sync to Google Sheets if connected
+      if (isGoogleConnected) {
+        try {
+          const key = getGoogleSheetStorageKey(currentTenant.id, currentUser?.uid);
+          const saved = localStorage.getItem(key);
+          const token = await getAccessToken();
+          if (saved && token) {
+            const parsed = JSON.parse(saved);
+            if (parsed?.id) {
+              await syncStateToSpreadsheet(token, parsed.id, appState);
+            }
+          }
+        } catch (sheetErr) {
+          console.warn('Manual save to Google Sheets warning:', sheetErr);
+        }
+      }
 
       setCloudStatus(res.cloud);
 
@@ -663,7 +784,7 @@ export default function App() {
     const nextRev = Math.max(conflictState.serverRev, conflictState.localRev) + 1;
     _setAppState(mergedState);
     setConflictState({ isOpen: false, serverRev: nextRev, localRev: nextRev });
-    await writeDomainDocuments(currentTenant.id, mergedState, nextRev);
+    await saveSchoolTenantAppState(currentTenant.id, mergedState, nextRev - 1, currentUser?.uid);
     setCloudStatus('ok');
     setSwitchNotification('Data berhasil digabungkan dengan versi cloud secara aman.');
     setTimeout(() => setSwitchNotification(null), 5000);
@@ -672,7 +793,7 @@ export default function App() {
   const handleResolveConflictUseMine = async () => {
     const nextRev = Math.max(conflictState.serverRev, conflictState.localRev) + 1;
     setConflictState((prev) => ({ ...prev, isOpen: false }));
-    await writeDomainDocuments(currentTenant.id, appState, nextRev);
+    await saveSchoolTenantAppState(currentTenant.id, appState, nextRev - 1, currentUser?.uid);
     setCloudStatus('ok');
     setSwitchNotification('Data lokal berhasil menimpa revisi di cloud.');
     setTimeout(() => setSwitchNotification(null), 5000);
@@ -1329,19 +1450,6 @@ export default function App() {
       kabKota: updated.kabKota || prev.kabKota,
       provinsi: updated.provinsi || prev.provinsi,
     }));
-    setTenants((prev) =>
-      prev.map((t) =>
-        t.id === currentTenant.id
-          ? {
-              ...t,
-              namaSekolah: updated.namaSekolah || t.namaSekolah,
-              npsn: updated.npsn || t.npsn,
-              kabKota: updated.kabKota || t.kabKota,
-              provinsi: updated.provinsi || t.provinsi,
-            }
-          : t
-      )
-    );
 
     setAppState((prev) => {
       const updatedKwitansi = healKwitansiList(prev.kwitansiList, newYear, prev.deletedKwitansiIds);
@@ -2385,6 +2493,18 @@ Lanjutkan pengosongan data transaksi?`)
   };
 
   const handleLogout = async () => {
+    const pendingCount = getPendingSyncCount(currentUser?.uid);
+    if (pendingCount > 0) {
+      const confirmLogout = confirm(
+        `Perhatian: Masih ada ${pendingCount} antrean sinkronisasi yang belum tersimpan di cloud. Jika Anda keluar sekarang, data tetap aman di memori perangkat ini. Tetap keluar?`
+      );
+      if (!confirmLogout) return;
+    }
+
+    if (currentUser?.uid) {
+      await clearUserTenantCacheAndQueue(currentUser.uid);
+    }
+
     try {
       await logoutGoogle();
     } catch {}
@@ -2394,8 +2514,7 @@ Lanjutkan pengosongan data transaksi?`)
     clearLocalUserSession();
     setIsGoogleConnected(false);
     localStorage.removeItem('LPJ_USER_SESSION_ACTIVE');
-    setSwitchNotification('Anda telah keluar dari ruang kerja sekolah. Silakan login kembali.');
-    setTimeout(() => setSwitchNotification(null), 5000);
+    toast.info('Anda telah keluar dari akun.');
   };
 
   if (isInitialLoading) {
@@ -2406,23 +2525,25 @@ Lanjutkan pengosongan data transaksi?`)
         </div>
         <h2 className="text-xl font-bold tracking-tight">Memuat Database Multi-Sekolah...</h2>
         <p className="text-sm text-slate-400 mt-1 max-w-md">
-          Menghubungkan ke Google Cloud Firestore ({firestoreDatabaseId}) dan memuat data terisolasi untuk {currentTenant.namaSekolah}...
+          Menghubungkan ke Google Cloud Firestore ({firestoreDatabaseId}) dan memuat data keanggotaan sekolah...
         </p>
       </div>
     );
   }
 
-  // Authentication & Login Mode Guard
-  if (!isLoggedIn) {
+  // Authentication & Login Mode Guard (Requirement 1)
+  if (!isLoggedIn || (currentUser && memberships.length === 0)) {
     return (
       <>
         <LoginPortal
-          tenants={tenants}
-          currentTenant={currentTenant}
+          memberships={memberships}
           onSelectTenant={(targetTenant) => {
-            handleSelectTenant(targetTenant);
+            switchSchool(targetTenant);
           }}
-          onOpenCreateSchool={() => setIsSchoolPortalOpen(true)}
+          onOpenCreateSchool={() => {
+            setSchoolPortalInitialTab('create');
+            setIsSchoolPortalOpen(true);
+          }}
           onGoogleSignIn={async () => {
             setIsSigningInGoogle(true);
             try {
@@ -2432,19 +2553,7 @@ Lanjutkan pengosongan data transaksi?`)
                 setIsGoogleConnected(true);
                 setIsLoggedIn(true);
                 localStorage.setItem('LPJ_USER_SESSION_ACTIVE', 'true');
-                const googleSession: LocalUserSession = {
-                  authMode: 'google',
-                  role: 'BENDAHARA',
-                  roleLabel: 'Akun Google Terverifikasi',
-                  officerName: res.user.displayName || res.user.email || 'Pengguna Google',
-                  schoolId: currentTenant.id,
-                  schoolName: currentTenant.namaSekolah,
-                  loginAt: new Date().toISOString(),
-                };
-                setLocalSession(googleSession);
-                setLocalUserSession(googleSession);
-                setSwitchNotification(`Berhasil login dengan ${res.user.displayName || res.user.email} • Google Drive Terhubung Permanen!`);
-                setTimeout(() => setSwitchNotification(null), 6000);
+                toast.success(`Selamat datang, ${res.user.displayName || res.user.email}!`);
               }
             } catch (err: any) {
               toast.error(`Login Google gagal: ${err?.message || err}`);
@@ -2454,16 +2563,15 @@ Lanjutkan pengosongan data transaksi?`)
           }}
           isSigningInGoogle={isSigningInGoogle}
           currentUser={currentUser}
-          onProceedToDashboard={(sessionData) => {
-            if (sessionData) {
-              setLocalSession(sessionData);
-              setLocalUserSession(sessionData);
-              setSwitchNotification(`Selamat datang di ${sessionData.schoolName}! Masuk sebagai ${sessionData.roleLabel} (${sessionData.officerName}).`);
-              setTimeout(() => setSwitchNotification(null), 5000);
+          onProceedToDashboard={(targetTenant) => {
+            if (targetTenant) {
+              switchSchool(targetTenant);
             }
             setIsLoggedIn(true);
             localStorage.setItem('LPJ_USER_SESSION_ACTIVE', 'true');
           }}
+          onCreateDemoSchool={handleCreateDemoSchool}
+          isCreatingDemo={isCreatingDemo}
         />
 
         {/* Modal School Tenant Portal untuk mendaftarkan sekolah baru */}
@@ -2471,11 +2579,12 @@ Lanjutkan pengosongan data transaksi?`)
           isOpen={isSchoolPortalOpen}
           onClose={() => setIsSchoolPortalOpen(false)}
           currentTenant={currentTenant}
-          tenants={tenants}
-          onSelectTenant={handleSelectTenant}
-          onDeleteTenant={handleDeleteTenant}
+          memberships={memberships}
+          onSelectSchool={switchSchool}
           onRegisterSchool={handleRegisterNewSchool}
-          cloudDatabaseId={firestoreDatabaseId}
+          onCreateDemoSchool={handleCreateDemoSchool}
+          onLogout={handleLogout}
+          initialTab={schoolPortalInitialTab}
         />
       </>
     );
@@ -2483,10 +2592,18 @@ Lanjutkan pengosongan data transaksi?`)
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col font-sans text-slate-800">
-      {/* Top Header with Multi-Tenant School Switcher & Dual Login Session */}
+      {/* Top Header with Multi-Tenant School Switcher (Requirement 2 & 8) */}
       <Header
         school={appState.school}
         currentTenant={currentTenant}
+        memberships={memberships}
+        onSelectSchool={switchSchool}
+        onOpenSchoolPortal={(tab) => {
+          setSchoolPortalInitialTab(tab || 'switch');
+          setIsSchoolPortalOpen(true);
+        }}
+        onCreateDemoSchool={handleCreateDemoSchool}
+        isCreatingDemo={isCreatingDemo}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         onOpenPrintModal={(type) => handleOpenPrint(type || 'ALL')}
@@ -2509,8 +2626,30 @@ Lanjutkan pengosongan data transaksi?`)
         onLogout={handleLogout}
       />
 
-      {/* Main Tab Views */}
-      <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 print:hidden">
+      {/* Main Tab Views with key={currentTenant.id} to ensure total state isolation (Requirement 3e) */}
+      <main key={currentTenant.id} className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 print:hidden">
+        {/* Switching School Blocking Overlay (Requirement 3a) */}
+        {isSwitchingOverlay && (
+          <div className="fixed inset-0 z-[100] bg-slate-900/80 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-white text-center">
+            <div className="w-14 h-14 rounded-2xl bg-blue-600 flex items-center justify-center shadow-xl shadow-blue-500/30 mb-4 animate-spin">
+              <RefreshCw className="w-7 h-7 text-white" />
+            </div>
+            <h3 className="text-base font-bold">Menyimpan & Berpindah Sekolah...</h3>
+            <p className="text-xs text-slate-300 mt-1 max-w-sm">
+              Memastikan seluruh pembukuan disimpan dan memuat data terisolasi untuk <b>{switchingTargetName}</b>...
+            </p>
+          </div>
+        )}
+
+        {/* Legacy Data Migration Warning Banner (Requirement 9) */}
+        {hasLegacyNeedsMigration && (
+          <div className="mb-4 bg-amber-600 border border-amber-700 text-white p-4 rounded-xl shadow-md flex items-center justify-between gap-3 animate-in fade-in">
+            <div className="flex items-center gap-2.5 text-xs font-bold">
+              <AlertTriangle className="w-5 h-5 shrink-0 text-amber-100" />
+              <span>Data sekolah Anda perlu dimigrasi ke akun multi-sekolah. Silakan hubungi admin untuk menjalankan migrasi data sekolah Anda.</span>
+            </div>
+          </div>
+        )}
         {/* Banner Merah Safety Cloud Load Failure */}
         {isCloudAutosaveBlocked && (
           <div className="mb-4 bg-rose-600 border border-rose-700 text-white p-4 rounded-xl shadow-md flex items-center justify-between gap-3 animate-in fade-in">
@@ -2586,7 +2725,10 @@ Lanjutkan pengosongan data transaksi?`)
             currentTenant={currentTenant}
             onSave={handleUpdateSchool}
             onOpenPrintModal={(doc) => handleOpenPrint(doc)}
-            onDeleteSchool={() => handleDeleteTenant(currentTenant)}
+            onDeleteSchool={() => {
+              setSchoolPortalInitialTab('pin');
+              setIsSchoolPortalOpen(true);
+            }}
           />
         )}
 
@@ -2796,12 +2938,12 @@ Lanjutkan pengosongan data transaksi?`)
         isOpen={isSchoolPortalOpen}
         onClose={() => setIsSchoolPortalOpen(false)}
         currentTenant={currentTenant}
-        tenants={tenants}
-        onSelectTenant={handleSelectTenant}
-        onDeleteTenant={handleDeleteTenant}
+        memberships={memberships}
+        onSelectSchool={switchSchool}
         onRegisterSchool={handleRegisterNewSchool}
-        cloudDatabaseId={firestoreDatabaseId}
+        onCreateDemoSchool={handleCreateDemoSchool}
         onLogout={handleLogout}
+        initialTab={schoolPortalInitialTab}
       />
 
       {/* Quick Receipt Modal */}
@@ -2866,68 +3008,6 @@ Lanjutkan pengosongan data transaksi?`)
         currentTenantName={currentTenant.namaSekolah}
       />
 
-      {/* Confirmation Modal: Delete School & Database */}
-      {tenantToDeleteConfirm && (
-        <div className="fixed inset-0 z-[70] bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200">
-          <div className="bg-white rounded-2xl shadow-2xl border border-rose-200 max-w-md w-full p-6 text-slate-800 space-y-4">
-            <div className="flex items-center gap-3 text-rose-600">
-              <div className="p-3 bg-rose-100 rounded-xl">
-                <Trash2 className="w-6 h-6 text-rose-600" />
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-slate-900">Konfirmasi Hapus Sekolah</h3>
-                <p className="text-xs text-rose-600 font-semibold">Tindakan ini tidak dapat dibatalkan</p>
-              </div>
-            </div>
-
-            <div className="bg-rose-50/70 border border-rose-100 rounded-xl p-3.5 text-xs text-slate-700 space-y-1.5">
-              <p>
-                Anda akan menghapus permanen database sekolah:
-              </p>
-              <p className="font-bold text-sm text-rose-950 font-sans">
-                {tenantToDeleteConfirm.namaSekolah}
-              </p>
-              <div className="text-[11px] text-slate-600 flex items-center gap-2">
-                <span>NPSN: <b className="font-mono">{tenantToDeleteConfirm.npsn || '-'}</b></span>
-                <span>•</span>
-                <span>{tenantToDeleteConfirm.kabKota || '-'}</span>
-              </div>
-              <p className="text-[11px] text-rose-700 pt-2 border-t border-rose-200/60 font-medium">
-                ⚠️ Seluruh database cloud Firestore, data RPD, analisa AHSP, Kwitansi, Bon Toko, Buku Kas (BKU/BKT/BKB), dan laporan pajak sekolah ini akan dihapus secara permanen dan dihilangkan dari tampilan.
-              </p>
-            </div>
-
-            <div className="flex items-center justify-end gap-2.5 pt-2">
-              <button
-                type="button"
-                disabled={isDeletingTenantLoading}
-                onClick={() => setTenantToDeleteConfirm(null)}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition cursor-pointer"
-              >
-                Batal
-              </button>
-              <button
-                type="button"
-                disabled={isDeletingTenantLoading}
-                onClick={handleConfirmDeleteTenant}
-                className="flex items-center gap-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white px-4 py-2 text-xs font-bold rounded-lg shadow-sm transition cursor-pointer"
-              >
-                {isDeletingTenantLoading ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Menghapus Database...</span>
-                  </>
-                ) : (
-                  <>
-                    <Trash2 className="w-3.5 h-3.5" />
-                    <span>Ya, Hapus Sekolah & Database</span>
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Concurrency Conflict Resolution Modal (Requirement 3) */}
       <ConflictResolutionModal

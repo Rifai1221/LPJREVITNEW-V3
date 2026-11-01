@@ -9,8 +9,6 @@ import {
 import { DEFAULT_DIVISIONS, renumberDivisions, buildDivisionsFromRealSchoolData } from '../utils/divisionHelper';
 import { logger } from '../utils/logger';
 
-const STORAGE_KEY = 'LPJ_REVITALISASI_DATA_V1';
-
 export type { AppStateData };
 
 export interface DataAnomalyProposal {
@@ -208,7 +206,14 @@ export function getDefaultState(): AppStateData {
 }
 
 /**
- * Load app state from local storage.
+ * @deprecated Gunakan saveSchoolTenantAppState / loadSchoolTenantAppState dari schoolTenantService.
+ * Kunci ini dipertahankan hanya untuk backward compatibility & migrasi data lokal versi 1.
+ */
+export const LEGACY_STORAGE_KEY = 'LPJ_REVITALISASI_DATA_V1';
+const STORAGE_KEY = LEGACY_STORAGE_KEY;
+
+/**
+ * @deprecated Legacy single-school loader. Gunakan loadSchoolTenantAppState.
  * Note: Never silently triggers saveAppState during load.
  */
 export function loadAppState(): AppStateData {
@@ -221,19 +226,25 @@ export function loadAppState(): AppStateData {
       }
     }
   } catch (err) {
-    logger.error('StorageService', 'Failed to load from storage', err);
+    logger.error('StorageService', 'Failed to load from legacy storage', err);
   }
   return getDefaultState();
 }
 
+/**
+ * @deprecated Legacy single-school saver. Gunakan saveSchoolTenantAppState(tenantId, ...).
+ */
 export function saveAppState(data: AppStateData): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   } catch (err) {
-    logger.error('StorageService', 'Failed to save to storage', err);
+    logger.error('StorageService', 'Failed to save to legacy storage', err);
   }
 }
 
+/**
+ * @deprecated Legacy reset helper.
+ */
 export function resetToDefaultState(): AppStateData {
   const defaultData = getDefaultState();
   saveAppState(defaultData);

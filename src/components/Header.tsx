@@ -1,36 +1,33 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  Building2,
-  FileText,
   Printer,
   RotateCcw,
   Download,
   Upload,
-  Sparkles,
-  BookOpen,
-  Database,
-  Cloud,
-  CloudCheck,
   RefreshCw,
-  ChevronDown,
-  Users,
   FileSpreadsheet,
   LogOut,
   HardDrive,
-  KeyRound,
-  UserCheck,
-  AlertTriangle,
   CheckCircle2,
+  AlertTriangle,
+  Cloud,
 } from 'lucide-react';
 import { SchoolMasterData } from '../types';
 import { SchoolTenant } from '../data/tenantPresets';
 import { GoogleUserProfile } from '../services/googleAuthService';
 import { LocalUserSession } from '../utils/authHelper';
 import { useCan } from '../hooks/useCan';
+import { UserMembershipRecord } from '../services/schoolMembershipService';
+import { SchoolSwitcher, getSchoolColorTheme } from './SchoolSwitcher';
 
 interface HeaderProps {
   school: SchoolMasterData;
   currentTenant: SchoolTenant;
+  memberships: UserMembershipRecord[];
+  onSelectSchool: (tenant: SchoolTenant) => void;
+  onOpenSchoolPortal: (initialTab?: 'switch' | 'join' | 'create' | 'members' | 'pin') => void;
+  onCreateDemoSchool?: () => void;
+  isCreatingDemo?: boolean;
   activeTab: string;
   setActiveTab: (tab: string) => void;
   onOpenPrintModal: (docType?: string) => void;
@@ -38,7 +35,6 @@ interface HeaderProps {
   onExportJson: () => void;
   onImportJson: () => void;
   onOpenBackupRestoreModal?: () => void;
-  onOpenSchoolPortal?: () => void;
   isSyncing: boolean;
   lastSyncedText: string;
   cloudStatus?: 'ok' | 'failed' | 'quota' | 'skipped' | 'pending';
@@ -57,6 +53,11 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   school,
   currentTenant,
+  memberships,
+  onSelectSchool,
+  onOpenSchoolPortal,
+  onCreateDemoSchool,
+  isCreatingDemo = false,
   activeTab,
   setActiveTab,
   onOpenPrintModal,
@@ -64,7 +65,6 @@ export const Header: React.FC<HeaderProps> = ({
   onExportJson,
   onImportJson,
   onOpenBackupRestoreModal,
-  onOpenSchoolPortal,
   isSyncing,
   lastSyncedText,
   cloudStatus = 'ok',
@@ -76,11 +76,43 @@ export const Header: React.FC<HeaderProps> = ({
   isGoogleConnected = false,
   googleSheetName,
   currentUser,
-  localSession,
   onLogout,
 }) => {
-  const { can } = useCan(currentTenant.id);
+  const { can, role: serverRole } = useCan(currentTenant.id);
   const canImport = can('import:data');
+  const theme = getSchoolColorTheme(currentTenant.id);
+
+  // Multi-tab cross-synchronization listener (Requirement 8)
+  const [otherTabChangedTenantId, setOtherTabChangedTenantId] = useState<string | null>(null);
+
+  useEffect(() => {
+    // 1. BroadcastChannel listener
+    let bc: BroadcastChannel | null = null;
+    try {
+      if (typeof window !== 'undefined' && window.BroadcastChannel) {
+        bc = new BroadcastChannel('LPJ_TENANT_CHANNEL');
+        bc.onmessage = (event) => {
+          if (event.data?.type === 'ACTIVE_TENANT_CHANGED' && event.data.tenantId !== currentTenant.id) {
+            setOtherTabChangedTenantId(event.data.tenantId);
+          }
+        };
+      }
+    } catch {}
+
+    // 2. Storage event listener fallback
+    const handleStorageEvent = (event: StorageEvent) => {
+      if (event.key === 'ACTIVE_SCHOOL_TENANT_ID_V1' && event.newValue && event.newValue !== currentTenant.id) {
+        setOtherTabChangedTenantId(event.newValue);
+      }
+    };
+    window.addEventListener('storage', handleStorageEvent);
+
+    return () => {
+      if (bc) bc.close();
+      window.removeEventListener('storage', handleStorageEvent);
+    };
+  }, [currentTenant.id]);
+
   const tabs = [
     { id: 'dashboard', label: 'Ringkasan Proyek' },
     { id: 'realdata', label: 'Data Real Sekolah' },
@@ -98,132 +130,124 @@ export const Header: React.FC<HeaderProps> = ({
 
   return (
     <header className="bg-slate-900 text-white border-b border-slate-800 shadow-md sticky top-0 z-40 print:hidden">
+      {/* Other Tab Switched Confirmation Bar (Requirement 8) */}
+      {otherTabChangedTenantId && (
+        <div className="bg-gradient-to-r from-amber-600 to-orange-600 text-white px-4 py-2 text-xs flex items-center justify-between gap-3 shadow-md animate-in slide-in-from-top duration-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-200" />
+            <span>
+              Sekolah aktif telah diganti di tab browser lain. Beralih sekarang agar pembukuan tidak tertukar?
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                const targetMembership = memberships.find((m) => m.schoolId === otherTabChangedTenantId);
+                if (targetMembership) {
+                  onSelectSchool({
+                    id: targetMembership.schoolId,
+                    namaSekolah: targetMembership.namaSekolah,
+                    npsn: targetMembership.npsn,
+                    jenjang: (targetMembership.jenjang || 'SD') as any,
+                    kabKota: targetMembership.kabKota || '-',
+                    provinsi: '-',
+                    email: '-',
+                    isDemo: false,
+                    createdAt: new Date().toISOString(),
+                    lastLogin: new Date().toISOString(),
+                  });
+                } else {
+                  window.location.reload();
+                }
+                setOtherTabChangedTenantId(null);
+              }}
+              className="px-3 py-1 bg-white text-slate-900 font-bold rounded-lg hover:bg-amber-50 transition cursor-pointer shadow-xs"
+            >
+              Beralih Sekarang
+            </button>
+            <button
+              type="button"
+              onClick={() => setOtherTabChangedTenantId(null)}
+              className="px-2 py-1 text-white/80 hover:text-white font-semibold cursor-pointer"
+            >
+              Abaikan
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Top bar */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex flex-wrap items-center justify-between gap-3">
-        
-        {/* School Identity */}
+        {/* School Identity with Interactive Switcher Dropdown (Requirement 2 & 8) */}
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center font-bold text-lg shadow-lg shadow-blue-500/20 text-white shrink-0">
-            <Building2 className="w-5 h-5" />
-          </div>
+          <SchoolSwitcher
+            currentTenant={currentTenant}
+            memberships={memberships}
+            onSelectSchool={onSelectSchool}
+            onOpenJoinOrCreate={(tab) => onOpenSchoolPortal(tab)}
+            onCreateDemoSchool={onCreateDemoSchool}
+            isCreatingDemo={isCreatingDemo}
+            currentRole={serverRole}
+          />
 
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h1 className="text-sm sm:text-base font-bold tracking-tight text-white">
-                {school.namaSekolah}
-              </h1>
+          {/* Sub-info: City, Year, and Real-time Cloud Status */}
+          <div className="hidden lg:flex items-center gap-2 text-xs text-slate-400 flex-wrap">
+            <span>TA {school.tahunAnggaran || 2026}</span>
+            <span>•</span>
 
-              <span className="text-[10px] bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded font-mono font-medium border border-blue-400/30">
-                NPSN: {currentTenant.npsn || school.npsn}
-              </span>
-            </div>
-
-            {/* Sub-info: City, Year, and Real-time Cloud Status */}
-            <div className="flex items-center gap-2 text-xs text-slate-400 flex-wrap mt-0.5">
-              <span>{school.kabKota} • TA {school.tahunAnggaran}</span>
-              <span>•</span>
-              
-              {/* App Running Status Indicator */}
-              <div
-                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-[11px] text-emerald-300 font-medium"
-                title="Aplikasi sedang berjalan aktif dan responsif di server"
-              >
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            {/* Cloud Sync Status Indicator */}
+            <div className="flex items-center gap-1.5 text-[11px]">
+              {isSyncing ? (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-950/80 border border-amber-500/40 text-amber-300 font-medium">
+                  <RefreshCw className="w-3 h-3 text-amber-400 animate-spin" />
+                  <span>Menyinkronkan ke Cloud...</span>
                 </span>
-                <span>Aplikasi Berjalan Normal</span>
-              </div>
-
-              <span>•</span>
-
-              {/* Cloud Sync Status Indicator - Honest Badge (Requirement 1) */}
-              <div className="flex items-center gap-1.5 text-[11px]">
-                {isSyncing ? (
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-950/80 border border-amber-500/40 text-amber-300 font-medium">
-                    <RefreshCw className="w-3 h-3 text-amber-400 animate-spin" />
-                    <span>Menyinkronkan ke Cloud...</span>
+              ) : cloudStatus === 'ok' && pendingSyncCount === 0 ? (
+                <div
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 font-medium"
+                  title="Data berhasil disinkronkan penuh ke Google Cloud Firestore"
+                >
+                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                  <span>Tersimpan di cloud</span>
+                  <span className="text-slate-400 text-[10px]">({lastSyncedText})</span>
+                </div>
+              ) : cloudStatus === 'quota' ? (
+                <div
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-rose-950/80 border border-rose-500/40 text-rose-300 font-medium"
+                  title="Batas kuota harian Firestore tercapai; data disimpan aman di IndexedDB lokal perangkat"
+                >
+                  <HardDrive className="w-3 h-3 text-rose-400" />
+                  <span>Hanya tersimpan di perangkat ini (Batas Kuota)</span>
+                </div>
+              ) : (
+                <div
+                  className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-950/90 border border-amber-500/50 text-amber-300 font-medium animate-pulse"
+                  title="Data tersimpan di perangkat lokal. Menunggu koneksi cloud untuk sinkronisasi otomatis..."
+                >
+                  <HardDrive className="w-3 h-3 text-amber-400" />
+                  <span>
+                    Hanya tersimpan di perangkat ini
+                    {pendingSyncCount > 0 ? ` (${pendingSyncCount} antrean)` : ' (Belum tersinkron)'}
                   </span>
-                ) : cloudStatus === 'ok' && pendingSyncCount === 0 ? (
-                  <div
-                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 font-medium"
-                    title="Data berhasil disinkronkan penuh ke Google Cloud Firestore"
-                  >
-                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                    <span>Tersimpan di cloud</span>
-                    <span className="text-slate-400 text-[10px]">({lastSyncedText})</span>
-                  </div>
-                ) : cloudStatus === 'quota' ? (
-                  <div
-                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-rose-950/80 border border-rose-500/40 text-rose-300 font-medium"
-                    title="Batas kuota harian Firestore tercapai; data disimpan aman di IndexedDB lokal perangkat"
-                  >
-                    <HardDrive className="w-3 h-3 text-rose-400" />
-                    <span>Hanya tersimpan di perangkat ini (Batas Kuota)</span>
-                  </div>
-                ) : (
-                  <div
-                    className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-950/90 border border-amber-500/50 text-amber-300 font-medium animate-pulse"
-                    title="Data tersimpan di perangkat lokal. Menunggu koneksi cloud untuk sinkronisasi otomatis..."
-                  >
-                    <HardDrive className="w-3 h-3 text-amber-400" />
-                    <span>
-                      Hanya tersimpan di perangkat ini
-                      {pendingSyncCount > 0 ? ` (${pendingSyncCount} antrean)` : ' (Belum tersinkron)'}
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              {/* Data Anomaly Detection Notification Badge (Requirement 5) */}
-              {anomalyCount > 0 && onOpenAnomalyReview && (
-                <>
-                  <span>•</span>
-                  <button
-                    onClick={onOpenAnomalyReview}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-400/40 hover:bg-amber-500/30 transition cursor-pointer"
-                    title="Klik untuk meninjau usulan perbaikan data pembukuan yang tidak konsisten"
-                  >
-                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                    <span>{anomalyCount} Usulan Penyelarasan</span>
-                  </button>
-                </>
-              )}
-
-              {onOpenGoogleSheetsSync && (
-                <>
-                  <span>•</span>
-                  <button
-                    onClick={onOpenGoogleSheetsSync}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold transition cursor-pointer border ${
-                      isGoogleConnected
-                        ? 'bg-emerald-900/60 text-emerald-200 border-emerald-500/60 shadow-xs shadow-emerald-500/20'
-                        : 'bg-amber-900/40 text-amber-300 border-amber-500/40 hover:bg-amber-900/60'
-                    }`}
-                    title={
-                      isGoogleConnected
-                        ? `Database Google Drive Aktif: ${googleSheetName || 'Spreadsheet Terhubung'}`
-                        : 'Klik untuk menghubungkan database Google Drive pribadi Anda'
-                    }
-                  >
-                    <FileSpreadsheet className={`w-3.5 h-3.5 ${isGoogleConnected ? 'text-emerald-400' : 'text-amber-400'}`} />
-                    <span>
-                      {isGoogleConnected ? (
-                        <>
-                          <span className="font-bold text-emerald-300">Google Drive:</span>{' '}
-                          <span className="text-white truncate max-w-[150px] inline-block align-bottom">{googleSheetName || 'Terhubung'}</span>
-                        </>
-                      ) : (
-                        'Hubungkan Google Drive'
-                      )}
-                    </span>
-                    {isGoogleConnected && (
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                    )}
-                  </button>
-                </>
+                </div>
               )}
             </div>
+
+            {/* Data Anomaly Detection Notification Badge */}
+            {anomalyCount > 0 && onOpenAnomalyReview && (
+              <>
+                <span>•</span>
+                <button
+                  onClick={onOpenAnomalyReview}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-400/40 hover:bg-amber-500/30 transition cursor-pointer"
+                  title="Klik untuk meninjau usulan perbaikan data pembukuan yang tidak konsisten"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                  <span>{anomalyCount} Usulan Penyelarasan</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -237,7 +261,7 @@ export const Header: React.FC<HeaderProps> = ({
               className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-500 hover:to-teal-600 text-white px-3 py-1.5 rounded-lg text-xs font-semibold shadow-xs border border-emerald-400/40 transition cursor-pointer"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-200" />
-              <span>Google Sheets</span>
+              <span className="hidden sm:inline">Google Sheets</span>
               {isGoogleConnected && (
                 <span className="w-2 h-2 rounded-full bg-emerald-300 animate-pulse"></span>
               )}
@@ -260,45 +284,11 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           )}
 
-
-
-          {/* Tombol Keluar Sekolah / Logout (Selalu Terlihat) */}
-          {onLogout && (
-            <button
-              type="button"
-              onClick={onLogout}
-              title="Keluar dari sekolah ini dan kembali ke Portal Login"
-              className="flex items-center gap-1.5 bg-rose-600/90 hover:bg-rose-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm border border-rose-500/40 transition cursor-pointer"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span>Keluar Sekolah</span>
-            </button>
-          )}
-
-          {/* User Account Chip - Dual Login Indicator */}
-          {localSession && localSession.authMode === 'mandiri' && (
-            <div
-              className="flex items-center gap-2 bg-indigo-950/80 border border-indigo-500/40 px-2.5 py-1 rounded-lg"
-              title={`Mode Masuk Mandiri PIN: ${localSession.roleLabel} (${localSession.officerName})`}
-            >
-              <div className="w-5 h-5 rounded-full bg-indigo-600 text-[10px] font-bold flex items-center justify-center text-white shrink-0 shadow-xs">
-                <KeyRound className="w-3 h-3 text-amber-300" />
-              </div>
-              <div className="text-left hidden lg:block leading-tight">
-                <p className="text-[11px] font-bold text-indigo-200 truncate max-w-[130px]">
-                  {localSession.roleLabel}
-                </p>
-                <p className="text-[9px] text-slate-400 font-medium truncate max-w-[130px]">
-                  {localSession.officerName}
-                </p>
-              </div>
-            </div>
-          )}
-
+          {/* User Account / Sign Out */}
           {currentUser && (
             <div
               className="flex items-center gap-2 bg-slate-800/90 border border-slate-700/80 px-2.5 py-1.5 rounded-lg"
-              title={`Google Drive Terhubung: ${currentUser.email}`}
+              title={`Akun Pengguna: ${currentUser.email}`}
             >
               {currentUser.photoURL ? (
                 <img
@@ -315,6 +305,19 @@ export const Header: React.FC<HeaderProps> = ({
                 {currentUser.displayName || currentUser.email}
               </span>
             </div>
+          )}
+
+          {/* Tombol Logout Akun */}
+          {onLogout && (
+            <button
+              type="button"
+              onClick={onLogout}
+              title="Keluar dari akun dan kembali ke halaman login"
+              className="flex items-center gap-1.5 bg-rose-600/90 hover:bg-rose-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm border border-rose-500/40 transition cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Logout</span>
+            </button>
           )}
 
           <button
