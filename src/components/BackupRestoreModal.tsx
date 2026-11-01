@@ -483,23 +483,20 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
               </div>
 
               {/* File Dropzone Input */}
-              <div
-                onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-2xl p-6 text-center cursor-pointer transition bg-slate-50/60 hover:bg-blue-50/30 flex flex-col items-center justify-center space-y-2"
-              >
+              <div className="relative border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-2xl p-6 text-center transition bg-slate-50/60 hover:bg-blue-50/30 flex flex-col items-center justify-center space-y-2">
                 <input
                   ref={fileInputRef}
                   type="file"
                   accept=".json,application/json"
                   onChange={handleFileChange}
-                  className="hidden"
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
                 />
                 <div className="p-3 bg-blue-100 text-blue-700 rounded-2xl">
                   <Upload className="w-6 h-6" />
                 </div>
                 <div>
                   <p className="text-sm font-bold text-slate-800">
-                    {selectedFile ? selectedFile.name : 'Klik untuk memilih file cadangan (.JSON)'}
+                    {selectedFile ? selectedFile.name : 'Klik atau seret file cadangan (.JSON) ke sini'}
                   </p>
                   <p className="text-xs text-slate-500 mt-0.5">
                     {selectedFile ? `${Math.round(selectedFile.size / 1024)} KB` : 'Format yang didukung: file JSON hasil cadangan LPJ Revitalisasi'}

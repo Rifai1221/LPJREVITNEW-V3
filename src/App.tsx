@@ -130,6 +130,7 @@ import { defaultRealSchoolData } from './data/realSchoolData';
 import { RealSchoolData, RpdKategori } from './types';
 import { validateFinancialReconciliation } from './utils/reconciliationValidator';
 import { ReconciliationBanner } from './components/ReconciliationBanner';
+import { decryptJsonData } from './utils/cryptoHelper';
 import { useToast } from './context/ToastContext';
 
 export default function App() {
@@ -2478,24 +2479,44 @@ Lanjutkan pengosongan data transaksi?`)
   const handleImportJson = () => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.json';
+    input.accept = '.json,application/json';
     input.onchange = (e: any) => {
-      const file = e.target.files[0];
+      const file = e.target.files?.[0];
       if (file) {
         const reader = new FileReader();
-        reader.onload = (event) => {
+        reader.onload = async (event) => {
           try {
-            const parsed = JSON.parse(event.target?.result as string);
-            if (parsed.school && parsed.rpdItems) {
+            const rawText = (event.target?.result as string) || '';
+            let parsed: any;
+            if (rawText.startsWith('ENC_AES_') || rawText.startsWith('ENC_LGT_')) {
+              const pwd = prompt('File ini terenkripsi. Masukkan kata sandi enkripsi:');
+              if (!pwd) return;
+              parsed = await decryptJsonData(rawText.trim(), pwd.trim());
+            } else {
+              parsed = JSON.parse(rawText);
+            }
+
+            if (
+              parsed &&
+              (parsed.school ||
+                parsed.kwitansiList ||
+                parsed.bkuTransactions ||
+                parsed.manualBkuTransactions ||
+                parsed.rpdItems)
+            ) {
               isDirtyRef.current = true;
               const migrated = migrateAndTransformAppState(parsed);
               setAppState(migrated);
-              toast.success(`Data LPJ untuk ${migrated.school.namaSekolah || currentTenant.namaSekolah} berhasil dipulihkan!`);
+              toast.success(
+                `Data LPJ untuk ${
+                  migrated.school?.namaSekolah || currentTenant.namaSekolah
+                } berhasil dipulihkan!`
+              );
             } else {
               toast.error('Format file JSON tidak sesuai dengan skema LPJ Revitalisasi.');
             }
-          } catch (err) {
-            toast.error('Gagal membaca file JSON.');
+          } catch (err: any) {
+            toast.error(`Gagal membaca file JSON: ${err?.message || err}`);
           }
         };
         reader.readAsText(file);
