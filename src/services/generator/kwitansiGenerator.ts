@@ -11,6 +11,25 @@ import {
   splitMaterialPurchases,
 } from './splitTransactionService';
 
+const projectStorePriceCache = new Map<string, number>();
+
+export function getProjectStoreItemUnitPrice(storeName: string, rawName: string, rawPrice: number): number {
+  const info = getCanonicalReceiptItemInfo(rawName);
+  const key = `${(storeName || 'default').toLowerCase().trim()}:${info.key}`;
+  if (projectStorePriceCache.has(key)) {
+    return projectStorePriceCache.get(key)!;
+  }
+  let basePrice = rawPrice > 0 ? rawPrice : 50000;
+  let rounded = basePrice >= 10000 ? Math.round(basePrice / 500) * 500 : Math.round(basePrice / 100) * 100;
+  if (rounded <= 0) rounded = 1000;
+  projectStorePriceCache.set(key, rounded);
+  return rounded;
+}
+
+export function clearProjectStorePriceCache(): void {
+  projectStorePriceCache.clear();
+}
+
 export function isPreservedUnitItem(nama: string, satuan?: string, isBarangPabrikasi?: boolean): boolean {
   if (isBarangPabrikasi === true) return true;
   const n = (nama || '').toLowerCase().trim();

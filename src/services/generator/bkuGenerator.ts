@@ -539,7 +539,7 @@ export function calculateBkuFromTransactions(
         bulan: startProjectBulan,
         jenis: 'PENERIMAAN',
         uraian: 'Penarikan dari Bank (Termin 1 - 70%)',
-        noBukti: 'BKT-01',
+        noBukti: 'BKT-IN-01',
         penerimaan: termin1Amount,
         pengeluaran: 0,
       });
@@ -827,7 +827,7 @@ export function calculateBkuFromTransactions(
         bulan: termin2Bulan,
         jenis: 'PENERIMAAN',
         uraian: 'Penarikan dari Bank (Termin 2 - 30%)',
-        noBukti: 'BKT-02',
+        noBukti: 'BKT-IN-02',
         penerimaan: termin2Amount,
         pengeluaran: 0,
       });
