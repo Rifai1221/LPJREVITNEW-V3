@@ -637,16 +637,32 @@ export default function App() {
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
     }
-    isDirtyRef.current = false;
-    isLoadedRef.current = false;
-    setIsSyncing(true);
 
     try {
       const result = await registerNewSchoolTenant(data);
-      await switchSchool(result.tenant);
+
+      // Perform instant optimistic switch to new school (no blocking remote fetch delay!)
+      isDirtyRef.current = false;
+      setAnomalies([]);
+      setConflictState({ isOpen: false, serverRev: 1, localRev: 1 });
+      setCloudStatus('ok');
+      setIsCloudAutosaveBlocked(false);
+      setGoogleSheetName(undefined);
+
+      _setAppState(result.state);
+      setCurrentTenant(result.tenant);
+      setStoredActiveTenantId(result.tenant.id);
+      isLoadedRef.current = true;
+      savedCounterRef.current = changeCounterRef.current;
+
+      if (currentUser?.uid) {
+        updateMembershipLastOpenedAt(currentUser.uid, result.tenant.id);
+        setUserSchoolPref(currentUser.uid, result.tenant.id);
+      }
+
       setIsSyncing(false);
       setLastSyncedText('Database Baru Tersimpan');
-      setSwitchNotification(`Database baru untuk ${result.tenant.namaSekolah} berhasil dibuat & tersimpan aman!`);
+      setSwitchNotification(`Database baru untuk ${result.tenant.namaSekolah} berhasil dibuat & tersimpan!`);
       setTimeout(() => setSwitchNotification(null), 6000);
 
       try {

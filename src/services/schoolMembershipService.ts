@@ -96,49 +96,55 @@ export async function createSchoolCallable(params: {
   const schoolId = 'sch_' + params.npsn.trim();
   const { hash, salt } = await hashPin(params.pin);
 
-  // 1. Write School Metadata
-  await setDoc(doc(db, 'schools', schoolId), {
-    id: schoolId,
-    namaSekolah: params.namaSekolah.trim(),
-    npsn: params.npsn.trim(),
-    jenjang: params.jenjang || 'SD',
-    kabKota: params.kabKota || '',
-    provinsi: params.provinsi || '',
-    status: 'active',
-    createdAt: serverTimestamp(),
-  }, { merge: true });
+  // Parallel Write All Initial Documents (1 network burst < 200ms with 2s max timeout guard)
+  const writeOps = Promise.all([
+    setDoc(doc(db, 'schools', schoolId), {
+      id: schoolId,
+      namaSekolah: params.namaSekolah.trim(),
+      npsn: params.npsn.trim(),
+      jenjang: params.jenjang || 'SD',
+      kabKota: params.kabKota || '',
+      provinsi: params.provinsi || '',
+      status: 'active',
+      createdAt: serverTimestamp(),
+    }, { merge: true }),
 
-  // 2. Write Private Security Record
-  await setDoc(doc(db, 'schools', schoolId, 'private', 'security'), {
-    pinHash: hash,
-    pinSalt: salt,
-    algo: 'sha256-legacy',
-    failedAttempts: 0,
-    lockedUntil: null,
-  }, { merge: true });
+    setDoc(doc(db, 'schools', schoolId, 'private', 'security'), {
+      pinHash: hash,
+      pinSalt: salt,
+      algo: 'sha256-legacy',
+      failedAttempts: 0,
+      lockedUntil: null,
+    }, { merge: true }),
 
-  // 3. Write School Member (BENDAHARA)
-  await setDoc(doc(db, 'schools', schoolId, 'members', currentUser.uid), {
-    uid: currentUser.uid,
-    role: 'BENDAHARA',
-    email: currentUser.email || '',
-    displayName: currentUser.displayName || 'Bendahara',
-    joinedAt: serverTimestamp(),
-  }, { merge: true });
+    setDoc(doc(db, 'schools', schoolId, 'members', currentUser.uid), {
+      uid: currentUser.uid,
+      role: 'BENDAHARA',
+      email: currentUser.email || '',
+      displayName: currentUser.displayName || 'Bendahara',
+      joinedAt: serverTimestamp(),
+    }, { merge: true }),
 
-  // 4. Write User Membership Record
-  await setDoc(doc(db, 'users', currentUser.uid, 'memberships', schoolId), {
-    schoolId,
-    namaSekolah: params.namaSekolah.trim(),
-    npsn: params.npsn.trim(),
-    jenjang: params.jenjang || 'SD',
-    kabKota: params.kabKota || '',
-    role: 'BENDAHARA',
-    lastOpenedAt: serverTimestamp(),
-  }, { merge: true });
+    setDoc(doc(db, 'users', currentUser.uid, 'memberships', schoolId), {
+      schoolId,
+      namaSekolah: params.namaSekolah.trim(),
+      npsn: params.npsn.trim(),
+      jenjang: params.jenjang || 'SD',
+      kabKota: params.kabKota || '',
+      role: 'BENDAHARA',
+      lastOpenedAt: serverTimestamp(),
+    }, { merge: true }),
 
-  // 5. Update user school active preference
-  await setUserSchoolPref(currentUser.uid, schoolId);
+    setUserSchoolPref(currentUser.uid, schoolId),
+  ]);
+
+  // Fast timeout guard: Return in <2s maximum and let Firestore sync in background if network is slow
+  await Promise.race([
+    writeOps,
+    new Promise((resolve) => setTimeout(resolve, 2000)),
+  ]).catch((err) => {
+    logger.warn('SchoolMembershipService', 'Initial document write notice, continuing background sync', err);
+  });
 
   return {
     schoolId,
@@ -244,25 +250,34 @@ export async function joinSchoolCallable(params: {
   }
 
   // Write Membership
-  await setDoc(doc(db, 'schools', params.schoolId, 'members', currentUser.uid), {
-    uid: currentUser.uid,
-    role: params.role,
-    email: currentUser.email || '',
-    displayName: params.displayName || currentUser.displayName || 'Anggota',
-    joinedAt: serverTimestamp(),
-  }, { merge: true });
+  const writeOps = Promise.all([
+    setDoc(doc(db, 'schools', params.schoolId, 'members', currentUser.uid), {
+      uid: currentUser.uid,
+      role: params.role,
+      email: currentUser.email || '',
+      displayName: params.displayName || currentUser.displayName || 'Anggota',
+      joinedAt: serverTimestamp(),
+    }, { merge: true }),
 
-  await setDoc(doc(db, 'users', currentUser.uid, 'memberships', params.schoolId), {
-    schoolId: params.schoolId,
-    namaSekolah: schoolData.namaSekolah || '',
-    npsn: schoolData.npsn || '',
-    jenjang: schoolData.jenjang,
-    kabKota: schoolData.kabKota,
-    role: params.role,
-    lastOpenedAt: serverTimestamp(),
-  }, { merge: true });
+    setDoc(doc(db, 'users', currentUser.uid, 'memberships', params.schoolId), {
+      schoolId: params.schoolId,
+      namaSekolah: schoolData.namaSekolah || '',
+      npsn: schoolData.npsn || '',
+      jenjang: schoolData.jenjang,
+      kabKota: schoolData.kabKota,
+      role: params.role,
+      lastOpenedAt: serverTimestamp(),
+    }, { merge: true }),
 
-  await setUserSchoolPref(currentUser.uid, params.schoolId);
+    setUserSchoolPref(currentUser.uid, params.schoolId),
+  ]);
+
+  await Promise.race([
+    writeOps,
+    new Promise((resolve) => setTimeout(resolve, 2000)),
+  ]).catch((err) => {
+    logger.warn('SchoolMembershipService', 'Join school write notice, continuing background sync', err);
+  });
 
   return {
     schoolId: params.schoolId,

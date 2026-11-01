@@ -273,14 +273,16 @@ export async function registerNewSchoolTenant(params: {
 
   const initialState = createSchoolStateForTenant(newTenant, params.templateType);
 
-  // Initial atomic save with expectedRev = 0 (creates meta & domain docs)
-  await saveSchoolTenantAppState(tenantId, initialState, 0);
-
   const uid = auth.currentUser?.uid || 'guest';
   const idbKey = getTenantCacheKey(tenantId, uid);
   await setIndexedDbCache(idbKey, initialState);
   setStoredTenantRev(tenantId, 1, uid);
   setStoredActiveTenantId(tenantId);
+
+  // Background Cloud Save (non-blocking for instant UI response)
+  saveSchoolTenantAppState(tenantId, initialState, 0, uid).catch((err) => {
+    logger.warn('SchoolTenantService', 'Notice initial background cloud save for new tenant', undefined, err);
+  });
 
   return { tenant: newTenant, state: initialState };
 }

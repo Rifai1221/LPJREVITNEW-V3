@@ -81,8 +81,8 @@ service cloud.firestore {
 
       // 5c. LPJ Application Data (schools/{schoolId}/lpj_data/{dataId})
       match /lpj_data/{dataId} {
-        allow read: if isMember(schoolId);
-        allow create: if isBendahara(schoolId) && dataId != 'current';
+        allow read: if isMember(schoolId) || (isSignedIn() && exists(/databases/$(database)/documents/schools/$(schoolId)/members/$(request.auth.uid)));
+        allow create: if (isBendahara(schoolId) || (isSignedIn() && exists(/databases/$(database)/documents/schools/$(schoolId)/members/$(request.auth.uid)))) && dataId != 'current';
         allow delete: if false;
 
         allow update: if dataId != 'current'
