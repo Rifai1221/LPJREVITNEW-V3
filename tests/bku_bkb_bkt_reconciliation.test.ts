@@ -116,7 +116,7 @@ describe('BKU vs BKB + BKT Financial Reconciliation & Invariants', () => {
     assert.strictEqual(siplahBkbDebits.length, siplahKwitansi.length, 'Every SipLah kwitansi must have exactly 1 SipLah debit in BKB');
 
     // 4. Calculate BKT
-    const bktList = calculateBktFromBku(bkuList, bkbRecords, kwitansiList, school as any, progressWeeks);
+    const bktList = calculateBktFromBku(bkuList, bkbRecords);
     assert.ok(bktList.length > 0, 'BKT list should not be empty');
 
     // 5. Invariant Checks

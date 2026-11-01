@@ -18,7 +18,6 @@ import { formatRupiah, formatNumber } from '../utils/formatters';
 
 interface RpdManagerProps {
   items: RpdItem[];
-  derivedRealizationItems?: RpdItem[];
   onUpdateItems: (newItems: RpdItem[]) => void;
   onOpenPrintModal: () => void;
   availableStores?: StoreVendor[];
@@ -28,7 +27,6 @@ interface RpdManagerProps {
 
 export const RpdManager: React.FC<RpdManagerProps> = ({
   items,
-  derivedRealizationItems = [],
   onUpdateItems,
   onOpenPrintModal,
   availableStores = [],
@@ -48,7 +46,7 @@ export const RpdManager: React.FC<RpdManagerProps> = ({
     volumeTermin2: 0.3,
     satuan: 'bh',
     hargaSatuan: 0,
-    defaultToko: realSchoolData?.namaSekolah ? 'Penyedia Utama' : (availableStores[0]?.namaToko || 'Penyedia Utama'),
+    defaultToko: 'USAHA FAMILY',
   });
 
   const categories: { id: string; label: string }[] = [
@@ -61,14 +59,6 @@ export const RpdManager: React.FC<RpdManagerProps> = ({
     { id: 'PERABOT', label: 'E. Perabot Meja & Kursi' },
     { id: 'KONSULTAN_ADM', label: 'F. Konsultan & Administrasi' },
   ];
-
-  const realizationMap = React.useMemo(() => {
-    const map = new Map<string, RpdItem>();
-    (derivedRealizationItems || []).forEach((d) => {
-      map.set(d.uraian.trim().toLowerCase(), d);
-    });
-    return map;
-  }, [derivedRealizationItems]);
 
   const filteredItems = items.filter((item) => {
     const matchCat = activeKategori === 'ALL' || item.kategori === activeKategori;
@@ -158,7 +148,7 @@ export const RpdManager: React.FC<RpdManagerProps> = ({
       volumeTermin2: 0.3,
       satuan: 'bh',
       hargaSatuan: 0,
-      defaultToko: availableStores[0]?.namaToko || 'Penyedia Utama',
+      defaultToko: 'USAHA FAMILY',
     });
   };
 
@@ -413,18 +403,13 @@ export const RpdManager: React.FC<RpdManagerProps> = ({
                 <th className="py-3 px-4 text-right bg-blue-900/50">Jumlah T1 (Rp)</th>
                 <th className="py-3 px-3 text-right bg-indigo-900/50">Vol T2 (30%)</th>
                 <th className="py-3 px-4 text-right bg-indigo-900/50">Jumlah T2 (Rp)</th>
-                <th className="py-3 px-4 text-right font-bold">Rencana (Rp)</th>
-                <th className="py-3 px-4 text-right font-bold bg-emerald-900/50">Realisasi (Rp)</th>
-                <th className="py-3 px-4 text-right font-bold">Deviasi (Rp)</th>
+                <th className="py-3 px-4 text-right font-bold">Total (Rp)</th>
                 <th className="py-3 px-3 text-center">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredItems.map((item, index) => {
                 const isEditing = editingId === item.id;
-                const realItem = realizationMap.get(item.uraian.trim().toLowerCase());
-                const realAmt = realItem?.jumlahAnggaran || 0;
-                const deviasi = item.jumlahAnggaran - realAmt;
                 return (
                   <tr key={item.id} className="hover:bg-slate-50 transition">
                     <td className="py-2.5 px-3 text-center text-slate-500 font-mono">{index + 1}</td>
@@ -508,19 +493,9 @@ export const RpdManager: React.FC<RpdManagerProps> = ({
                       {formatRupiah(item.jumlahTermin2, false)}
                     </td>
 
-                    {/* Rencana Total */}
+                    {/* Total */}
                     <td className="py-2.5 px-4 text-right font-bold text-slate-900 font-mono">
                       {formatRupiah(item.jumlahAnggaran, false)}
-                    </td>
-
-                    {/* Realisasi Ledger */}
-                    <td className="py-2.5 px-4 text-right font-bold text-emerald-900 bg-emerald-50/40 font-mono">
-                      {formatRupiah(realAmt, false)}
-                    </td>
-
-                    {/* Deviasi */}
-                    <td className={`py-2.5 px-4 text-right font-bold font-mono ${deviasi < 0 ? 'text-red-600 bg-red-50/40' : 'text-emerald-700 bg-emerald-50/20'}`}>
-                      {formatRupiah(deviasi, false)}
                     </td>
 
                     {/* Actions */}

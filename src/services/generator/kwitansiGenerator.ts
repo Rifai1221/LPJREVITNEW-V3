@@ -10,49 +10,6 @@ import {
   isReceiptLocked,
   splitMaterialPurchases,
 } from './splitTransactionService';
-import { buildReceiptItems, applyFinalReceiptAbsorber } from '../../utils/integerReceipt';
-
-/**
- * Trade commercial price rounding (bulat dagang):
- * - If price > 10.000: rounded to multiple of Rp 500 or Rp 1.000
- * - If price > 1.000: rounded to multiple of Rp 100
- * - Integer rupiah >= 1
- */
-export function toCommercialPrice(rawPrice: number): number {
-  if (!rawPrice || rawPrice <= 0) return 0;
-  if (rawPrice > 10000) {
-    const rounded = Math.round(rawPrice / 500) * 500;
-    return rounded > 0 ? rounded : 500;
-  }
-  if (rawPrice > 1000) {
-    return Math.round(rawPrice / 100) * 100;
-  }
-  return Math.max(1, Math.round(rawPrice));
-}
-
-// Persistent Store Price Map: guaranteed constant unit price per store and canonical item key
-const storePriceRegistry = new Map<string, number>();
-
-export function getConsistentStoreUnitPrice(
-  storeKey: string,
-  canonicalItemKey: string,
-  rawPrice: number
-): number {
-  const normPrice = toCommercialPrice(rawPrice);
-  if (!storeKey || !canonicalItemKey) return normPrice;
-  const regKey = `${storeKey.trim().toLowerCase()}::${canonicalItemKey.trim().toLowerCase()}`;
-  if (storePriceRegistry.has(regKey)) {
-    return storePriceRegistry.get(regKey)!;
-  }
-  if (normPrice > 0) {
-    storePriceRegistry.set(regKey, normPrice);
-  }
-  return normPrice;
-}
-
-export function clearStorePriceRegistry(): void {
-  storePriceRegistry.clear();
-}
 
 export function isPreservedUnitItem(nama: string, satuan?: string, isBarangPabrikasi?: boolean): boolean {
   if (isBarangPabrikasi === true) return true;
@@ -97,13 +54,411 @@ export function isPureDirectMaterial(name: string, satuan?: string, isBarangPabr
 }
 
 export function normalizeMaterialItems<T extends { namaBarang: string; volume: number; satuan: string; hargaSatuan: number; jumlah: number }>(
-  rawItems: T[],
-  kwNominal?: number
+  rawItems: T[]
 ): T[] {
   if (!rawItems || rawItems.length === 0) return [];
-  const target = kwNominal && kwNominal > 0 ? kwNominal : rawItems.reduce((s, it) => s + (it.jumlah || 0), 0);
-  const built = buildReceiptItems(rawItems, undefined, target);
-  return built.items as unknown as T[];
+
+  const expandedItems: T[] = [];
+  rawItems.forEach((item) => {
+    const rawName = (item.namaBarang || '').trim();
+    const isPab = (item as any).isBarangPabrikasi;
+
+    if (isPab || isPreservedUnitItem(rawName, item.satuan, isPab)) {
+      expandedItems.push({
+        ...item,
+        satuan: item.satuan || 'unit',
+      });
+      return;
+    }
+
+    expandedItems.push(item);
+  });
+
+  const preProcessed = expandedItems.map((item) => {
+    const rawVol = item.volume || 0;
+    const rawJml = item.jumlah || 0;
+    const rawSatuan = (item.satuan || '').toLowerCase().trim();
+    const rawName = (item.namaBarang || '').trim();
+    const isPab = (item as any).isBarangPabrikasi;
+
+    if (isPab || isPreservedUnitItem(rawName, item.satuan, isPab)) {
+      return {
+        ...item,
+        satuan: item.satuan || 'unit',
+      };
+    }
+
+    let convertedVol = rawVol;
+    let convertedSatuan = item.satuan || 'unit';
+    let convertedPrice = item.hargaSatuan || 0;
+
+    const isSemen = /semen|pc\b|portland/i.test(rawName);
+    const isBesi = /besi|beton|polos|ulir|hollow|wiremesh/i.test(rawName);
+    const isKayu = /kayu|kaso|balok|reng|papan|tiang/i.test(rawName);
+    const isBataRingan = /bata ringan|hebel|celcon|aerated/i.test(rawName);
+    const isBatako = /batako/i.test(rawName);
+    const isBataMerah = /bata merah/i.test(rawName);
+    const isKerikil = /kerikil|split|batu pecah|koral/i.test(rawName);
+    const isPasir = /pasir|batu belah|batu kali|sirtu|tanah urug/i.test(rawName);
+
+    if (isSemen) {
+      convertedSatuan = 'Zak';
+      let volKg = rawVol;
+      if (rawVol <= 15 && /zak|sak/i.test(rawSatuan)) {
+        volKg = rawVol * 50;
+      }
+      convertedVol = Math.max(1, Math.round(volKg / 50));
+      if (convertedPrice > 0 && convertedPrice <= 5000) {
+        convertedPrice = Math.round(convertedPrice * 50);
+      }
+    } else if (isBataRingan) {
+      convertedSatuan = 'bh';
+      if (/m3|m³/i.test(rawSatuan) || rawVol < 100) {
+        convertedVol = Math.max(1, Math.round((rawVol || 1) * 83.33));
+      }
+      if (convertedPrice > 20000) {
+        convertedPrice = Math.round(convertedPrice / 83.33);
+      }
+      if (convertedPrice <= 0 || convertedPrice > 25000) {
+        convertedPrice = 9500;
+      }
+    } else if (isBatako) {
+      convertedSatuan = 'bh';
+      if (/m3|m³|m2|m²/i.test(rawSatuan) || rawVol < 100) {
+        convertedVol = Math.max(1, Math.round((rawVol || 1) * 12.5));
+      }
+      if (convertedPrice <= 0 || convertedPrice > 15000) {
+        convertedPrice = 3500;
+      }
+    } else if (isBataMerah) {
+      convertedSatuan = 'bh';
+      if (/m3|m³|m2|m²/i.test(rawSatuan) || rawVol < 200) {
+        convertedVol = Math.max(1, Math.round((rawVol || 1) * 70));
+      }
+      if (convertedPrice <= 0 || convertedPrice > 5000) {
+        convertedPrice = 950;
+      }
+    } else if (isBesi && (rawVol > 10 || /kg|kilogram/i.test(rawSatuan))) {
+      convertedSatuan = 'btg';
+      convertedVol = Math.max(1, Math.round(rawVol / 7.4));
+      if (convertedPrice > 0 && convertedPrice <= 25000) {
+        convertedPrice = Math.round(convertedPrice * 7.4);
+      }
+    } else if (isKayu && (/m3|m³|m2|m²|lbr|lembar/i.test(rawSatuan) || rawVol < 1)) {
+      convertedSatuan = 'btg';
+      convertedVol = Math.max(1, Math.round(rawVol < 1 ? Math.max(1, rawVol * 25) : rawVol));
+    } else if (isKerikil || isPasir) {
+      convertedSatuan = 'm³';
+      const stdPrice = isKerikil ? 310000 : (/pasir/i.test(rawName) ? 250000 : 220000);
+      if (rawVol > 200 || (rawJml > 0 && rawVol > 0 && (rawJml / rawVol) < 50000)) {
+        convertedVol = rawJml > 0 ? Math.max(1, Math.round(rawJml / stdPrice)) : 1;
+        convertedPrice = rawJml > 0 ? Math.round(rawJml / convertedVol) : stdPrice;
+      } else {
+        convertedVol = Math.max(1, Math.round(rawVol));
+      }
+    }
+
+    return {
+      ...item,
+      namaBarang: rawName,
+      volume: convertedVol,
+      satuan: convertedSatuan,
+      hargaSatuan: convertedPrice || (convertedVol > 0 ? Math.round(rawJml / convertedVol) : 0),
+      jumlah: isSemen && convertedPrice > 0 ? convertedVol * convertedPrice : rawJml,
+    };
+  });
+
+  const groupMap = new Map<string, { items: typeof preProcessed; namaBarang: string; satuan: string }>();
+
+  preProcessed.forEach((item) => {
+    const info = getCanonicalReceiptItemInfo(item.namaBarang, item.satuan);
+    const key = info.key;
+
+    const existing = groupMap.get(key);
+    if (existing) {
+      existing.items.push(item);
+    } else {
+      groupMap.set(key, {
+        items: [item],
+        namaBarang: info.name,
+        satuan: info.unit,
+      });
+    }
+  });
+
+  const result: T[] = [];
+
+  groupMap.forEach((group) => {
+    const totalRawVol = group.items.reduce((s, it) => s + (it.volume || 0), 0);
+    const totalRawJml = group.items.reduce((s, it) => s + (it.jumlah || 0), 0);
+    const sampleItem = group.items[0];
+    const rawSatuan = (group.satuan || '').toLowerCase().trim();
+    const rawName = group.namaBarang.toLowerCase();
+
+    // 1. Jika semua item dalam grup isBarangPabrikasi atau isPreservedUnitItem:
+    // JANGAN pakai logika konversi/pembulatan/harga default.
+    // Jumlahkan jumlah asli RAB, volume = sum volume, hargaSatuan = jumlah / volume (2 desimal). Satuan tetap.
+    const isAllPabrikasiOrPreserved = group.items.every(
+      (it) => (it as any).isBarangPabrikasi === true || isPreservedUnitItem(it.namaBarang, it.satuan, (it as any).isBarangPabrikasi)
+    );
+
+    if (isAllPabrikasiOrPreserved) {
+      const safeVol = totalRawVol > 0 ? totalRawVol : 1;
+      const safeHarga = safeVol > 0 ? Math.round((totalRawJml / safeVol) * 100) / 100 : Math.round(sampleItem.hargaSatuan || 0);
+      result.push({
+        ...sampleItem,
+        namaBarang: group.namaBarang,
+        volume: safeVol,
+        satuan: sampleItem.satuan || group.satuan || 'unit',
+        hargaSatuan: safeHarga,
+        jumlah: totalRawJml,
+        isBarangPabrikasi: true,
+      });
+      return;
+    }
+
+    let realisticVolume: number;
+    let realisticSatuan = group.satuan;
+
+    if (/semen|pc\b|portland/i.test(rawName)) {
+      realisticSatuan = 'Zak';
+      const samplePrice = sampleItem.hargaSatuan || 0;
+      let hargaPerZak = samplePrice <= 5000 && samplePrice > 0 ? Math.round(samplePrice * 50) : Math.round(samplePrice);
+      if (hargaPerZak <= 0 && totalRawVol > 0 && totalRawJml > 0) {
+        const estUnitP = totalRawJml / totalRawVol;
+        hargaPerZak = estUnitP <= 5000 ? Math.round(estUnitP * 50) : Math.round(estUnitP);
+      }
+      if (hargaPerZak <= 0) hargaPerZak = 72500;
+
+      const rawZakSum = group.items.reduce((s, it) => {
+        const v = it.volume || 0;
+        return s + (v > 15 ? v / 50 : v);
+      }, 0);
+      realisticVolume = Math.max(1, Math.round(rawZakSum));
+
+      const finalZakTotal = realisticVolume * hargaPerZak;
+
+      let cleanBarangName = group.namaBarang.replace(/\s*\(?50\s*kg\)?/gi, '').trim();
+      if (!/pcc|padang|gresik|holcim|tiga roda|dynamix/i.test(cleanBarangName)) {
+        cleanBarangName = `${cleanBarangName} PCC (@ 50 Kg)`;
+      }
+
+      result.push({
+        ...sampleItem,
+        namaBarang: cleanBarangName,
+        volume: realisticVolume,
+        satuan: 'Zak',
+        hargaSatuan: hargaPerZak,
+        jumlah: finalZakTotal,
+      });
+      return;
+    }
+
+    if (/besi|beton|polos|ulir|hollow|wiremesh/i.test(rawName)) {
+      const samplePrice = sampleItem.hargaSatuan || 0;
+      let hargaPerBtg = samplePrice <= 25000 && samplePrice > 0 ? Math.round(samplePrice * 7.4) : Math.round(samplePrice);
+      if (hargaPerBtg <= 0) hargaPerBtg = 95000;
+
+      const rawBtgSum = group.items.reduce((s, it) => {
+        const v = it.volume || 0;
+        return s + (v > 10 ? v / 7.4 : v);
+      }, 0);
+      realisticVolume = Math.max(1, Math.round(rawBtgSum));
+      const finalBesiTotal = realisticVolume * hargaPerBtg;
+
+      let cleanBesiName = group.namaBarang;
+      if (!/batang|btg|12m|12 meter/i.test(cleanBesiName)) {
+        cleanBesiName = `${cleanBesiName} (12 Meter)`;
+      }
+
+      result.push({
+        ...sampleItem,
+        namaBarang: cleanBesiName,
+        volume: realisticVolume,
+        satuan: 'btg',
+        hargaSatuan: hargaPerBtg,
+        jumlah: finalBesiTotal,
+      });
+      return;
+    }
+
+    if (/kayu|kaso|balok|reng|tiang/i.test(rawName)) {
+      const samplePrice = sampleItem.hargaSatuan || 0;
+      let hargaPerBtg = samplePrice <= 100000 && samplePrice > 0 ? Math.round(samplePrice) : Math.round(totalRawJml / Math.max(1, Math.round(totalRawVol)));
+      if (hargaPerBtg <= 0 || hargaPerBtg > 200000) hargaPerBtg = 38500;
+
+      realisticVolume = Math.max(1, Math.round(totalRawVol < 1 ? Math.max(1, totalRawVol * 25) : totalRawVol));
+      const finalKayuTotal = realisticVolume * hargaPerBtg;
+
+      let cleanKayuName = group.namaBarang;
+      if (!/batang|btg|4m|4 meter/i.test(cleanKayuName)) {
+        cleanKayuName = `${cleanKayuName} (4 Meter)`;
+      }
+
+      result.push({
+        ...sampleItem,
+        namaBarang: cleanKayuName,
+        volume: realisticVolume,
+        satuan: 'btg',
+        hargaSatuan: hargaPerBtg,
+        jumlah: finalKayuTotal,
+      });
+      return;
+    }
+
+    if (/bata ringan|hebel|celcon|aerated/i.test(rawName)) {
+      let unitP = sampleItem.hargaSatuan || 0;
+      if (unitP <= 0 || unitP < 5000 || unitP > 25000) unitP = 9500;
+      let finalVol = Math.max(1, Math.round(totalRawVol > 0 && totalRawVol < 500 ? totalRawVol : (totalRawJml / unitP)));
+      result.push({
+        ...sampleItem,
+        namaBarang: group.namaBarang,
+        volume: finalVol,
+        satuan: 'bh',
+        hargaSatuan: unitP,
+        jumlah: finalVol * unitP,
+      });
+      return;
+    }
+
+    if (/batako/i.test(rawName)) {
+      let unitP = sampleItem.hargaSatuan > 0 && sampleItem.hargaSatuan <= 15000 ? sampleItem.hargaSatuan : 3500;
+      let finalVol = Math.max(1, Math.round(totalRawVol > 0 && totalRawVol < 1000 ? totalRawVol : (totalRawJml / unitP)));
+      result.push({
+        ...sampleItem,
+        namaBarang: group.namaBarang,
+        volume: finalVol,
+        satuan: 'bh',
+        hargaSatuan: unitP,
+        jumlah: finalVol * unitP,
+      });
+      return;
+    }
+    if (/bata merah/i.test(rawName)) {
+      let unitP = sampleItem.hargaSatuan > 0 && sampleItem.hargaSatuan <= 3500 ? sampleItem.hargaSatuan : 950;
+      let finalVol = Math.max(1, Math.round(totalRawVol > 0 && totalRawVol < 2000 ? totalRawVol : (totalRawJml / unitP)));
+      result.push({
+        ...sampleItem,
+        namaBarang: group.namaBarang,
+        volume: finalVol,
+        satuan: 'bh',
+        hargaSatuan: unitP,
+        jumlah: finalVol * unitP,
+      });
+      return;
+    }
+
+    if (/kerikil|split|batu pecah|koral/i.test(rawName)) {
+      const samplePrice = sampleItem.hargaSatuan || 0;
+      const stdPrice = samplePrice >= 150000 && samplePrice <= 500000 ? samplePrice : 310000;
+      let finalVol = Math.max(1, Math.round(totalRawVol > 0 && totalRawVol <= 300 ? totalRawVol : (totalRawJml / stdPrice)));
+      result.push({
+        ...sampleItem,
+        namaBarang: group.namaBarang,
+        volume: finalVol,
+        satuan: 'm³',
+        hargaSatuan: stdPrice,
+        jumlah: finalVol * stdPrice,
+      });
+      return;
+    }
+
+    if (/pasir|batu belah|batu kali|tanah urug|sirtu/i.test(rawName)) {
+      const samplePrice = sampleItem.hargaSatuan || 0;
+      const isPasir = /pasir/i.test(rawName);
+      const isSirtu = /sirtu|urug/i.test(rawName);
+      const stdPrice = samplePrice >= 100000 && samplePrice <= 450000
+        ? samplePrice
+        : isPasir ? 250000 : isSirtu ? 180000 : 260000;
+      let finalVol = Math.max(1, Math.round(totalRawVol > 0 && totalRawVol <= 300 ? totalRawVol : (totalRawJml / stdPrice)));
+      result.push({
+        ...sampleItem,
+        namaBarang: group.namaBarang,
+        volume: finalVol,
+        satuan: 'm³',
+        hargaSatuan: stdPrice,
+        jumlah: finalVol * stdPrice,
+      });
+      return;
+    }
+
+    else if (/pasir|batu|tanah|sirtu|agregat|kerikil/i.test(rawName) && /m3|m³|m2|m²/i.test(rawSatuan)) {
+      realisticVolume = Math.max(1, Math.round(totalRawVol));
+      realisticSatuan = /m3|m³/i.test(rawSatuan) ? 'm³' : 'm²';
+    }
+    else if (
+      /lbr|lembar|btg|batang|zak|sak|buah|bh|dus|box|kotak|ktk|unit|set|roll|rol|klg|kaleng|pail|drum|rit/i.test(rawSatuan) ||
+      /triplek|multiplex|papan|kaso|balok|besi|helm|rompi|sepatu|sarung tangan|p3k|rambu|tali/i.test(rawName)
+    ) {
+      if (totalRawVol <= 0.05) {
+        realisticVolume = 1;
+      } else if (totalRawVol < 1) {
+        realisticVolume = 1;
+        if (/m3|m³/.test(rawSatuan) && /kayu|balok|kaso|tiang/i.test(rawName)) {
+          realisticSatuan = 'btg';
+        }
+      } else {
+        realisticVolume = Math.max(1, Math.round(totalRawVol));
+      }
+    }
+    else if (/kg|liter|ltr/i.test(rawSatuan)) {
+      if (totalRawVol < 0.5) {
+        realisticVolume = 1;
+        if (/cat/i.test(rawName)) realisticSatuan = 'klg';
+        else if (/paku/i.test(rawName)) realisticSatuan = 'kg';
+      } else {
+        realisticVolume = Math.max(1, Math.round(totalRawVol));
+      }
+    }
+    else if (/m3|m³|m2|m²|m\b/i.test(rawSatuan)) {
+      realisticVolume = Math.max(1, Math.round(totalRawVol));
+    }
+    else {
+      realisticVolume = totalRawVol < 1 ? 1 : Math.round(totalRawVol);
+    }
+
+    let unitPrice = 0;
+    if (/paku|kawat|bendrat/i.test(rawName)) {
+      unitPrice = /kawat|bendrat/i.test(rawName) ? 24000 : 21500;
+      if (!/kg/i.test(realisticSatuan)) realisticSatuan = 'Kg';
+    } else if (/keramik|granit|ubin/i.test(rawName)) {
+      unitPrice = 95000;
+      if (!/dus|box/i.test(realisticSatuan)) realisticSatuan = 'Dus';
+    } else if (/cat|sealer|alkali/i.test(rawName)) {
+      unitPrice = 75000;
+    } else if (/gypsum|grc|kalsiboard/i.test(rawName)) {
+      unitPrice = 65000;
+      if (!/lembar|lbr/i.test(realisticSatuan)) realisticSatuan = 'Lembar';
+    } else if (/hollow/i.test(rawName)) {
+      unitPrice = 55000;
+      if (!/btg|batang/i.test(realisticSatuan)) realisticSatuan = 'btg';
+    } else if (sampleItem.hargaSatuan > 0) {
+      unitPrice = sampleItem.hargaSatuan;
+    } else if (totalRawJml > 0 && realisticVolume > 0) {
+      unitPrice = Math.round((totalRawJml / realisticVolume) * 100) / 100;
+    }
+
+    let finalItemName = group.namaBarang;
+    if (unitPrice <= 0 && totalRawJml <= 0) {
+      unitPrice = 0;
+      if (!finalItemName.includes('(Perlu Ditinjau)')) {
+        finalItemName = `${finalItemName} (Perlu Ditinjau)`;
+      }
+    }
+
+    const finalJumlah = totalRawJml > 0 ? totalRawJml : Math.round(realisticVolume * unitPrice);
+
+    result.push({
+      ...sampleItem,
+      namaBarang: finalItemName,
+      volume: realisticVolume,
+      satuan: realisticSatuan,
+      hargaSatuan: unitPrice,
+      jumlah: finalJumlah,
+    });
+  });
+
+  return consolidateAndStandardizeReceiptItems(result);
 }
 
 export function getHarmonizedKwitansiUraian(kw: {
@@ -196,129 +551,119 @@ export function getReconstitutedKusenPintuUnitItems<
   T extends { namaBarang: string; volume: number; satuan: string; hargaSatuan: number; jumlah: number; isBarangPabrikasi?: boolean }
 >(rawItems: T[], targetNom?: number, schoolData?: RealSchoolData): T[] {
   const rab = schoolData || defaultRealSchoolData;
-  const openingItems: Array<{ uraian: string; volume: number; satuan: string; hargaSatuan: number; jumlah: number }> = [];
+  let pj1Rab = { volume: 2, hargaSatuan: 3612291.88, jumlah: 7224583.76 };
+  let j1Rab = { volume: 10, hargaSatuan: 3893845.59, jumlah: 38938455.92 };
 
   for (const div of rab?.divisions || []) {
-    const isOpeningDiv = /pintu|kusen|jendela/i.test(div.uraian || '') || div.kode === 'V';
     for (const it of div.items || []) {
-      if ((it.volume || 0) <= 0 && (it.jumlah || 0) <= 0) continue;
-      const isUpah = it.kategoriBiaya === 'UPAH' || /upah/i.test(it.uraian);
-      if (isUpah) continue;
-      const isMebeler =
-        it.kategoriBiaya === 'SIPLAH' ||
-        (it.tags && it.tags.some((t) => /siplah/i.test(t))) ||
-        /kursi|meja|rak\b|loker|karpet|papan kreasi/i.test(it.uraian);
-      if (isMebeler) continue;
-      const isOpening =
-        (it.tags && it.tags.some((t) => t.toUpperCase() === 'FUR')) ||
-        it.kategoriBiaya === 'PINTU_JENDELA' ||
-        /pintu|jendela|kusen|ventilasi/i.test(it.uraian) ||
-        (isOpeningDiv && (it.isBarangPabrikasi || isPreservedUnitItem(it.uraian, it.satuan, it.isBarangPabrikasi)));
-      if (isOpening) {
-        const vol = Math.max(1, Math.round(it.volume));
-        const price = Math.round(it.hargaSatuan);
-        openingItems.push({
-          uraian: it.uraian,
-          volume: vol,
-          satuan: it.satuan || 'unit',
-          hargaSatuan: price,
-          jumlah: Math.round(it.jumlah),
-        });
+      const u = (it.uraian || '').toLowerCase();
+      if (/pintu utama|pj1\b/i.test(u)) {
+        pj1Rab = {
+          volume: it.volume || 2,
+          hargaSatuan: it.hargaSatuan,
+          jumlah: it.jumlah || Math.round((it.volume || 2) * it.hargaSatuan),
+        };
+      } else if (/jendela alum|j1\b/i.test(u)) {
+        j1Rab = {
+          volume: it.volume || 10,
+          hargaSatuan: it.hargaSatuan,
+          jumlah: it.jumlah || Math.round((it.volume || 10) * it.hargaSatuan),
+        };
       }
     }
   }
 
-  const baseItems = openingItems.length > 0 ? openingItems : [
-    { uraian: 'Pasang Pintu Utama Complete', volume: 2, satuan: 'unit', hargaSatuan: 3612500, jumlah: 7225000 },
-    { uraian: 'Pasang Jendela Alumunium Complete', volume: 10, satuan: 'unit', hargaSatuan: 3894000, jumlah: 38940000 },
-  ];
+  const hasDoor = rawItems.some((it) => /daun pintu|kusen.*4|p1j1|pj1\b|pintu/i.test(it.namaBarang));
+  const hasWindow = rawItems.some((it) => /daun jendela|kusen.*3|\bj1\b|jendela/i.test(it.namaBarang));
 
-  const totalBase = baseItems.reduce((s, it) => s + it.jumlah, 0);
+  const items: { namaBarang: string; volume: number; satuan: string; hargaSatuan: number; jumlah: number; isBarangPabrikasi?: boolean }[] = [];
 
-  if (!targetNom || Math.abs(targetNom - totalBase) <= 10000) {
-    const effTarget = targetNom || Math.round(totalBase);
-    const result = baseItems.map((it) => ({
-      namaBarang: it.uraian,
-      volume: Math.max(1, Math.round(it.volume)),
-      satuan: it.satuan,
-      hargaSatuan: Math.round(it.hargaSatuan),
-      jumlah: Math.max(1, Math.round(it.volume)) * Math.round(it.hargaSatuan),
-      isBarangPabrikasi: true,
-    }));
-
-    let currentSum = result.reduce((s, i) => s + i.jumlah, 0);
-    let diff = effTarget - currentSum;
-
-    if (diff !== 0) {
-      for (const item of result) {
-        if (diff === 0) break;
-        if (diff % item.volume === 0) {
-          const adjP = diff / item.volume;
-          item.hargaSatuan += adjP;
-          item.jumlah = item.volume * item.hargaSatuan;
-          diff = 0;
-        }
-      }
-    }
-
-    if (diff !== 0) {
-      const last = result[result.length - 1];
-      const newJml = last.jumlah + diff;
-      const newP = Math.round(newJml / last.volume);
-      last.hargaSatuan = newP;
-      last.jumlah = last.volume * newP;
-      const rem = effTarget - result.reduce((s, i) => s + i.jumlah, 0);
-      if (rem > 0) {
-        result.push({
-          namaBarang: 'Paku / Perlengkapan Bantu Pengikat',
-          volume: 1,
-          satuan: 'bh',
-          hargaSatuan: rem,
-          jumlah: rem,
-          isBarangPabrikasi: false,
-        });
-      }
-    }
-
-    return result as unknown as T[];
-  }
-
-  const effNom = targetNom;
-
-  const resultItems: any[] = [];
-  let remainingNom = effNom;
-
-  baseItems.forEach((it, idx) => {
-    const isLast = idx === baseItems.length - 1;
-    let vol: number;
-    let jml: number;
-    const price = it.hargaSatuan > 0 ? it.hargaSatuan : toCommercialPrice(effNom / it.volume);
-
-    if (isLast) {
-      vol = Math.max(1, Math.round(remainingNom / price));
-      jml = vol * price;
+  if (hasDoor && hasWindow) {
+    if (targetNom && targetNom > 0) {
+      const nominals = distributeRupiah(targetNom, [Math.round(pj1Rab.jumlah), Math.round(j1Rab.jumlah)]);
+      items.push({
+        namaBarang: 'Pasang Pintu Utama (PJ1)',
+        volume: pj1Rab.volume,
+        satuan: 'unit',
+        hargaSatuan: Math.round((nominals[0] / pj1Rab.volume) * 100) / 100,
+        jumlah: nominals[0],
+        isBarangPabrikasi: true,
+      });
+      items.push({
+        namaBarang: 'Pasang Jendela Alumunium (J1)',
+        volume: j1Rab.volume,
+        satuan: 'unit',
+        hargaSatuan: Math.round((nominals[1] / j1Rab.volume) * 100) / 100,
+        jumlah: nominals[1],
+        isBarangPabrikasi: true,
+      });
     } else {
-      const propNom = Math.round(effNom * (it.jumlah / totalBase));
-      vol = Math.max(1, Math.round(propNom / price));
-      jml = vol * price;
-      remainingNom -= jml;
+      const pj1Jml = Math.round(pj1Rab.jumlah);
+      const j1Jml = Math.round(j1Rab.jumlah);
+      items.push({
+        namaBarang: 'Pasang Pintu Utama (PJ1)',
+        volume: pj1Rab.volume,
+        satuan: 'unit',
+        hargaSatuan: Math.round((pj1Jml / pj1Rab.volume) * 100) / 100,
+        jumlah: pj1Jml,
+        isBarangPabrikasi: true,
+      });
+      items.push({
+        namaBarang: 'Pasang Jendela Alumunium (J1)',
+        volume: j1Rab.volume,
+        satuan: 'unit',
+        hargaSatuan: Math.round((j1Jml / j1Rab.volume) * 100) / 100,
+        jumlah: j1Jml,
+        isBarangPabrikasi: true,
+      });
     }
-
-    resultItems.push({
-      namaBarang: it.uraian,
+  } else if (hasDoor) {
+    const vol = pj1Rab.volume;
+    const jml = targetNom && targetNom > 0 ? targetNom : Math.round(pj1Rab.jumlah);
+    const harga = Math.round((jml / vol) * 100) / 100;
+    items.push({
+      namaBarang: 'Pasang Pintu Utama (PJ1)',
       volume: vol,
-      satuan: it.satuan,
-      hargaSatuan: price,
+      satuan: 'unit',
+      hargaSatuan: harga,
       jumlah: jml,
       isBarangPabrikasi: true,
     });
-  });
-
-  if (!targetNom || targetNom === totalBase) {
-    return resultItems as unknown as T[];
+  } else if (hasWindow) {
+    const vol = j1Rab.volume;
+    const jml = targetNom && targetNom > 0 ? targetNom : Math.round(j1Rab.jumlah);
+    const harga = Math.round((jml / vol) * 100) / 100;
+    items.push({
+      namaBarang: 'Pasang Jendela Alumunium (J1)',
+      volume: vol,
+      satuan: 'unit',
+      hargaSatuan: harga,
+      jumlah: jml,
+      isBarangPabrikasi: true,
+    });
+  } else {
+    const totalRab = Math.round(pj1Rab.jumlah + j1Rab.jumlah);
+    const effNom = targetNom && targetNom > 0 ? targetNom : totalRab;
+    const nominals = distributeRupiah(effNom, [Math.round(pj1Rab.jumlah), Math.round(j1Rab.jumlah)]);
+    items.push({
+      namaBarang: 'Pasang Pintu Utama (PJ1)',
+      volume: pj1Rab.volume,
+      satuan: 'unit',
+      hargaSatuan: Math.round((nominals[0] / pj1Rab.volume) * 100) / 100,
+      jumlah: nominals[0],
+      isBarangPabrikasi: true,
+    });
+    items.push({
+      namaBarang: 'Pasang Jendela Alumunium (J1)',
+      volume: j1Rab.volume,
+      satuan: 'unit',
+      hargaSatuan: Math.round((nominals[1] / j1Rab.volume) * 100) / 100,
+      jumlah: nominals[1],
+      isBarangPabrikasi: true,
+    });
   }
 
-  return consolidateAndStandardizeReceiptItems(resultItems, effNom) as unknown as T[];
+  return items as unknown as T[];
 }
 
 export function getCanonicalMaterialKey(name: string): string {
@@ -491,39 +836,6 @@ export const EXACT_MEBELER_RAB_ITEMS = [
   { namaBarang: 'Rak Sepatu', volume: 2, satuan: 'bh', hargaSatuan: 1952500, jumlah: 3905000, isBarangPabrikasi: true, tags: ['SipLah'], kategoriBiaya: 'SIPLAH' },
 ];
 export const EXACT_MEBELER_RAB_TOTAL = EXACT_MEBELER_RAB_ITEMS.reduce((sum, item) => sum + (item.jumlah || 0), 0);
-
-export function getMebelerRabItems(schoolData?: RealSchoolData): typeof EXACT_MEBELER_RAB_ITEMS {
-  const dynamicItems: typeof EXACT_MEBELER_RAB_ITEMS = [];
-
-  for (const div of schoolData?.divisions || []) {
-    const isMebDiv = /perabot|mebel|meubilair|meubeler|ruang kelas/i.test(div.uraian || '') || div.kode === 'XII' || div.kode === 'XIII';
-    for (const it of div.items || []) {
-      const isMebItem =
-        isMebDiv ||
-        (it.tags && it.tags.some((t) => /siplah|fur/i.test(t))) ||
-        it.kategoriBiaya === 'SIPLAH' ||
-        (it.kategoriBiaya as string) === 'PERABOT' ||
-        /mebel|kursi|meja|rak|loker|lemari/i.test(it.uraian);
-      if (isMebItem) {
-        const vol = Math.max(1, Math.round(it.volume));
-        const price = toCommercialPrice(it.hargaSatuan);
-        dynamicItems.push({
-          namaBarang: it.uraian,
-          volume: vol,
-          satuan: it.satuan || 'bh',
-          hargaSatuan: price,
-          jumlah: vol * price,
-          isBarangPabrikasi: true,
-          tags: it.tags || ['SipLah'],
-          kategoriBiaya: it.kategoriBiaya || 'SIPLAH',
-        });
-      }
-    }
-  }
-
-  if (dynamicItems.length > 0) return dynamicItems;
-  return EXACT_MEBELER_RAB_ITEMS;
-}
 
 export function getAutoHealedKwitansiItems<
   T extends { namaBarang: string; volume: number; satuan: string; hargaSatuan: number; jumlah: number }
@@ -932,20 +1244,114 @@ export function getCanonicalReceiptItemInfo(
 
 export function consolidateAndStandardizeReceiptItems<
   T extends { namaBarang: string; volume: number; satuan: string; hargaSatuan: number; jumlah: number }
->(rawItems: T[], kwNominal?: number, isPintuJendelaType?: boolean): T[] {
+>(rawItems: T[], kwNominal?: number): T[] {
   if (!Array.isArray(rawItems) || rawItems.length === 0) return [];
 
   const hasDecomposedPintu = rawItems.some((it) =>
     /kusen alumunium\s*4|kusen alumunium\s*3|daun pintu panel|daun jendela alumunium/i.test(it.namaBarang)
   );
-  if (hasDecomposedPintu || isPintuJendelaType) {
+  if (hasDecomposedPintu) {
     return getReconstitutedKusenPintuUnitItems(rawItems, kwNominal);
   }
 
-  const target = kwNominal && kwNominal > 0 ? kwNominal : rawItems.reduce((s, it) => s + (it.jumlah || 0), 0);
-  const built = buildReceiptItems(rawItems, undefined, target);
-  const absorbed = applyFinalReceiptAbsorber(built.items, target, true);
-  return absorbed.items as unknown as T[];
+  const map = new Map<
+    string,
+    {
+      namaBarang: string;
+      satuan: string;
+      totalVol: number;
+      totalJml: number;
+      isBarangPabrikasi?: boolean;
+    }
+  >();
+
+  rawItems.forEach((it) => {
+    const info = getCanonicalReceiptItemInfo(it.namaBarang, it.satuan);
+    const existing = map.get(info.key);
+    const itemVol = Math.max(0.01, Number(it.volume) || 1);
+    const itemJml = Math.max(0, Number(it.jumlah) || 0);
+
+    if (existing) {
+      existing.totalVol += itemVol;
+      existing.totalJml += itemJml;
+      if ((it as any).isBarangPabrikasi) existing.isBarangPabrikasi = true;
+    } else {
+      map.set(info.key, {
+        namaBarang: info.name,
+        satuan: info.unit,
+        totalVol: itemVol,
+        totalJml: itemJml,
+        isBarangPabrikasi: (it as any).isBarangPabrikasi,
+      });
+    }
+  });
+
+  const consolidatedList = Array.from(map.values()).map((entry) => {
+    const isPabOrPreserved =
+      entry.isBarangPabrikasi === true ||
+      isPreservedUnitItem(entry.namaBarang, entry.satuan, entry.isBarangPabrikasi);
+
+    if (isPabOrPreserved) {
+      const finalVol = entry.totalVol > 0 ? Math.round(entry.totalVol) : 1;
+      const roundedHarga = finalVol > 0 ? Math.round((entry.totalJml / finalVol) * 100) / 100 : entry.totalJml;
+      return {
+        namaBarang: entry.namaBarang,
+        volume: finalVol,
+        satuan: entry.satuan || 'unit',
+        hargaSatuan: roundedHarga,
+        jumlah: entry.totalJml,
+        isBarangPabrikasi: true,
+      } as unknown as T;
+    }
+
+    const finalVol = entry.satuan === 'm³' || entry.satuan === 'm²'
+      ? Math.max(1, Math.round(entry.totalVol * 100) / 100)
+      : Math.max(1, Math.round(entry.totalVol));
+
+    const rawHarga = finalVol > 0 ? entry.totalJml / finalVol : entry.totalJml;
+
+    let roundedHarga = rawHarga;
+    if (rawHarga >= 10000) {
+      if (rawHarga % 500 === 0) {
+        roundedHarga = rawHarga;
+      } else {
+        roundedHarga = Math.round(rawHarga / 500) * 500;
+      }
+    } else if (rawHarga >= 1000) {
+      roundedHarga = Math.round(rawHarga / 100) * 100;
+    } else {
+      roundedHarga = Math.round(rawHarga * 100) / 100;
+    }
+    if (roundedHarga <= 0) roundedHarga = Math.round(rawHarga);
+
+    const calcJml = Math.round(finalVol * roundedHarga);
+
+    return {
+      namaBarang: entry.namaBarang,
+      volume: finalVol,
+      satuan: entry.satuan,
+      hargaSatuan: roundedHarga,
+      jumlah: calcJml,
+      isBarangPabrikasi: entry.isBarangPabrikasi,
+    } as unknown as T;
+  });
+
+  if (kwNominal && kwNominal > 0 && consolidatedList.length > 0) {
+    const currentSum = consolidatedList.reduce((s, i) => s + i.jumlah, 0);
+    const diff = kwNominal - currentSum;
+
+    if (diff !== 0) {
+      const weights = consolidatedList.map((i) => Math.max(1, i.jumlah));
+      const nominals = distributeRupiah(kwNominal, weights);
+      consolidatedList.forEach((item, idx) => {
+        item.jumlah = nominals[idx];
+        const safeVol = item.volume > 0 ? item.volume : 1;
+        item.hargaSatuan = Math.round((item.jumlah / safeVol) * 100) / 100;
+      });
+    }
+  }
+
+  return consolidatedList;
 }
 
 export function getHarmonizedKwitansiNoBukti(
@@ -1005,8 +1411,21 @@ export function deduplicateKwitansiList<
     }
 
     if (!isDuplicate && !isManualOrLocked) {
-      const isGenericTempBukti = /^(01\/KW-MAT|KW-MAT|-|MANUAL)$/i.test(normNoBukti) || /^\d{1,2}\/KW-MAT/i.test(normNoBukti);
-      if (normNoBukti && !isGenericTempBukti && seenNoBukti.has(normNoBukti)) {
+      if (normNoBukti && seenNoBukti.has(normNoBukti)) {
+        isDuplicate = true;
+      }
+
+      if (!isDuplicate && normTipe === 'UPAH' && normWeek > 0) {
+        if (seenUpahWeek.has(normWeek)) {
+          isDuplicate = true;
+        }
+      }
+
+      if (!isDuplicate && normNominal > 0 && seenKeys.has(keyUraianNom)) {
+        isDuplicate = true;
+      }
+
+      if (!isDuplicate && normNominal > 0 && normStore && seenKeys.has(keyStoreDateNom)) {
         isDuplicate = true;
       }
 
@@ -1018,20 +1437,6 @@ export function deduplicateKwitansiList<
         normTipe === 'KONSULTAN' ||
         normTipe === 'SIPLAH' ||
         /fur[\/\-_]|kw[\/\-_]?fur|siplah|smkk|ctk|kons-p|kons-w|adm/i.test(normNoBukti);
-
-      if (!isDuplicate && normTipe === 'UPAH' && normWeek > 0) {
-        if (seenUpahWeek.has(normWeek)) {
-          isDuplicate = true;
-        }
-      }
-
-      if (!isDuplicate && isFixedCategory && normNominal > 0 && seenKeys.has(keyUraianNom)) {
-        isDuplicate = true;
-      }
-
-      if (!isDuplicate && isFixedCategory && normNominal > 0 && normStore && seenKeys.has(keyStoreDateNom)) {
-        isDuplicate = true;
-      }
 
       const fixedCatName =
         /fur/i.test(normNoBukti) || normTipe === 'PINTU_JENDELA' || normTipe === 'PERABOT' ? 'FURNITUR' :

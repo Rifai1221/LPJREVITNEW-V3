@@ -155,9 +155,9 @@ export const DEFAULT_DIVISIONS: Omit<DivisionProgressItem, 'prestasiMingguLalu' 
   { id: 'div-9', kode: 'X', kategori: 'FISIK', uraian: 'PEKERJAAN CAT-CATAN', bobotTotal: 5.32, materialRef: ['Cat Dasar', 'Cat Penutup', 'Cat Tembok', 'Tinner', 'Ampelas', 'Kuas'] },
   { id: 'div-10', kode: 'XI', kategori: 'FISIK', uraian: 'PEKERJAAN INSTALASI LISTRIK', bobotTotal: 1.60, materialRef: ['Kabel NYM', 'Downlight', 'Lampu LED', 'Saklar', 'Stop Kontak', 'MCB'] },
   { id: 'div-11', kode: 'XII', kategori: 'FISIK', uraian: 'PEKERJAAN MEBELER', bobotTotal: 7.62, materialRef: ['Kursi Guru', 'Meja Guru', 'Kursi Siswa', 'Meja Siswa', 'Meja & Kursi'] },
-  { id: 'div-m1', kode: 'XIII-A', kategori: 'MANAJEMEN', uraian: 'BIAYA PERENCANAAN', bobotTotal: 1.85, materialRef: ['Perencanaan'] },
-  { id: 'div-m2', kode: 'XIII-B', kategori: 'MANAJEMEN', uraian: 'BIAYA PENGAWASAN', bobotTotal: 2.19, materialRef: ['Pengawasan'] },
-  { id: 'div-m3', kode: 'XIII-C', kategori: 'MANAJEMEN', uraian: 'BIAYA PENGELOLAAN', bobotTotal: 2.41, materialRef: ['Pengelolaan', 'ATK'] },
+  { id: 'div-m1', kode: 'I', kategori: 'MANAJEMEN', uraian: 'BIAYA PERENCANAAN', bobotTotal: 1.85, materialRef: ['Perencanaan'] },
+  { id: 'div-m2', kode: 'II', kategori: 'MANAJEMEN', uraian: 'BIAYA PENGAWASAN', bobotTotal: 2.19, materialRef: ['Pengawasan'] },
+  { id: 'div-m3', kode: 'III', kategori: 'MANAJEMEN', uraian: 'BIAYA PENGELOLAAN', bobotTotal: 2.41, materialRef: ['Pengelolaan', 'ATK'] },
 ];
 
 interface WeekPlanItem {

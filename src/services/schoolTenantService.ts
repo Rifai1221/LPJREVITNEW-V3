@@ -27,8 +27,6 @@ import {
   createSchoolCallable,
   deleteSchoolCallable,
   UserMembershipRecord,
-  isFirestoreDatabaseMissingGlobally,
-  markFirestoreDatabaseMissingGlobally,
 } from './schoolMembershipService';
 
 const ACTIVE_TENANT_STORAGE_KEY = 'ACTIVE_SCHOOL_TENANT_ID_V1';
@@ -282,11 +280,9 @@ export async function registerNewSchoolTenant(params: {
   setStoredActiveTenantId(tenantId);
 
   // Background Cloud Save (non-blocking for instant UI response)
-  if (!isFirestoreDatabaseMissingGlobally()) {
-    saveSchoolTenantAppState(tenantId, initialState, 0, uid).catch((err) => {
-      logger.warn('SchoolTenantService', 'Notice initial background cloud save for new tenant', undefined, err);
-    });
-  }
+  saveSchoolTenantAppState(tenantId, initialState, 0, uid).catch((err) => {
+    logger.warn('SchoolTenantService', 'Notice initial background cloud save for new tenant', undefined, err);
+  });
 
   return { tenant: newTenant, state: initialState };
 }
@@ -383,7 +379,7 @@ export async function loadSchoolTenantAppState(tenant: SchoolTenant, callerUid?:
   let docConfirmedMissing = false;
 
   // Try 1: Fetch from Cloud Firestore
-  if (!isFirestoreDatabaseMissingGlobally() && !checkIsQuotaExhausted()) {
+  if (!checkIsQuotaExhausted()) {
     try {
       const domainResult = await readDomainDocuments(tenantId);
       if (domainResult && domainResult.state && domainResult.state.school) {
@@ -448,9 +444,6 @@ export async function loadSchoolTenantAppState(tenant: SchoolTenant, callerUid?:
     } catch (err: any) {
       cloudReadError = true;
       const errMsg = err?.message || String(err);
-      if (errMsg.includes('not-found') || errMsg.includes('does not exist')) {
-        markFirestoreDatabaseMissingGlobally();
-      }
       if (errMsg.includes('resource-exhausted') || errMsg.includes('Quota limit exceeded') || errMsg.includes('Quota exceeded')) {
         markQuotaExhausted();
       }
@@ -594,11 +587,13 @@ export async function saveSchoolTenantAppState(
     localCachedOk = true;
   } catch {}
 
-  // Safety check: If Firestore DB is missing or autosave is blocked, skip cloud write
-  if (isFirestoreDatabaseMissingGlobally() || isCloudAutosaveBlockedForTenant(tenantId)) {
+  // Safety check: If autosave to cloud is blocked due to cloud read failure, skip cloud write
+  if (isCloudAutosaveBlockedForTenant(tenantId)) {
+    logger.warn('SchoolTenantService', `Cloud autosave is blocked for ${tenantId} to prevent overwriting cloud data.`);
     return {
       local: localCachedOk,
-      cloud: 'skipped',
+      cloud: 'failed',
+      error: 'CLOUD_AUTOSAVE_BLOCKED',
     };
   }
 
@@ -761,14 +756,6 @@ export async function saveSchoolTenantAppState(
         error: 'CONCURRENCY_CONFLICT',
         rev: err?.serverRev || currentExpectedRev + 1,
         serverState: serverResult?.state,
-      };
-    }
-
-    if (errMsg.includes('not-found') || errMsg.includes('does not exist')) {
-      markFirestoreDatabaseMissingGlobally();
-      return {
-        local: localCachedOk,
-        cloud: 'skipped',
       };
     }
 

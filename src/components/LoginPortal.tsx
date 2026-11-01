@@ -132,9 +132,7 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
     } catch (err: any) {
       console.error('Firebase Auth error:', err);
       let msg = err?.message || 'Gagal autentikasi.';
-      if (err?.code === 'auth/operation-not-allowed') {
-        msg = 'Opsi login Email/Password belum diaktifkan di Firebase Console. Gunakan tombol "Masuk Tanpa Login (Akses Instan)" di bawah ini.';
-      } else if (
+      if (
         err?.code === 'auth/user-not-found' ||
         err?.code === 'auth/wrong-password' ||
         err?.code === 'auth/invalid-credential'
@@ -151,11 +149,6 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
     } finally {
       setIsAuthLoading(false);
     }
-  };
-
-  const handleGuestDirectAccess = () => {
-    toast.success('Masuk sebagai Pengguna Tamu (Akses Instan) berhasil!');
-    onProceedToDashboard();
   };
 
   // Handle Search for Onboarding
@@ -600,16 +593,6 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
               <span>{authError}</span>
             </div>
           )}
-
-          {/* Instant Guest / Direct Access Button */}
-          <button
-            type="button"
-            onClick={handleGuestDirectAccess}
-            className="w-full py-3 px-4 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-md shadow-emerald-600/20 cursor-pointer"
-          >
-            <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
-            <span>⚡ Masuk Tanpa Login (Akses Instan & Langsung)</span>
-          </button>
 
           {/* Google Sign In Button */}
           <button

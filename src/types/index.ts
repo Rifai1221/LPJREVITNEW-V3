@@ -98,7 +98,6 @@ export interface SchoolMasterData {
   namaRekening: string;
   kotaTempatBintek: string;
   tanggalBintek: string;
-  namaTokoRekananDefault?: string;
 }
 
 export type RpdKategori =
@@ -180,7 +179,7 @@ export interface WeeklyWageReport {
   totalUpah: number;
   bobotMingguIni?: number; // %
   bobotKumulatif?: number; // %
-  mode?: 'HARIAN' | 'BORONGAN';
+  // Mode Borongan fields
   tipeUpah?: 'HARIAN_HOK' | 'BORONGAN';
   boronganType?: 'MINGGUAN' | 'BULANAN' | 'RENTANG_WAKTU';
   boronganUraian?: string;
@@ -355,7 +354,6 @@ export interface ProjectProgressWeek {
   endDate?: string; // ISO date 'YYYY-MM-DD'
   bobotRencana: number;
   bobotRealisasi: number;
-  cumulativeProgress?: number;
   deviasi: number;
   keterangan: string;
   itemPekerjaan: string[];

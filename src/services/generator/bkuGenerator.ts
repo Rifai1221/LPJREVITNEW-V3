@@ -7,8 +7,6 @@ import {
   StoreVendor,
   ProjectProgressWeek,
   WeeklyWageReport,
-  WorkerItem,
-  RealSchoolData,
 } from '../../types';
 import { parseTxDateToIso, resolveWeekDates } from '../../utils/monthHelper';
 import { generateSecureId } from '../../utils/idAndVoucherHelper';
@@ -19,51 +17,12 @@ import {
   cleanNaturalUraian,
   renumberMaterialTransactionsChronologically,
   extractWeekNumberFromKwitansi,
-  alignAndShiftTransactionsForCashflow,
 } from './splitTransactionService';
 import {
   deduplicateKwitansiList,
-  toCommercialPrice,
-  consolidateAndStandardizeReceiptItems,
 } from './kwitansiGenerator';
 import { distributeRupiah } from '../../utils/money';
 import { calculateIntegratedBkt } from '../cashLedgerIntegrationService';
-import { planCashFlow } from '../cashPlanner';
-
-export function resolveDynamicWageRates(
-  schoolData?: RealSchoolData,
-  workers?: WorkerItem[]
-): { tukangRate: number; pekerjaRate: number } {
-  let tukangRate = 0;
-  let pekerjaRate = 0;
-
-  if (workers && workers.length > 0) {
-    const t = workers.find((w: any) => /tukang|kepala|ahli/i.test(w.role || w.jabatan || w.peran || ''));
-    if (t && (t.upahHarian || 0) > 0) tukangRate = t.upahHarian;
-    const p = workers.find((w: any) => /pekerja|laden|buruh/i.test(w.role || w.jabatan || w.peran || ''));
-    if (p && (p.upahHarian || 0) > 0) pekerjaRate = p.upahHarian;
-  }
-
-  if (schoolData?.ahspList && schoolData.ahspList.length > 0) {
-    for (const a of schoolData.ahspList) {
-      if (!a.komponen) continue;
-      for (const k of a.komponen) {
-        if (!tukangRate && /tukang/i.test(k.uraian) && k.hargaSatuan > 0) {
-          tukangRate = Math.round(k.hargaSatuan);
-        }
-        if (!pekerjaRate && /pekerja/i.test(k.uraian) && k.hargaSatuan > 0) {
-          pekerjaRate = Math.round(k.hargaSatuan);
-        }
-      }
-      if (tukangRate && pekerjaRate) break;
-    }
-  }
-
-  return {
-    tukangRate: toCommercialPrice(tukangRate || 135000),
-    pekerjaRate: toCommercialPrice(pekerjaRate || 110000),
-  };
-}
 
 export interface DecomposedItem {
   namaBarang: string;
@@ -114,15 +73,12 @@ export function calculateCumulativeRealizedProgress(
 export function decomposeRealisticBahanAndUpah(
   uraian: string,
   bahanNominal: number,
-  upahNominal: number,
-  schoolData?: RealSchoolData,
-  workers?: WorkerItem[]
+  upahNominal: number
 ): {
   bahanItems: DecomposedItem[];
   upahComponents: DecomposedItem[];
 } {
   const lower = uraian.toLowerCase();
-  const rates = resolveDynamicWageRates(schoolData, workers);
 
   const hasJobScope =
     /pekerjaan|pasang|pemasangan|pengadaan|pembuatan|perbaikan|rehab|renovasi|bongkar|urugan|uruk|galian|cor\b|pengecoran|plesteran|acian|instalasi|pengecatan|pengukuran|bowplank|bouwplank|rangka|penutup|pondasi|struktur|titik|bawah|tebal|\d+\s*cm|\d+\s*mm|campuran|manual/i.test(
@@ -137,7 +93,7 @@ export function decomposeRealisticBahanAndUpah(
 
   if (isDirectRawMaterial) {
     const typicalP = /semen/i.test(lower) ? 68000 : /pasir/i.test(lower) ? 220000 : /cat/i.test(lower) ? 350000 : 50000;
-    const vol = Math.max(1, Math.round(bahanNominal / typicalP));
+    const vol = Math.max(1, Math.round((bahanNominal / typicalP) * 10) / 10);
     return {
       bahanItems: [
         {
@@ -152,21 +108,19 @@ export function decomposeRealisticBahanAndUpah(
         upahNominal > 0
           ? (() => {
               const [tukangJml, pekerjaJml] = distributeRupiah(upahNominal, [60, 40]);
-              const tVol = Math.max(1, Math.round(tukangJml / rates.tukangRate));
-              const pVol = Math.max(1, Math.round(pekerjaJml / rates.pekerjaRate));
               return [
                 {
                   namaBarang: 'Tukang Terampil',
-                  volume: tVol,
+                  volume: Math.max(1, Math.round(tukangJml / 135000)),
                   satuan: 'OH',
-                  hargaSatuan: rates.tukangRate,
+                  hargaSatuan: 135000,
                   jumlah: tukangJml,
                 },
                 {
                   namaBarang: 'Pekerja Lapangan',
-                  volume: pVol,
+                  volume: Math.max(1, Math.round(pekerjaJml / 110000)),
                   satuan: 'OH',
-                  hargaSatuan: rates.pekerjaRate,
+                  hargaSatuan: 110000,
                   jumlah: pekerjaJml,
                 },
               ];
@@ -296,30 +250,25 @@ export function decomposeRealisticBahanAndUpah(
 
   const upahComponents: DecomposedItem[] = [];
   if (upahNominal > 0) {
-    const tukangRate = rates.tukangRate > 0 ? rates.tukangRate : 130000;
-    const pekerjaRate = rates.pekerjaRate > 0 ? rates.pekerjaRate : 110000;
+    const [tukangJml, pekerjaJml] = distributeRupiah(upahNominal, [60, 40]);
 
-    const tukangVol = Math.max(1, Math.round((upahNominal * 0.6) / tukangRate));
-    const pekerjaVol = Math.max(1, Math.round((upahNominal * 0.4) / pekerjaRate));
+    const tukangVol = Math.max(1, Math.round(tukangJml / 135000));
+    const pekerjaVol = Math.max(1, Math.round(pekerjaJml / 110000));
 
-    const rawUpah = [
-      {
-        namaBarang: 'Tukang Terampil Lapangan',
-        volume: tukangVol,
-        satuan: 'OH',
-        hargaSatuan: tukangRate,
-        jumlah: tukangVol * tukangRate,
-      },
-      {
-        namaBarang: 'Pekerja Konstruksi',
-        volume: pekerjaVol,
-        satuan: 'OH',
-        hargaSatuan: pekerjaRate,
-        jumlah: pekerjaVol * pekerjaRate,
-      },
-    ];
-
-    upahComponents.push(...consolidateAndStandardizeReceiptItems(rawUpah, upahNominal));
+    upahComponents.push({
+      namaBarang: 'Tukang Terampil Lapangan',
+      volume: tukangVol,
+      satuan: 'OH',
+      hargaSatuan: Math.round(tukangJml / tukangVol),
+      jumlah: tukangJml,
+    });
+    upahComponents.push({
+      namaBarang: 'Pekerja Konstruksi',
+      volume: pekerjaVol,
+      satuan: 'OH',
+      hargaSatuan: Math.round(pekerjaJml / pekerjaVol),
+      jumlah: pekerjaJml,
+    });
   }
 
   return { bahanItems, upahComponents };
@@ -533,69 +482,6 @@ export function deduplicateBkuTransactions(transactions: BkuTransaction[]): BkuT
   return deduped;
 }
 
-export interface BkuReconciliationValidation {
-  isBalanced: boolean;
-  totalBkuPenerimaan: number;
-  totalBkuPengeluaran: number;
-  totalKwitansi: number;
-  totalAnggaran: number;
-  selisihPenerimaanVsAnggaran: number;
-  selisihPengeluaranVsAnggaran: number;
-  selisihPengeluaranVsKwitansi: number;
-  message: string;
-}
-
-export function validateBkuReconciliation(
-  bkuList: BkuTransaction[],
-  kwitansiList: KwitansiDocument[],
-  school?: SchoolMasterData
-): BkuReconciliationValidation {
-  const totalAnggaran = school?.totalAnggaran || 0;
-  const totalBkuPenerimaan = (bkuList || [])
-    .filter((tx) => tx.jenis === 'PENERIMAAN')
-    .reduce((sum, tx) => sum + (tx.penerimaan || 0), 0);
-  const totalBkuPengeluaran = (bkuList || [])
-    .filter((tx) => tx.jenis === 'PENGELUARAN')
-    .reduce((sum, tx) => sum + (tx.pengeluaran || 0), 0);
-  const totalKwitansi = (kwitansiList || []).reduce((sum, k) => sum + (k.nominal || 0), 0);
-
-  const selisihPenerimaanVsAnggaran = totalBkuPenerimaan - totalAnggaran;
-  const selisihPengeluaranVsAnggaran = totalBkuPengeluaran - totalAnggaran;
-  const selisihPengeluaranVsKwitansi = totalBkuPengeluaran - totalKwitansi;
-
-  const isBalanced =
-    selisihPenerimaanVsAnggaran === 0 &&
-    selisihPengeluaranVsAnggaran === 0 &&
-    selisihPengeluaranVsKwitansi === 0;
-
-  let message = 'BKU Rekonsiliasi Sempurna';
-  if (!isBalanced) {
-    const parts: string[] = [];
-    if (selisihPenerimaanVsAnggaran !== 0) {
-      parts.push(`Penerimaan BKU (Rp ${totalBkuPenerimaan.toLocaleString('id-ID')}) != Anggaran (Rp ${totalAnggaran.toLocaleString('id-ID')})`);
-    }
-    if (selisihPengeluaranVsAnggaran !== 0) {
-      parts.push(`Pengeluaran BKU (Rp ${totalBkuPengeluaran.toLocaleString('id-ID')}) != Anggaran (Rp ${totalAnggaran.toLocaleString('id-ID')})`);
-    }
-    if (selisihPengeluaranVsKwitansi !== 0) {
-      parts.push(`Pengeluaran BKU (Rp ${totalBkuPengeluaran.toLocaleString('id-ID')}) != Total Kwitansi (Rp ${totalKwitansi.toLocaleString('id-ID')})`);
-    }
-    message = `Selisih Rekonsiliasi BKU Detected: ${parts.join('; ')}`;
-  }
-
-  return {
-    isBalanced,
-    totalBkuPenerimaan,
-    totalBkuPengeluaran,
-    totalKwitansi,
-    totalAnggaran,
-    selisihPenerimaanVsAnggaran,
-    selisihPengeluaranVsAnggaran,
-    selisihPengeluaranVsKwitansi,
-    message,
-  };
-}
-
 export function calculateBkuFromTransactions(
   kwitansiList: KwitansiDocument[],
   school: SchoolMasterData,
@@ -607,44 +493,72 @@ export function calculateBkuFromTransactions(
   stores: StoreVendor[] = [],
   bkbList: BkbTransaction[] = []
 ): BkuTransaction[] {
-  if (Array.isArray(deletedIds) && deletedIds.includes('ALL_BKU')) {
+  if (deletedIds.includes('ALL_BKU')) {
     return [];
   }
 
-  const yearStr = school?.tahunAnggaran?.trim() || '2026';
-
-  // 1. Run planCashFlow to get synchronized kwitansi dates, termins, and withdrawals
-  const plannedResult = planCashFlow(kwitansiList, school, progressWeeks, wageReports);
-  const plannedKws = plannedResult.plannedKwitansiList;
-  const termins = plannedResult.termins;
-
   const result: BkuTransaction[] = [];
+  const yearStr = school?.tahunAnggaran?.trim() || '2026';
+  const effLimit = bkuWeekLimit || 14;
 
-  // 2. Add Penerimaan Termin transactions to BKU
-  termins.forEach((trm) => {
-    const trmId = trm.id === 'trm-01' ? 'bku-init-1' : 'bku-init-2';
-    if (!deletedIds.includes(trmId)) {
-      const manualOverride = manualTransactions.find((m) => m.id === trmId);
-      if (manualOverride) {
-        result.push(manualOverride);
-      } else {
-        result.push({
-          id: trmId,
-          tanggal: trm.tanggal,
-          tanggalObj: trm.tanggalObj,
-          bulan: trm.bulan,
-          jenis: 'PENERIMAAN',
-          uraian: trm.uraian,
-          noBukti: trm.noBukti,
-          penerimaan: trm.penerimaan,
-          pengeluaran: 0,
-        });
-      }
+  let startProjectDateIso = `${yearStr}-07-01`;
+  let startProjectDateSlash = `01/07/${yearStr}`;
+  let startProjectBulan = `Juli ${yearStr}`;
+
+  if (progressWeeks && progressWeeks.length > 0) {
+    const week1 = progressWeeks.find((w) => w.mingguKe === 1) || progressWeeks[0];
+    const resolved1 = resolveWeekDates(week1, yearStr);
+    startProjectDateIso = resolved1.startDate;
+    startProjectDateSlash = resolved1.startDateSlash;
+    startProjectBulan = resolved1.bulan;
+  }
+
+  let termin2DateIso = `${yearStr}-09-01`;
+  let termin2DateSlash = `01/09/${yearStr}`;
+  let termin2Bulan = `September ${yearStr}`;
+
+  if (progressWeeks && progressWeeks.length > 0) {
+    const week8 = progressWeeks.find((w) => w.mingguKe === 8) || progressWeeks[Math.min(7, progressWeeks.length - 1)];
+    const resolved8 = resolveWeekDates(week8, yearStr);
+    termin2DateIso = resolved8.startDate;
+    termin2DateSlash = resolved8.startDateSlash;
+    termin2Bulan = resolved8.bulan;
+  }
+
+  const manualInit1 = manualTransactions.find((m) => m.id === 'bku-init-1');
+  const termin1Amount = school?.termin1Nilai || (school?.totalAnggaran ? Math.round(school.totalAnggaran * ((school.termin1Persen || 70) / 100)) : 0);
+
+  if (!deletedIds.includes('bku-init-1')) {
+    if (manualInit1) {
+      result.push(manualInit1);
+    } else if (termin1Amount > 0 && (kwitansiList.length > 0 || manualTransactions.length > 0)) {
+      result.push({
+        id: 'bku-init-1',
+        tanggal: startProjectDateSlash,
+        tanggalObj: startProjectDateIso,
+        bulan: startProjectBulan,
+        jenis: 'PENERIMAAN',
+        uraian: 'Penarikan dari Bank (Termin 1 - 70%)',
+        noBukti: 'BKT-01',
+        penerimaan: termin1Amount,
+        pengeluaran: 0,
+      });
     }
-  });
+  }
 
-  // 3. Add Kwitansi Expenditure transactions to BKU
-  plannedKws.forEach((kw) => {
+  const activeWeeks = (progressWeeks || [])
+    .filter((w) => w.mingguKe <= effLimit)
+    .filter((w) => (w.bobotRealisasi && w.bobotRealisasi > 0) || w.divisions?.some((d) => (d.prestasiMingguIni || 0) > 0));
+
+  const activeWeekNums = new Set(activeWeeks.map((w) => w.mingguKe));
+  const hasAnyActiveProgress = activeWeekNums.size > 0;
+
+  const cleanSourceKwitansi = deduplicateKwitansiList(kwitansiList);
+
+  cleanSourceKwitansi.forEach((kw) => {
+    if (!isKwitansiAllowedByProgressBobot(kw, progressWeeks)) {
+      return;
+    }
     const cleanKwId = (kw.id || '').replace(/^(bku-kw-)+/, '');
     const kwBkuId = `bku-kw-${cleanKwId}`;
     if (
@@ -653,6 +567,26 @@ export function calculateBkuFromTransactions(
       deletedIds.includes(kwBkuId) ||
       (kw.noBukti && deletedIds.includes(kw.noBukti))
     ) {
+      return;
+    }
+
+    const kwWeek = extractWeekNumberFromKwitansi(kw, progressWeeks, yearStr);
+    if (kwWeek !== null && kwWeek > effLimit) {
+      return;
+    }
+
+    const isFixedKw =
+      Boolean(kw.isLocked) ||
+      kw.tipe === 'KONSULTAN' ||
+      kw.tipe === 'SMKK' ||
+      kw.tipe === 'CETAK' ||
+      kw.kategoriBiayaPajak === 'Siplah' ||
+      /siplah|kons-|adm|smkk|ctk/i.test(`${kw.noBukti || ''} ${kw.uraian || ''}`);
+
+    if (hasAnyActiveProgress && kwWeek !== null && !activeWeekNums.has(kwWeek) && !isFixedKw) {
+      return;
+    }
+    if (!hasAnyActiveProgress && (kw.tipe === 'MATERIAL' || kw.tipe === 'UPAH' || kw.tipe === 'PERABOT' || kwWeek !== null)) {
       return;
     }
 
@@ -671,7 +605,6 @@ export function calculateBkuFromTransactions(
         (cleanKwBukti && cleanKwBukti !== '-' && mBukti === cleanKwBukti)
       );
     });
-
     if (manualKwOverride) {
       result.push({
         ...manualKwOverride,
@@ -690,12 +623,63 @@ export function calculateBkuFromTransactions(
       return;
     }
 
+    let sortDate = startProjectDateIso;
+    let displayTanggal = kw.tanggal || startProjectDateSlash;
+
+    if (kw.tanggal) {
+      if (kw.tanggal.includes('/')) {
+        const parts = kw.tanggal.split('/');
+        if (parts.length === 3) {
+          const [d, m, y] = parts;
+          sortDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+          displayTanggal = `${d.padStart(2, '0')}/${m.padStart(2, '0')}/${y}`;
+        }
+      } else if (kw.tanggal.includes('-')) {
+        const parts = kw.tanggal.split('-');
+        if (parts.length === 3) {
+          const [y, m, d] = parts;
+          sortDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+          displayTanggal = `${d.padStart(2, '0')}/${m.padStart(2, '0')}/${y}`;
+        }
+      }
+    }
+
+    const isKwDateManuallyLocked = Boolean(kw.isLocked || kw.isManualDate);
+
+    if (!isKwDateManuallyLocked && kw.mingguKeRef && progressWeeks && progressWeeks.length > 0) {
+      const matchW = progressWeeks.find((w) => w.mingguKe === kw.mingguKeRef);
+      if (matchW) {
+        const resolvedW = resolveWeekDates(matchW, yearStr);
+        const isStrictAkhirMingguPayment =
+          kw.tipe === 'UPAH' ||
+          /uk\//i.test(kw.noBukti || '') ||
+          /upah tukang|upah pekerja|daftar hadir/i.test(kw.uraian);
+
+        if (isStrictAkhirMingguPayment) {
+          sortDate = resolvedW.endDate;
+          displayTanggal = resolvedW.endDateSlash;
+        } else {
+          if (sortDate < resolvedW.startDate) {
+            sortDate = resolvedW.startDate;
+            displayTanggal = resolvedW.startDateSlash;
+          } else if (sortDate > resolvedW.endDate) {
+            sortDate = resolvedW.endDate;
+            displayTanggal = resolvedW.endDateSlash;
+          }
+        }
+      }
+    }
+    if (sortDate < startProjectDateIso) {
+      sortDate = startProjectDateIso;
+      displayTanggal = startProjectDateSlash;
+    }
+
+    let bkuUraian = kw.uraian;
     const isSiplahKw =
       kw.kategoriBiayaPajak === 'Siplah' ||
       /siplah|daring/i.test(`${kw.noBukti || ''} ${kw.uraian || ''} ${(kw as any).kategoriBiaya || ''}`) ||
       (kw.items && kw.items.some((i: any) => /siplah/i.test(i.kategoriBiaya || '')));
 
-    let bkuUraian = kw.uraian;
     const isMaterialKw =
       !isSiplahKw &&
       (kw.tipe === 'MATERIAL' ||
@@ -722,27 +706,134 @@ export function calculateBkuFromTransactions(
     } else if (kw.tipe === 'OPERASIONAL' || /adm/i.test(kw.noBukti || '') || /administrasi|pengelolaan/i.test(kw.uraian)) {
       const recipient = kw.penerimaNama || resolveManagementRecipient('PENGELOLA', school, stores);
       bkuUraian = `Bayar Biaya Pengelolaan Administrasi LPJ (${recipient})`;
+    } else {
+      bkuUraian = `Bayar Bahan Dari ${kw.namaToko || kw.penerimaNama || 'Penyedia'}`;
     }
 
-    const sortDate = parseTxDateToIso(kw.tanggal);
-
+    let finalPengeluaran = kw.nominal;
     result.push({
       id: kwBkuId,
-      tanggal: kw.tanggal,
+      tanggal: displayTanggal,
       tanggalObj: sortDate,
-      bulan: kw.bulan,
+      bulan: kw.bulan || startProjectBulan,
       jenis: 'PENGELUARAN',
       uraian: bkuUraian,
       noBukti: kw.noBukti,
       penerimaan: 0,
-      pengeluaran: kw.nominal,
+      pengeluaran: finalPengeluaran,
       kategoriBiaya: isSiplahKw ? 'Siplah' : kw.kategoriBiayaPajak,
       kwitansiIdRef: kw.id,
       metodeBayar: isSiplahKw ? 'BANK' : (kw.metodeBayar || 'TUNAI'),
     });
   });
 
-  // 4. Include additional manual transactions if any
+  (wageReports || []).forEach((wr) => {
+    if (!wr || wr.totalUpah <= 0) return;
+    const wNum = wr.mingguKe;
+    if (!activeWeekNums.has(wNum)) return;
+
+    const weekPad = String(wNum).padStart(2, '0');
+    const ukBukti = `UK/${weekPad}/${yearStr}`;
+
+    const alreadyHasUpah = result.some((r) => {
+      const rBukti = (r.noBukti || '').toUpperCase().trim();
+      if (rBukti === ukBukti.toUpperCase() || rBukti === `UK/${wNum}/${yearStr}`.toUpperCase()) return true;
+      if (/uk\//i.test(rBukti) && (rBukti.includes(`/${weekPad}/`) || rBukti.includes(`/${wNum}/`))) return true;
+      if (/upah/i.test(r.uraian || '') && (rBukti.includes(`/${weekPad}/`) || rBukti.includes(`/${wNum}/`))) return true;
+      if (r.kwitansiIdRef) {
+        const linked = cleanSourceKwitansi.find((k) => k.id === r.kwitansiIdRef);
+        if (linked && (linked.tipe === 'UPAH' || /uk\//i.test(linked.noBukti || ''))) {
+          const wK = extractWeekNumberFromKwitansi(linked, progressWeeks, yearStr);
+          if (wK === wNum) return true;
+        }
+      }
+      return false;
+    });
+
+    if (!alreadyHasUpah) {
+      const matchW = activeWeeks.find((w) => w.mingguKe === wNum);
+      const weekDivSum = (matchW?.divisions || []).reduce((s, d) => s + (d.prestasiMingguIni || 0), 0);
+      const weekBobot = weekDivSum;
+      const paguTotal = school?.totalAnggaran || 0;
+      const weekIncrementalBudget = Math.round((paguTotal * weekBobot) / 100);
+      const cappedUpah = wr.totalUpah;
+
+      const wDates = matchW
+        ? resolveWeekDates(matchW, yearStr)
+        : { endDate: `${yearStr}-07-12`, endDateSlash: `12/07/${yearStr}`, bulan: startProjectBulan };
+
+      const bkuUpahId = `bku-wage-w${wNum}`;
+      if (deletedIds.includes(bkuUpahId)) return;
+
+      const manualWageOverride = manualTransactions.find((m) => {
+        const mBukti = (m.noBukti || '').trim().toUpperCase();
+        return (
+          m.id === bkuUpahId ||
+          m.kwitansiIdRef === `kw-upah-m${wNum}` ||
+          (mBukti && (mBukti === ukBukti.toUpperCase() || mBukti === `UK/${wNum}/${yearStr}`.toUpperCase()))
+        );
+      });
+
+      if (manualWageOverride) {
+        result.push({
+          ...manualWageOverride,
+          id: bkuUpahId,
+          noBukti: ukBukti,
+          pengeluaran: manualWageOverride.pengeluaran || cappedUpah,
+          isLocked: true,
+          isManualDate: true,
+        });
+        return;
+      }
+
+      const originalDate = new Date(`${wDates.endDate}T00:00:00`);
+      const shiftedDate = new Date(originalDate.getTime() + 2 * 86400000);
+      const d = String(shiftedDate.getDate()).padStart(2, '0');
+      const m = String(shiftedDate.getMonth() + 1).padStart(2, '0');
+      const y = shiftedDate.getFullYear();
+      const displayTanggal = `${d}/${m}/${y}`;
+      const isoTanggal = `${y}-${m}-${d}`;
+
+      result.push({
+        id: bkuUpahId,
+        tanggal: displayTanggal,
+        tanggalObj: isoTanggal,
+        bulan: wDates.bulan || startProjectBulan,
+        jenis: 'PENGELUARAN',
+        uraian: `Bayar Upah Borongan Pekerja Fisik Minggu Ke-${wNum} (Periode ${wDates.endDateSlash.split('/')[0]} ${wDates.bulan.split(' ')[0]})`,
+        noBukti: ukBukti,
+        penerimaan: 0,
+        pengeluaran: cappedUpah,
+        kategoriBiaya: 'Konstruksi',
+        kwitansiIdRef: `kw-upah-m${wNum}`,
+      });
+    }
+  });
+
+  const manualInit2 = manualTransactions.find((m) => m.id === 'bku-init-2');
+  const termin2Amount = school?.termin2Nilai || (school?.totalAnggaran ? Math.round(school.totalAnggaran * ((school.termin2Persen || 30) / 100)) : 0);
+
+  if (!deletedIds.includes('bku-init-2')) {
+    if (manualInit2) {
+      result.push(manualInit2);
+    } else if (
+      (effLimit >= 6 || calculateCumulativeRealizedProgress(progressWeeks, effLimit) >= 60) &&
+      termin2Amount > 0
+    ) {
+      result.push({
+        id: 'bku-init-2',
+        tanggal: termin2DateSlash,
+        tanggalObj: termin2DateIso,
+        bulan: termin2Bulan,
+        jenis: 'PENERIMAAN',
+        uraian: 'Penarikan dari Bank (Termin 2 - 30%)',
+        noBukti: 'BKT-02',
+        penerimaan: termin2Amount,
+        pengeluaran: 0,
+      });
+    }
+  }
+
   manualTransactions.forEach((tx) => {
     if (
       deletedIds.includes(tx.id) ||
@@ -751,15 +842,195 @@ export function calculateBkuFromTransactions(
     ) {
       return;
     }
-    const isAlreadyRepresented = result.some((r) => r.id === tx.id || (tx.kwitansiIdRef && r.kwitansiIdRef === tx.kwitansiIdRef));
-    if (!isAlreadyRepresented) {
-      result.push(tx);
+
+    const txBukti = (tx.noBukti || '').trim().toUpperCase();
+    const txNominal = Math.round((tx.pengeluaran || 0) + (tx.penerimaan || 0));
+    const txUraian = (tx.uraian || '').trim().toLowerCase();
+
+    const isAlreadyRepresented = result.some((r) => {
+      if (r.id === tx.id) return true;
+      if (tx.kwitansiIdRef && (r.kwitansiIdRef === tx.kwitansiIdRef || r.id === tx.kwitansiIdRef || r.id === `bku-kw-${tx.kwitansiIdRef.replace(/^(bku-kw-)+/, '')}`)) {
+        return true;
+      }
+      const rBukti = (r.noBukti || '').trim().toUpperCase();
+      if (txBukti && rBukti && txBukti !== '-' && txBukti !== 'MANUAL' && rBukti === txBukti) {
+        return true;
+      }
+      const rNominal = Math.round((r.pengeluaran || 0) + (r.penerimaan || 0));
+      if (txNominal > 0 && rNominal === txNominal && r.tanggal === tx.tanggal && (r.uraian || '').trim().toLowerCase() === txUraian) {
+        return true;
+      }
+      return false;
+    });
+
+    if (isAlreadyRepresented) {
+      return;
     }
+
+    if (tx.kwitansiIdRef) {
+      const linkedKw = cleanSourceKwitansi.find((k) => k.id === tx.kwitansiIdRef);
+      if (linkedKw) {
+        const kwWeek = extractWeekNumberFromKwitansi(linkedKw, progressWeeks, yearStr);
+        if (kwWeek !== null && kwWeek > effLimit) {
+          return;
+        }
+      }
+    } else if (tx.tanggal) {
+      const txIso = parseTxDateToIso(tx.tanggalObj || tx.tanggal, parseInt(yearStr, 10));
+      if (txIso) {
+        const matchW = progressWeeks.find((w) => {
+          const res = resolveWeekDates(w, yearStr);
+          return txIso >= res.startDate && txIso <= res.endDate;
+        });
+        if (matchW && matchW.mingguKe > effLimit) {
+          return;
+        }
+      }
+    }
+
+    result.push(tx);
   });
 
-  // 5. Deduplicate and sort chronologically
   const dedupedResult = deduplicateBkuTransactions(result);
-  dedupedResult.sort((a, b) => {
+
+  let processedBkuList = dedupedResult;
+  const bankCashInflows = (bkbList || [])
+    .filter((b) => (b.pengeluaran || 0) > 0 && b.kategori !== 'BIAYA_ADMIN')
+    .map((b) => ({
+      iso: b.tanggalObj || parseTxDateToIso(b.tanggal),
+      tanggal: b.tanggal,
+      bulan: b.bulan,
+      nominal: b.pengeluaran,
+    }))
+    .sort((a, b) => a.iso.localeCompare(b.iso));
+
+  if (bankCashInflows.length > 0) {
+    const queue = [...dedupedResult].sort((a, b) => {
+      const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
+      const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
+      if (isoA !== isoB) return isoA.localeCompare(isoB);
+      if (a.jenis === 'PENERIMAAN' && b.jenis === 'PENGELUARAN') return -1;
+      if (a.jenis === 'PENGELUARAN' && b.jenis === 'PENERIMAAN') return 1;
+      return 0;
+    });
+
+    const splitBkuList: BkuTransaction[] = [];
+    let cashOnHand = 0;
+    let nextInflowIdx = 0;
+
+    const insertBkuChronologically = (q: BkuTransaction[], item: BkuTransaction) => {
+      const itemIso = item.tanggalObj || parseTxDateToIso(item.tanggal);
+      const idx = q.findIndex((ex) => {
+        const exIso = ex.tanggalObj || parseTxDateToIso(ex.tanggal);
+        if (exIso > itemIso) return true;
+        if (exIso === itemIso && ex.jenis === 'PENGELUARAN' && item.jenis === 'PENERIMAAN') return true;
+        return false;
+      });
+      if (idx === -1) q.push(item);
+      else q.splice(idx, 0, item);
+    };
+
+    let safety = 0;
+    const maxIters = queue.length * 4;
+
+    while (queue.length > 0 && safety < maxIters) {
+      safety++;
+      const tx = queue.shift()!;
+      const txIso = tx.tanggalObj || parseTxDateToIso(tx.tanggal);
+
+      while (nextInflowIdx < bankCashInflows.length && bankCashInflows[nextInflowIdx].iso <= txIso) {
+        cashOnHand += bankCashInflows[nextInflowIdx].nominal;
+        nextInflowIdx++;
+      }
+
+      if (tx.jenis === 'PENERIMAAN') {
+        splitBkuList.push(tx);
+        continue;
+      }
+
+      const expenseNominal = tx.pengeluaran || 0;
+      if (expenseNominal <= 0 || tx.metodeBayar === 'BANK') {
+        splitBkuList.push(tx);
+        continue;
+      }
+
+      if (expenseNominal <= cashOnHand) {
+        cashOnHand -= expenseNominal;
+        splitBkuList.push(tx);
+        continue;
+      }
+
+      const nextBank = bankCashInflows.find((b) => b.iso > txIso);
+
+      const isFixedOrNonMaterial = isFixedNonSplitPayment(tx) || !isMaterialOnlyPurchase(tx);
+
+      if (isFixedOrNonMaterial) {
+        if (nextBank) {
+          const deferredTx: BkuTransaction = {
+            ...tx,
+            tanggal: nextBank.tanggal,
+            tanggalObj: nextBank.iso,
+            bulan: nextBank.bulan,
+          };
+          insertBkuChronologically(queue, deferredTx);
+          continue;
+        }
+        cashOnHand -= expenseNominal;
+        splitBkuList.push(tx);
+        continue;
+      }
+
+      if (cashOnHand > 0) {
+        const part1Nominal = cashOnHand;
+        const part2Nominal = expenseNominal - part1Nominal;
+        cashOnHand = 0;
+
+        splitBkuList.push({
+          ...tx,
+          id: `${tx.id}-p1`,
+          uraian: cleanNaturalUraian(tx.uraian),
+          pengeluaran: part1Nominal,
+        });
+
+        const part2Date = nextBank ? nextBank.tanggal : tx.tanggal;
+        const part2Iso = nextBank ? nextBank.iso : txIso;
+        const part2Bulan = nextBank ? nextBank.bulan : tx.bulan;
+
+        const part2Tx: BkuTransaction = {
+          ...tx,
+          id: `${tx.id}-p2`,
+          tanggal: part2Date,
+          tanggalObj: part2Iso,
+          bulan: part2Bulan,
+          uraian: cleanNaturalUraian(tx.uraian),
+          noBukti: (tx.noBukti || '').replace(/-B$/, '').trim(),
+          pengeluaran: part2Nominal,
+          penerimaan: 0,
+        };
+
+        insertBkuChronologically(queue, part2Tx);
+        continue;
+      }
+
+      if (nextBank) {
+        const deferredTx: BkuTransaction = {
+          ...tx,
+          tanggal: nextBank.tanggal,
+          tanggalObj: nextBank.iso,
+          bulan: nextBank.bulan,
+        };
+        insertBkuChronologically(queue, deferredTx);
+        continue;
+      }
+
+      cashOnHand -= expenseNominal;
+      splitBkuList.push(tx);
+    }
+
+    processedBkuList = splitBkuList;
+  }
+
+  processedBkuList.sort((a, b) => {
     if (a.tanggalObj === b.tanggalObj) {
       if (a.jenis === 'PENERIMAAN' && b.jenis === 'PENGELUARAN') return -1;
       if (a.jenis === 'PENGELUARAN' && b.jenis === 'PENERIMAAN') return 1;
@@ -768,15 +1039,31 @@ export function calculateBkuFromTransactions(
     return a.tanggalObj.localeCompare(b.tanggalObj);
   });
 
-  // 6. Renumber material vouchers chronologically
-  const renumberedList = renumberMaterialTransactionsChronologically(dedupedResult, yearStr);
+  processedBkuList = renumberMaterialTransactionsChronologically(processedBkuList, yearStr);
 
-  // 7. Compute running balance across all transactions
+  const totalBkuPenerimaan = processedBkuList.filter((tx) => tx.jenis === 'PENERIMAAN').reduce((s, tx) => s + (tx.penerimaan || 0), 0);
+  const totalBkuPengeluaran = processedBkuList.filter((tx) => tx.jenis === 'PENGELUARAN').reduce((s, tx) => s + (tx.pengeluaran || 0), 0);
+  const bkuDiff = totalBkuPengeluaran - totalBkuPenerimaan;
+
+  if (totalBkuPenerimaan > 0 && bkuDiff > 0 && (effLimit >= 14 || calculateCumulativeRealizedProgress(progressWeeks, effLimit) >= 99.9)) {
+    for (let i = processedBkuList.length - 1; i >= 0; i--) {
+      const tx = processedBkuList[i];
+      if (tx.jenis === 'PENGELUARAN' && !tx.isLocked && !isFixedNonSplitPayment(tx) && isMaterialOnlyPurchase(tx)) {
+        const deduct = Math.min(tx.pengeluaran, bkuDiff);
+        processedBkuList[i] = {
+          ...tx,
+          pengeluaran: tx.pengeluaran - deduct,
+        };
+        break;
+      }
+    }
+  }
+
   let currentSaldo = 0;
-  const finalResult: BkuTransaction[] = [];
-  const seenIds = new Set<string>();
+  const seenBkuTxIds = new Set<string>();
+  const finalUniqueResult: BkuTransaction[] = [];
 
-  renumberedList.forEach((tx) => {
+  processedBkuList.forEach((tx) => {
     if (tx.jenis === 'PENERIMAAN') {
       currentSaldo += tx.penerimaan;
     } else {
@@ -784,12 +1071,12 @@ export function calculateBkuFromTransactions(
     }
 
     let finalId = tx.id || generateSecureId('bku-tx');
-    if (seenIds.has(finalId)) {
-      finalId = `${finalId}-${seenIds.size}`;
+    if (seenBkuTxIds.has(finalId)) {
+      finalId = `${finalId}-${seenBkuTxIds.size}`;
     }
-    seenIds.add(finalId);
+    seenBkuTxIds.add(finalId);
 
-    finalResult.push({
+    finalUniqueResult.push({
       ...tx,
       uraian: cleanNaturalUraian(tx.uraian || ''),
       noBukti: (tx.noBukti || '').replace(/-B$/, '').trim(),
@@ -798,15 +1085,12 @@ export function calculateBkuFromTransactions(
     });
   });
 
-  return finalResult;
+  return finalUniqueResult;
 }
 
 export function calculateBktFromBku(
   bkuList: BkuTransaction[],
-  bkbList: BkbTransaction[] = [],
-  arg3?: KwitansiDocument[] | SchoolMasterData | any,
-  arg4?: SchoolMasterData | ProjectProgressWeek[] | any,
-  arg5?: ProjectProgressWeek[] | any
+  bkbList: BkbTransaction[] = []
 ): BktTransaction[] {
-  return calculateIntegratedBkt(bkuList, bkbList, arg3, arg4, arg5);
+  return calculateIntegratedBkt(bkuList, bkbList);
 }
