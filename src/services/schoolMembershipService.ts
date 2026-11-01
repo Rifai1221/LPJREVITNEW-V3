@@ -37,6 +37,9 @@ export interface SearchedSchoolItem {
   provinsi?: string;
 }
 
+// Flag for Direct Firestore Client Mode (Spark Plan friendly & instant execution)
+const USE_DIRECT_FIRESTORE_PRIMARY = true;
+
 // Helper to determine if callable error is an offline/internal fallback trigger
 function isCallableFallbackError(err: any): boolean {
   if (!err) return false;
@@ -61,20 +64,22 @@ export async function createSchoolCallable(params: {
   provinsi?: string;
   pin: string;
 }): Promise<{ schoolId: string; namaSekolah: string; npsn: string }> {
-  try {
-    const fn = httpsCallable<typeof params, { success: boolean; schoolId: string; namaSekolah: string; npsn: string }>(
-      functions,
-      'createSchool'
-    );
-    const res = await fn(params);
-    if (res.data?.schoolId) {
-      return res.data;
+  if (!USE_DIRECT_FIRESTORE_PRIMARY) {
+    try {
+      const fn = httpsCallable<typeof params, { success: boolean; schoolId: string; namaSekolah: string; npsn: string }>(
+        functions,
+        'createSchool'
+      );
+      const res = await fn(params);
+      if (res.data?.schoolId) {
+        return res.data;
+      }
+    } catch (err) {
+      if (!isCallableFallbackError(err)) {
+        throw err;
+      }
+      logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for createSchool', err);
     }
-  } catch (err) {
-    if (!isCallableFallbackError(err)) {
-      throw err;
-    }
-    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for createSchool', err);
   }
 
   // DIRECT FIRESTORE FALLBACK (Option B - Spark Plan Friendly)
@@ -144,20 +149,22 @@ export async function createSchoolCallable(params: {
 
 // 2. Search Schools
 export async function searchSchoolsCallable(queryStr: string): Promise<SearchedSchoolItem[]> {
-  try {
-    const fn = httpsCallable<{ query: string }, { schools: SearchedSchoolItem[] }>(
-      functions,
-      'searchSchools'
-    );
-    const res = await fn({ query: queryStr });
-    if (res.data?.schools) {
-      return res.data.schools;
+  if (!USE_DIRECT_FIRESTORE_PRIMARY) {
+    try {
+      const fn = httpsCallable<{ query: string }, { schools: SearchedSchoolItem[] }>(
+        functions,
+        'searchSchools'
+      );
+      const res = await fn({ query: queryStr });
+      if (res.data?.schools) {
+        return res.data.schools;
+      }
+    } catch (err) {
+      if (!isCallableFallbackError(err)) {
+        throw err;
+      }
+      logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for searchSchools', err);
     }
-  } catch (err) {
-    if (!isCallableFallbackError(err)) {
-      throw err;
-    }
-    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for searchSchools', err);
   }
 
   // DIRECT FIRESTORE FALLBACK
@@ -197,20 +204,22 @@ export async function joinSchoolCallable(params: {
   role: 'KEPALA_SEKOLAH' | 'TIM_TEKNIS' | 'FASILITATOR';
   displayName?: string;
 }): Promise<{ schoolId: string; namaSekolah: string; role: UserRole }> {
-  try {
-    const fn = httpsCallable<typeof params, { success: boolean; schoolId: string; namaSekolah: string; role: UserRole }>(
-      functions,
-      'joinSchool'
-    );
-    const res = await fn(params);
-    if (res.data?.schoolId) {
-      return res.data;
+  if (!USE_DIRECT_FIRESTORE_PRIMARY) {
+    try {
+      const fn = httpsCallable<typeof params, { success: boolean; schoolId: string; namaSekolah: string; role: UserRole }>(
+        functions,
+        'joinSchool'
+      );
+      const res = await fn(params);
+      if (res.data?.schoolId) {
+        return res.data;
+      }
+    } catch (err) {
+      if (!isCallableFallbackError(err)) {
+        throw err;
+      }
+      logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for joinSchool', err);
     }
-  } catch (err) {
-    if (!isCallableFallbackError(err)) {
-      throw err;
-    }
-    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for joinSchool', err);
   }
 
   // DIRECT FIRESTORE FALLBACK
@@ -268,20 +277,22 @@ export async function changeSchoolPinCallable(params: {
   oldPin?: string;
   newPin: string;
 }): Promise<{ success: boolean; message: string }> {
-  try {
-    const fn = httpsCallable<typeof params, { success: boolean; message: string }>(
-      functions,
-      'changeSchoolPin'
-    );
-    const res = await fn(params);
-    if (res.data?.success) {
-      return res.data;
+  if (!USE_DIRECT_FIRESTORE_PRIMARY) {
+    try {
+      const fn = httpsCallable<typeof params, { success: boolean; message: string }>(
+        functions,
+        'changeSchoolPin'
+      );
+      const res = await fn(params);
+      if (res.data?.success) {
+        return res.data;
+      }
+    } catch (err) {
+      if (!isCallableFallbackError(err)) {
+        throw err;
+      }
+      logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for changeSchoolPin', err);
     }
-  } catch (err) {
-    if (!isCallableFallbackError(err)) {
-      throw err;
-    }
-    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for changeSchoolPin', err);
   }
 
   // DIRECT FIRESTORE FALLBACK
@@ -306,20 +317,22 @@ export async function deleteSchoolCallable(params: {
   pin: string;
   confirmName: string;
 }): Promise<{ success: boolean; purgeAfter: string }> {
-  try {
-    const fn = httpsCallable<typeof params, { success: boolean; purgeAfter: string }>(
-      functions,
-      'deleteSchool'
-    );
-    const res = await fn(params);
-    if (res.data?.success) {
-      return res.data;
+  if (!USE_DIRECT_FIRESTORE_PRIMARY) {
+    try {
+      const fn = httpsCallable<typeof params, { success: boolean; purgeAfter: string }>(
+        functions,
+        'deleteSchool'
+      );
+      const res = await fn(params);
+      if (res.data?.success) {
+        return res.data;
+      }
+    } catch (err) {
+      if (!isCallableFallbackError(err)) {
+        throw err;
+      }
+      logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for deleteSchool', err);
     }
-  } catch (err) {
-    if (!isCallableFallbackError(err)) {
-      throw err;
-    }
-    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for deleteSchool', err);
   }
 
   // DIRECT FIRESTORE FALLBACK
@@ -344,20 +357,22 @@ export async function deleteSchoolCallable(params: {
 
 // 6. Restore School
 export async function restoreSchoolCallable(schoolId: string): Promise<{ success: boolean }> {
-  try {
-    const fn = httpsCallable<{ schoolId: string }, { success: boolean }>(
-      functions,
-      'restoreSchool'
-    );
-    const res = await fn({ schoolId });
-    if (res.data?.success) {
-      return res.data;
+  if (!USE_DIRECT_FIRESTORE_PRIMARY) {
+    try {
+      const fn = httpsCallable<{ schoolId: string }, { success: boolean }>(
+        functions,
+        'restoreSchool'
+      );
+      const res = await fn({ schoolId });
+      if (res.data?.success) {
+        return res.data;
+      }
+    } catch (err) {
+      if (!isCallableFallbackError(err)) {
+        throw err;
+      }
+      logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for restoreSchool', err);
     }
-  } catch (err) {
-    if (!isCallableFallbackError(err)) {
-      throw err;
-    }
-    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for restoreSchool', err);
   }
 
   // DIRECT FIRESTORE FALLBACK
@@ -375,20 +390,22 @@ export async function setMemberRoleCallable(params: {
   targetUid: string;
   role: UserRole;
 }): Promise<{ success: boolean }> {
-  try {
-    const fn = httpsCallable<typeof params, { success: boolean }>(
-      functions,
-      'setMemberRole'
-    );
-    const res = await fn(params);
-    if (res.data?.success) {
-      return res.data;
+  if (!USE_DIRECT_FIRESTORE_PRIMARY) {
+    try {
+      const fn = httpsCallable<typeof params, { success: boolean }>(
+        functions,
+        'setMemberRole'
+      );
+      const res = await fn(params);
+      if (res.data?.success) {
+        return res.data;
+      }
+    } catch (err) {
+      if (!isCallableFallbackError(err)) {
+        throw err;
+      }
+      logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for setMemberRole', err);
     }
-  } catch (err) {
-    if (!isCallableFallbackError(err)) {
-      throw err;
-    }
-    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for setMemberRole', err);
   }
 
   // DIRECT FIRESTORE FALLBACK
@@ -408,20 +425,22 @@ export async function removeMemberCallable(params: {
   schoolId: string;
   targetUid: string;
 }): Promise<{ success: boolean }> {
-  try {
-    const fn = httpsCallable<typeof params, { success: boolean }>(
-      functions,
-      'removeMember'
-    );
-    const res = await fn(params);
-    if (res.data?.success) {
-      return res.data;
+  if (!USE_DIRECT_FIRESTORE_PRIMARY) {
+    try {
+      const fn = httpsCallable<typeof params, { success: boolean }>(
+        functions,
+        'removeMember'
+      );
+      const res = await fn(params);
+      if (res.data?.success) {
+        return res.data;
+      }
+    } catch (err) {
+      if (!isCallableFallbackError(err)) {
+        throw err;
+      }
+      logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for removeMember', err);
     }
-  } catch (err) {
-    if (!isCallableFallbackError(err)) {
-      throw err;
-    }
-    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for removeMember', err);
   }
 
   // DIRECT FIRESTORE FALLBACK
@@ -433,20 +452,22 @@ export async function removeMemberCallable(params: {
 
 // 9. List Snapshots
 export async function listSnapshotsCallable(schoolId: string): Promise<any[]> {
-  try {
-    const fn = httpsCallable<{ schoolId: string }, { snapshots: any[] }>(
-      functions,
-      'listSnapshots'
-    );
-    const res = await fn({ schoolId });
-    if (res.data?.snapshots) {
-      return res.data.snapshots;
+  if (!USE_DIRECT_FIRESTORE_PRIMARY) {
+    try {
+      const fn = httpsCallable<{ schoolId: string }, { snapshots: any[] }>(
+        functions,
+        'listSnapshots'
+      );
+      const res = await fn({ schoolId });
+      if (res.data?.snapshots) {
+        return res.data.snapshots;
+      }
+    } catch (err) {
+      if (!isCallableFallbackError(err)) {
+        throw err;
+      }
+      logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for listSnapshots', err);
     }
-  } catch (err) {
-    if (!isCallableFallbackError(err)) {
-      throw err;
-    }
-    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for listSnapshots', err);
   }
 
   // DIRECT FIRESTORE FALLBACK
@@ -459,20 +480,22 @@ export async function listSnapshotsCallable(schoolId: string): Promise<any[]> {
 
 // 10. Restore Snapshot
 export async function restoreSnapshotCallable(schoolId: string, snapshotId: string): Promise<{ success: boolean; rev: number }> {
-  try {
-    const fn = httpsCallable<{ schoolId: string; snapshotId: string }, { success: boolean; rev: number }>(
-      functions,
-      'restoreSnapshot'
-    );
-    const res = await fn({ schoolId, snapshotId });
-    if (res.data?.success) {
-      return res.data;
+  if (!USE_DIRECT_FIRESTORE_PRIMARY) {
+    try {
+      const fn = httpsCallable<{ schoolId: string; snapshotId: string }, { success: boolean; rev: number }>(
+        functions,
+        'restoreSnapshot'
+      );
+      const res = await fn({ schoolId, snapshotId });
+      if (res.data?.success) {
+        return res.data;
+      }
+    } catch (err) {
+      if (!isCallableFallbackError(err)) {
+        throw err;
+      }
+      logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for restoreSnapshot', err);
     }
-  } catch (err) {
-    if (!isCallableFallbackError(err)) {
-      throw err;
-    }
-    logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for restoreSnapshot', err);
   }
 
   // DIRECT FIRESTORE FALLBACK

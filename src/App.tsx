@@ -75,7 +75,8 @@ import {
   createSchoolCallable,
   UserMembershipRecord,
 } from './services/schoolMembershipService';
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { signInAnonymously } from 'firebase/auth';
 import { db, auth } from './services/firebase';
 import { useCan } from './hooks/useCan';
 import { detectDataAnomalies, DataAnomalyProposal } from './services/storageService';
@@ -275,7 +276,7 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 1. Listen to Firebase Auth state
+  // 1. Listen to Firebase Auth state with Auto-Guest Sign In
   useEffect(() => {
     const unsubAuth = auth.onAuthStateChanged((user) => {
       if (user) {
@@ -283,16 +284,17 @@ export default function App() {
         setCurrentUser({
           uid: user.uid,
           email: user.email || '',
-          displayName: user.displayName || user.email || 'Pengguna',
+          displayName: user.displayName || (user.isAnonymous ? 'Pengguna Tamu' : user.email) || 'Pengguna',
           photoURL: user.photoURL || null,
         });
         localStorage.setItem('LPJ_USER_SESSION_ACTIVE', 'true');
       } else {
-        setIsLoggedIn(false);
-        setCurrentUser(null);
-        setMemberships([]);
-        setIsInitialLoading(false);
-        localStorage.removeItem('LPJ_USER_SESSION_ACTIVE');
+        // Auto-Guest Mode: Automatically sign in anonymously when no user is signed in
+        signInAnonymously(auth).catch((err) => {
+          console.warn('Notice auto-guest sign in:', err);
+          setIsLoggedIn(true);
+          setIsInitialLoading(false);
+        });
       }
     });
     return () => unsubAuth();
@@ -309,14 +311,39 @@ export default function App() {
       setMemberships(mList);
 
       if (mList.length === 0) {
-        setIsInitialLoading(false);
-        // Check legacy access needing migration (Requirement 9)
+        setHasLegacyNeedsMigration(false);
+        // Auto-register default initial tenant for Auto-Guest user if zero memberships exist
         try {
-          const pref = await getUserSchoolPref(currentUser.uid);
-          if (pref) {
-            setHasLegacyNeedsMigration(true);
-          }
-        } catch {}
+          const defaultTenant = PRESET_SDN1_MUARA_DUA;
+          const initialState = createSchoolStateForTenant(defaultTenant, 'full');
+
+          await setDoc(
+            doc(db, 'users', currentUser.uid, 'memberships', defaultTenant.id),
+            {
+              schoolId: defaultTenant.id,
+              namaSekolah: defaultTenant.namaSekolah,
+              npsn: defaultTenant.npsn,
+              jenjang: defaultTenant.jenjang,
+              kabKota: defaultTenant.kabKota,
+              role: 'BENDAHARA',
+              lastOpenedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+
+          setCurrentTenant(defaultTenant);
+          setStoredActiveTenantId(defaultTenant.id);
+          _setAppState(initialState);
+          isLoadedRef.current = true;
+          isDirtyRef.current = false;
+          setIsInitialLoading(false);
+        } catch (err) {
+          console.warn('Notice auto-provisioning initial tenant for guest:', err);
+          setCurrentTenant(PRESET_SDN1_MUARA_DUA);
+          _setAppState(createSchoolStateForTenant(PRESET_SDN1_MUARA_DUA, 'full'));
+          isLoadedRef.current = true;
+          setIsInitialLoading(false);
+        }
         return;
       }
 
@@ -2531,8 +2558,8 @@ Lanjutkan pengosongan data transaksi?`)
     );
   }
 
-  // Authentication & Login Mode Guard (Requirement 1)
-  if (!isLoggedIn || (currentUser && memberships.length === 0)) {
+  // Authentication & Login Mode Guard
+  if (!isLoggedIn) {
     return (
       <>
         <LoginPortal
