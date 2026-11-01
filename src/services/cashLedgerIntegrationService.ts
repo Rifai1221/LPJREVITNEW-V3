@@ -95,9 +95,16 @@ export function syncBkbFromBku(
         penerimaNama: 'Penyedia',
         penerimaPekerjaan: 'Penyedia',
         penerimaAlamat: '',
+        items: [],
         nominal: tx.pengeluaran || 0,
-        metodeBayar: tx.metodeBayar || (/siplah/i.test(`${tx.noBukti} ${tx.uraian}`) ? 'BANK' : 'TUNAI'),
-        kategoriBiayaPajak: tx.kategoriBiaya,
+        isPpn: false,
+        isPph22: false,
+        isPph23: false,
+        ppnAmount: 0,
+        pph22Amount: 0,
+        pph23Amount: 0,
+        metodeBayar: (tx.metodeBayar === 'BANK' ? 'BANK' : 'TUNAI') as 'BANK' | 'TUNAI',
+        kategoriBiayaPajak: tx.kategoriBiaya as any,
       }));
   }
 
@@ -227,9 +234,16 @@ export function calculateIntegratedBkt(
         penerimaNama: 'Penyedia',
         penerimaPekerjaan: 'Penyedia',
         penerimaAlamat: '',
+        items: [],
         nominal: tx.pengeluaran || 0,
-        metodeBayar: tx.metodeBayar || (/siplah/i.test(`${tx.noBukti} ${tx.uraian}`) ? 'BANK' : 'TUNAI'),
-        kategoriBiayaPajak: tx.kategoriBiaya,
+        isPpn: false,
+        isPph22: false,
+        isPph23: false,
+        ppnAmount: 0,
+        pph22Amount: 0,
+        pph23Amount: 0,
+        metodeBayar: (tx.metodeBayar === 'BANK' ? 'BANK' : 'TUNAI') as 'BANK' | 'TUNAI',
+        kategoriBiayaPajak: tx.kategoriBiaya as any,
       }));
   }
 

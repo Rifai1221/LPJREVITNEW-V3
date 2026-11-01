@@ -1,4 +1,4 @@
-import { KwitansiDocument, StoreVendor, RealSchoolData, RabSubItem } from '../types';
+import { KwitansiDocument, StoreVendor, RealSchoolData, RabSubItem } from '../types/index';
 import { toRupiah } from './money';
 
 export interface ReceiptItem {

@@ -130,8 +130,9 @@ export const signInWithGis = async (): Promise<{ user: GoogleUserProfile; access
     throw new Error('OAuth Client ID belum dikonfigurasi di firebase-applet-config.json');
   }
 
-  // Ensure GIS script is ready
-  if (typeof window !== 'undefined' && !(window as any).google?.accounts?.oauth2) {
+  const googleObj = (window as any).google;
+  if (!googleObj?.accounts?.oauth2) {
+    // If script isn't loaded synchronously, quickly load it
     await new Promise<void>((resolve, reject) => {
       const script = document.createElement('script');
       script.src = 'https://accounts.google.com/gsi/client';
@@ -145,12 +146,12 @@ export const signInWithGis = async (): Promise<{ user: GoogleUserProfile; access
 
   return new Promise((resolve, reject) => {
     try {
-      const googleObj = (window as any).google;
-      if (!googleObj?.accounts?.oauth2) {
+      const gObj = (window as any).google;
+      if (!gObj?.accounts?.oauth2) {
         throw new Error('Google Identity Services tidak tersedia di browser.');
       }
 
-      const client = googleObj.accounts.oauth2.initTokenClient({
+      const client = gObj.accounts.oauth2.initTokenClient({
         client_id: clientId,
         scope: WORKSPACE_SCOPES.join(' '),
         callback: async (response: any) => {
@@ -196,6 +197,7 @@ export const signInWithGis = async (): Promise<{ user: GoogleUserProfile; access
         },
       });
 
+      // Synchronous requestAccessToken call directly bound to user gesture
       client.requestAccessToken({ prompt: 'select_account' });
     } catch (err: any) {
       reject(err);
@@ -205,42 +207,39 @@ export const signInWithGis = async (): Promise<{ user: GoogleUserProfile; access
 
 /**
  * Trigger Google Sign In popup with Google Sheets & Drive scopes.
- * Saves access token in memory only.
+ * Uses GIS directly for instant user-gesture popup compliance.
  */
 export const googleSignIn = async (): Promise<{ user: GoogleUserProfile; accessToken: string } | null> => {
   try {
     isSigningIn = true;
     try {
-      const result = await signInWithPopup(auth, provider);
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      if (!credential?.accessToken) {
-        throw new Error('Gagal mendapatkan token akses dari Google.');
+      return await signInWithGis();
+    } catch (gisErr: any) {
+      // Fallback to Firebase Popup if GIS encounters unexpected failure
+      console.info('[Google Auth] Notice GIS error, falling back to Firebase popup...', gisErr);
+      try {
+        const result = await signInWithPopup(auth, provider);
+        const credential = GoogleAuthProvider.credentialFromResult(result);
+        if (!credential?.accessToken) {
+          throw new Error('Gagal mendapatkan token akses dari Google.');
+        }
+
+        const token = credential.accessToken;
+        setInMemoryAccessToken(token, 3600);
+        activeUser = {
+          displayName: result.user.displayName,
+          email: result.user.email,
+          photoURL: result.user.photoURL,
+          uid: result.user.uid,
+        };
+        return { user: activeUser, accessToken: token };
+      } catch (fbErr: any) {
+        const msg = String(gisErr?.message || fbErr?.message || gisErr);
+        if (msg.includes('popup') || msg.includes('Popup') || msg.includes('blocked') || msg.includes('closed')) {
+          throw new Error('Jendela pop-up Google terhalang oleh browser. Silakan izinkan pop-up di browser Anda atau gunakan tombol "⚡ Masuk Tanpa Login (Akses Instan)".');
+        }
+        throw fbErr;
       }
-
-      const token = credential.accessToken;
-      setInMemoryAccessToken(token, 3600);
-      activeUser = {
-        displayName: result.user.displayName,
-        email: result.user.email,
-        photoURL: result.user.photoURL,
-        uid: result.user.uid,
-      };
-      return { user: activeUser, accessToken: token };
-    } catch (firebaseErr: any) {
-      const errMsg = String(firebaseErr?.message || firebaseErr || '');
-      const errCode = String(firebaseErr?.code || '');
-
-      // Fallback to GIS if Firebase Auth domain restrictions apply
-      if (
-        errCode === 'auth/unauthorized-domain' ||
-        errMsg.includes('unauthorized-domain') ||
-        errCode === 'auth/operation-not-allowed'
-      ) {
-        console.info('[Google Auth] Menggunakan Google Identity Services sebagai alternatif terverifikasi...');
-        return await signInWithGis();
-      }
-
-      throw firebaseErr;
     }
   } catch (error: any) {
     console.error('Google Sign In error:', error);

@@ -395,12 +395,27 @@ export default function App() {
             console.error('Initial load error:', err);
             setIsInitialLoading(false);
           }
+        } else {
+          setIsInitialLoading(false);
         }
+      } else {
+        setIsInitialLoading(false);
       }
+    }, (err) => {
+      console.warn('Notice user membership subscription error:', err);
+      setIsInitialLoading(false);
     });
 
     return () => unsubMem();
   }, [currentUser?.uid]);
+
+  // Safety timer to prevent permanent loading blank screen
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setIsInitialLoading(false);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Listen to Google Auth & refresh linked spreadsheet name for current active school
   useEffect(() => {
@@ -1896,11 +1911,11 @@ export default function App() {
     return deriveRpd(
       appState.kwitansiList,
       appState.wageReports,
-      appState.bkuTransactions || [],
+      (appState as any).bkuTransactions || appState.manualBkuTransactions || [],
       appState.realSchoolData,
       appState.school
     );
-  }, [appState.kwitansiList, appState.wageReports, appState.bkuTransactions, appState.realSchoolData, appState.school]);
+  }, [appState.kwitansiList, appState.wageReports, appState.manualBkuTransactions, appState.realSchoolData, appState.school]);
 
   const handleCleanDuplicates = () => {
     isDirtyRef.current = true;

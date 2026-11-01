@@ -48,7 +48,7 @@ export const RpdManager: React.FC<RpdManagerProps> = ({
     volumeTermin2: 0.3,
     satuan: 'bh',
     hargaSatuan: 0,
-    defaultToko: school.namaTokoRekananDefault || 'Penyedia Utama',
+    defaultToko: realSchoolData?.namaSekolah ? 'Penyedia Utama' : (availableStores[0]?.namaToko || 'Penyedia Utama'),
   });
 
   const categories: { id: string; label: string }[] = [
@@ -158,7 +158,7 @@ export const RpdManager: React.FC<RpdManagerProps> = ({
       volumeTermin2: 0.3,
       satuan: 'bh',
       hargaSatuan: 0,
-      defaultToko: school.namaTokoRekananDefault || 'Penyedia Utama',
+      defaultToko: availableStores[0]?.namaToko || 'Penyedia Utama',
     });
   };
 

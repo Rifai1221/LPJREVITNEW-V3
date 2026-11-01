@@ -37,10 +37,24 @@ export interface SearchedSchoolItem {
   provinsi?: string;
 }
 
-// Flag for Direct Firestore Client Mode (Spark Plan friendly & instant execution)
+const FIRESTORE_DB_MISSING_KEY = 'LPJ_FIRESTORE_DB_MISSING_V1';
+
+export function isFirestoreDatabaseMissingGlobally(): boolean {
+  try {
+    return localStorage.getItem(FIRESTORE_DB_MISSING_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function markFirestoreDatabaseMissingGlobally(): void {
+  try {
+    localStorage.setItem(FIRESTORE_DB_MISSING_KEY, 'true');
+  } catch {}
+}
+
 const USE_DIRECT_FIRESTORE_PRIMARY = true;
 
-// Helper to determine if callable error is an offline/internal fallback trigger
 function isCallableFallbackError(err: any): boolean {
   if (!err) return false;
   const msg = String(err?.message || err?.code || err || '').toLowerCase();
@@ -55,7 +69,7 @@ function isCallableFallbackError(err: any): boolean {
   );
 }
 
-// 1. Create School
+// 1. Create School (Local-First Architecture for instant multi-school creation)
 export async function createSchoolCallable(params: {
   namaSekolah: string;
   npsn: string;
@@ -64,28 +78,6 @@ export async function createSchoolCallable(params: {
   provinsi?: string;
   pin: string;
 }): Promise<{ schoolId: string; namaSekolah: string; npsn: string }> {
-  if (!USE_DIRECT_FIRESTORE_PRIMARY) {
-    try {
-      const fn = httpsCallable<typeof params, { success: boolean; schoolId: string; namaSekolah: string; npsn: string }>(
-        functions,
-        'createSchool'
-      );
-      const res = await fn(params);
-      if (res.data?.schoolId) {
-        return res.data;
-      }
-    } catch (err) {
-      if (!isCallableFallbackError(err)) {
-        throw err;
-      }
-      logger.info('SchoolMembershipService', 'Falling back to Direct Firestore for createSchool', err);
-    }
-  }
-
-  // DIRECT FIRESTORE FALLBACK (Option B - Spark Plan Friendly)
-  const currentUser = auth.currentUser;
-  if (!currentUser) throw new Error('Anda harus login terlebih dahulu');
-
   if (!params.namaSekolah || !params.npsn || !params.pin) {
     throw new Error('Nama Sekolah, NPSN, dan PIN wajib diisi');
   }
@@ -93,58 +85,61 @@ export async function createSchoolCallable(params: {
     throw new Error('PIN minimal 6 digit');
   }
 
-  const schoolId = 'sch_' + params.npsn.trim();
+  const schoolId = 'sch_' + params.npsn.trim() + '_' + Date.now().toString().slice(-4);
   const { hash, salt } = await hashPin(params.pin);
 
-  // Parallel Write All Initial Documents (1 network burst < 200ms with 2s max timeout guard)
-  const writeOps = Promise.all([
-    setDoc(doc(db, 'schools', schoolId), {
-      id: schoolId,
-      namaSekolah: params.namaSekolah.trim(),
-      npsn: params.npsn.trim(),
-      jenjang: params.jenjang || 'SD',
-      kabKota: params.kabKota || '',
-      provinsi: params.provinsi || '',
-      status: 'active',
-      createdAt: serverTimestamp(),
-    }, { merge: true }),
+  const newMembership: UserMembershipRecord = {
+    schoolId,
+    namaSekolah: params.namaSekolah.trim(),
+    npsn: params.npsn.trim(),
+    jenjang: params.jenjang || 'SD',
+    kabKota: params.kabKota || '',
+    role: 'BENDAHARA',
+    lastOpenedAt: new Date().toISOString(),
+  };
 
-    setDoc(doc(db, 'schools', schoolId, 'private', 'security'), {
-      pinHash: hash,
-      pinSalt: salt,
-      algo: 'sha256-legacy',
-      failedAttempts: 0,
-      lockedUntil: null,
-    }, { merge: true }),
+  // 1. Save locally immediately (100% reliable & instant)
+  saveLocalMembership(newMembership);
 
-    setDoc(doc(db, 'schools', schoolId, 'members', currentUser.uid), {
-      uid: currentUser.uid,
-      role: 'BENDAHARA',
-      email: currentUser.email || '',
-      displayName: currentUser.displayName || 'Bendahara',
-      joinedAt: serverTimestamp(),
-    }, { merge: true }),
-
-    setDoc(doc(db, 'users', currentUser.uid, 'memberships', schoolId), {
-      schoolId,
-      namaSekolah: params.namaSekolah.trim(),
-      npsn: params.npsn.trim(),
-      jenjang: params.jenjang || 'SD',
-      kabKota: params.kabKota || '',
-      role: 'BENDAHARA',
-      lastOpenedAt: serverTimestamp(),
-    }, { merge: true }),
-
-    setUserSchoolPref(currentUser.uid, schoolId),
-  ]);
-
-  // Fast timeout guard: Return in <2s maximum and let Firestore sync in background if network is slow
-  await Promise.race([
-    writeOps,
-    new Promise((resolve) => setTimeout(resolve, 2000)),
-  ]).catch((err) => {
-    logger.warn('SchoolMembershipService', 'Initial document write notice, continuing background sync', err);
-  });
+  // 2. Also try saving to Firestore in the background if logged in & DB exists (non-blocking)
+  const currentUser = auth.currentUser;
+  if (currentUser && !isFirestoreDatabaseMissingGlobally()) {
+    Promise.all([
+      setDoc(doc(db, 'schools', schoolId), {
+        id: schoolId,
+        namaSekolah: params.namaSekolah.trim(),
+        npsn: params.npsn.trim(),
+        jenjang: params.jenjang || 'SD',
+        kabKota: params.kabKota || '',
+        provinsi: params.provinsi || '',
+        status: 'active',
+        createdAt: serverTimestamp(),
+      }, { merge: true }),
+      setDoc(doc(db, 'schools', schoolId, 'private', 'security'), {
+        pinHash: hash,
+        pinSalt: salt,
+        algo: 'sha256-legacy',
+        failedAttempts: 0,
+        lockedUntil: null,
+      }, { merge: true }),
+      setDoc(doc(db, 'users', currentUser.uid, 'memberships', schoolId), {
+        schoolId,
+        namaSekolah: params.namaSekolah.trim(),
+        npsn: params.npsn.trim(),
+        jenjang: params.jenjang || 'SD',
+        kabKota: params.kabKota || '',
+        role: 'BENDAHARA',
+        lastOpenedAt: serverTimestamp(),
+      }, { merge: true }),
+      setUserSchoolPref(currentUser.uid, schoolId),
+    ]).catch((err) => {
+      const msg = String(err?.message || '').toLowerCase();
+      if (msg.includes('not-found') || msg.includes('does not exist')) {
+        markFirestoreDatabaseMissingGlobally();
+      }
+      logger.warn('SchoolMembershipService', 'Background Firestore sync for new school notice', err);
+    });
+  }
 
   return {
     schoolId,
@@ -570,13 +565,52 @@ export function isAdminUser(user: { uid?: string; email?: string | null } | null
 }
 
 // 2. Realtime listener for User Memberships
+const LOCAL_MEMBERSHIPS_KEY = 'LPJ_LOCAL_MEMBERSHIPS_REGISTRY_V2';
+
+export function getLocalMemberships(): UserMembershipRecord[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_MEMBERSHIPS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveLocalMembership(record: UserMembershipRecord): void {
+  try {
+    const list = getLocalMemberships().filter((m) => m.schoolId !== record.schoolId);
+    list.unshift(record);
+    localStorage.setItem(LOCAL_MEMBERSHIPS_KEY, JSON.stringify(list));
+  } catch {}
+}
+
+// 2. Realtime listener for User Memberships (Local-First merged with Firestore)
 export function subscribeUserMemberships(
   uid: string,
   onUpdate: (memberships: UserMembershipRecord[]) => void,
   onError?: (err: any) => void
 ): () => void {
-  if (!uid) {
-    onUpdate([]);
+  const getCombined = (cloudList: UserMembershipRecord[]) => {
+    const localList = getLocalMemberships();
+    const map = new Map<string, UserMembershipRecord>();
+    [...cloudList, ...localList].forEach((m) => {
+      if (m && m.schoolId && !map.has(m.schoolId)) {
+        map.set(m.schoolId, m);
+      }
+    });
+    const combined = Array.from(map.values());
+    combined.sort((a, b) => {
+      const timeA = a.lastOpenedAt ? (typeof (a.lastOpenedAt as any).toMillis === 'function' ? (a.lastOpenedAt as any).toMillis() : new Date(a.lastOpenedAt as any).getTime()) : 0;
+      const timeB = b.lastOpenedAt ? (typeof (b.lastOpenedAt as any).toMillis === 'function' ? (b.lastOpenedAt as any).toMillis() : new Date(b.lastOpenedAt as any).getTime()) : 0;
+      return timeB - timeA;
+    });
+    return combined;
+  };
+
+  // Emit local memberships instantly
+  onUpdate(getCombined([]));
+
+  if (!uid || isFirestoreDatabaseMissingGlobally()) {
     return () => {};
   }
 
@@ -584,11 +618,11 @@ export function subscribeUserMemberships(
   return onSnapshot(
     colRef,
     (snapshot) => {
-      const list: UserMembershipRecord[] = [];
+      const cloudList: UserMembershipRecord[] = [];
       snapshot.forEach((d) => {
         const data = d.data();
         if (data && data.schoolId) {
-          list.push({
+          cloudList.push({
             schoolId: data.schoolId,
             namaSekolah: data.namaSekolah || 'Sekolah Terdaftar',
             npsn: data.npsn || '',
@@ -599,13 +633,7 @@ export function subscribeUserMemberships(
           });
         }
       });
-      // Sort by lastOpenedAt descending
-      list.sort((a, b) => {
-        const timeA = a.lastOpenedAt ? (typeof (a.lastOpenedAt as any).toMillis === 'function' ? (a.lastOpenedAt as any).toMillis() : new Date(a.lastOpenedAt as any).getTime()) : 0;
-        const timeB = b.lastOpenedAt ? (typeof (b.lastOpenedAt as any).toMillis === 'function' ? (b.lastOpenedAt as any).toMillis() : new Date(b.lastOpenedAt as any).getTime()) : 0;
-        return timeB - timeA;
-      });
-      onUpdate(list);
+      onUpdate(getCombined(cloudList));
     },
     (err) => {
       logger.warn('SchoolMembershipService', 'Notice subscribing to user memberships', undefined, err);
