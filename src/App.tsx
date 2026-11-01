@@ -33,6 +33,7 @@ import {
   balanceFinalMaterialKwitansiToBudget,
   calculateCumulativeRealizedProgress,
 } from './services/autoGeneratorService';
+import { deriveRpd } from './utils/rpdFromLedger';
 import {
   generateStandardBkbRecords,
   calculateRunningBkb,
@@ -1891,6 +1892,16 @@ export default function App() {
     return { totalNominal, pagu: paguTotal, selisih, isOver, offendingKwitansi };
   }, [appState.kwitansiList, appState.school, appState.rpdItems]);
 
+  const derivedRpdItems = useMemo(() => {
+    return deriveRpd(
+      appState.kwitansiList,
+      appState.wageReports,
+      appState.bkuTransactions || [],
+      appState.realSchoolData,
+      appState.school
+    );
+  }, [appState.kwitansiList, appState.wageReports, appState.bkuTransactions, appState.realSchoolData, appState.school]);
+
   const handleCleanDuplicates = () => {
     isDirtyRef.current = true;
     const paguTotal = appState.school?.totalAnggaran || (appState.rpdItems || []).reduce((acc, r) => acc + (r.jumlahAnggaran || 0), 0) || 0;
@@ -2799,6 +2810,7 @@ Lanjutkan pengosongan data transaksi?`)
         {activeTab === 'rpd' && (
           <RpdManager
             items={appState.rpdItems}
+            derivedRealizationItems={derivedRpdItems}
             onUpdateItems={handleUpdateRpd}
             onOpenPrintModal={() => handleOpenPrint('RPD')}
             availableStores={appState.stores || []}

@@ -19,6 +19,7 @@ import {
   isMaterialOnlyPurchase,
   renumberMaterialTransactionsChronologically,
 } from './autoGeneratorService';
+import { planCashFlow } from './cashPlanner';
 
 /**
  * Service Integrasi Penuh BKU (Buku Kas Umum), BKT (Buku Kas Tunai), dan BKB (Buku Kas Bank).
@@ -61,212 +62,116 @@ export function generateStandardBkbRecords(
  */
 export function syncBkbFromBku(
   bkuList: BkuTransaction[],
-  school?: SchoolMasterData,
-  progressWeeks: ProjectProgressWeek[] = []
+  arg2?: SchoolMasterData | BkbTransaction[] | any,
+  arg3?: ProjectProgressWeek[] | KwitansiDocument[] | any,
+  arg4?: KwitansiDocument[] | any
 ): BkbTransaction[] {
+  let school: SchoolMasterData | undefined = undefined;
+  let progressWeeks: ProjectProgressWeek[] = [];
+  let kwitansiList: KwitansiDocument[] = [];
+
+  if (arg2 && typeof arg2 === 'object' && !Array.isArray(arg2) && ('totalAnggaran' in arg2 || 'namaSekolah' in arg2)) {
+    school = arg2 as SchoolMasterData;
+    progressWeeks = Array.isArray(arg3) ? arg3 : [];
+    kwitansiList = Array.isArray(arg4) ? arg4 : [];
+  } else {
+    school = arg3 as SchoolMasterData;
+    progressWeeks = Array.isArray(arg3) ? arg3 : (Array.isArray(arg4) ? arg4 : []);
+    kwitansiList = Array.isArray(arg4) ? arg4 : (Array.isArray(arg3) ? arg3 : []);
+  }
+
+  let kws = kwitansiList;
+  if (!kws || !Array.isArray(kws) || kws.length === 0) {
+    kws = (bkuList || [])
+      .filter((tx) => tx.jenis === 'PENGELUARAN' && (tx.pengeluaran || 0) > 0)
+      .map((tx) => ({
+        id: tx.kwitansiIdRef || tx.id,
+        noBukti: tx.noBukti || '-',
+        tipe: 'MATERIAL' as const,
+        tanggal: tx.tanggal,
+        tanggalFormatted: tx.tanggal,
+        bulan: tx.bulan,
+        uraian: tx.uraian,
+        penerimaNama: 'Penyedia',
+        penerimaPekerjaan: 'Penyedia',
+        penerimaAlamat: '',
+        nominal: tx.pengeluaran || 0,
+        metodeBayar: tx.metodeBayar || (/siplah/i.test(`${tx.noBukti} ${tx.uraian}`) ? 'BANK' : 'TUNAI'),
+        kategoriBiayaPajak: tx.kategoriBiaya,
+      }));
+  }
+
+  const planResult = planCashFlow(kws, school as any, progressWeeks);
+  const termins = planResult.termins;
+  const plannedKws = planResult.plannedKwitansiList;
+  const withdrawals = planResult.withdrawals;
+
   const records: BkbTransaction[] = [];
-  const yearStr = school?.tahunAnggaran?.trim() || '2026';
 
-  // 1. Process BKU Penerimaan to BKB PENERIMAAN_TERMIN
-  const penerimaanTxs = (bkuList || []).filter((tx) => tx.jenis === 'PENERIMAAN');
-
-  if (penerimaanTxs.length > 0) {
-    penerimaanTxs.forEach((pTx, idx) => {
-      records.push({
-        id: `bkb-penerimaan-${pTx.id || idx}`,
-        tanggal: pTx.tanggal,
-        tanggalObj: pTx.tanggalObj || parseTxDateToIso(pTx.tanggal),
-        bulan: pTx.bulan,
-        uraian: pTx.uraian,
-        noBukti: pTx.noBukti || `BB-${String(idx + 1).padStart(2, '0')}/${yearStr}`,
-        penerimaan: pTx.penerimaan,
-        pengeluaran: 0,
-        kategori: 'PENERIMAAN_TERMIN',
-      });
+  // 1. Termins (Penerimaan)
+  termins.forEach((trm) => {
+    records.push({
+      id: `bkb-trm-${trm.id}`,
+      tanggal: trm.tanggal,
+      tanggalObj: trm.tanggalObj,
+      bulan: trm.bulan,
+      uraian: trm.uraian,
+      noBukti: trm.noBukti, // TRM-01/2026, TRM-02/2026
+      penerimaan: trm.penerimaan,
+      pengeluaran: 0,
+      kategori: 'PENERIMAAN_TERMIN',
     });
-  } else {
-    // Fallback default receipts if BKU has no penerimaan yet
-    const t1Nom = school?.termin1Nilai || Math.round((school?.totalAnggaran || 0) * 0.7);
-    const t2Nom = school?.termin2Nilai || Math.round((school?.totalAnggaran || 0) * 0.3);
+  });
 
-    let startIso = `${yearStr}-07-01`;
-    let startSlash = `01/07/${yearStr}`;
-    let startBulan = `Juli ${yearStr}`;
-
-    if (progressWeeks && progressWeeks.length > 0) {
-      const w1 = progressWeeks.find((w) => w.mingguKe === 1) || progressWeeks[0];
-      const resolved = resolveWeekDates(w1, yearStr);
-      startIso = resolved.startDate;
-      startSlash = resolved.startDateSlash;
-      startBulan = resolved.bulan;
-    }
-
-    if (t1Nom > 0) {
+  // 2. Non-cash SIPLah / bank transfer debits
+  plannedKws.forEach((kw) => {
+    const isSiplah =
+      kw.metodeBayar === 'BANK' ||
+      kw.kategoriBiayaPajak === 'Siplah' ||
+      /siplah|daring/i.test(`${kw.noBukti || ''} ${kw.uraian || ''}`);
+    if (isSiplah) {
       records.push({
-        id: 'bkb-init-termin1',
-        tanggal: startSlash,
-        tanggalObj: startIso,
-        bulan: startBulan,
-        uraian: 'Penerimaan Dana Revitalisasi Termin 1 (70%) ke Rekening Bank',
-        noBukti: `BB-01/${yearStr}`,
-        penerimaan: t1Nom,
-        pengeluaran: 0,
-        kategori: 'PENERIMAAN_TERMIN',
-      });
-    }
-
-    if (t2Nom > 0) {
-      let t2Iso = `${yearStr}-09-01`;
-      let t2Slash = `01/09/${yearStr}`;
-      let t2Bulan = `September ${yearStr}`;
-
-      if (progressWeeks && progressWeeks.length > 0) {
-        const w8 = progressWeeks.find((w) => w.mingguKe === 8) || progressWeeks[Math.min(7, progressWeeks.length - 1)];
-        const res8 = resolveWeekDates(w8, yearStr);
-        t2Iso = res8.startDate;
-        t2Slash = res8.startDateSlash;
-        t2Bulan = res8.bulan;
-      }
-
-      records.push({
-        id: 'bkb-init-termin2',
-        tanggal: t2Slash,
-        tanggalObj: t2Iso,
-        bulan: t2Bulan,
-        uraian: 'Penerimaan Dana Revitalisasi Termin 2 (30%) ke Rekening Bank',
-        noBukti: `BB-02/${yearStr}`,
-        penerimaan: t2Nom,
-        pengeluaran: 0,
-        kategori: 'PENERIMAAN_TERMIN',
-      });
-    }
-  }
-
-  // 2. Harmonize BKB SIPLAH debits 1-to-1 with BKU
-  const harmonizedSiplah = harmonizeBkbRecordsWithSiplah([], bkuList, school);
-  harmonizedSiplah.forEach((s) => records.push(s));
-
-  // 3. Dynamic TARIK_TUNAI calculation based on actual cash expenses in BKU
-  const cashExpenses = (bkuList || [])
-    .filter((tx) => {
-      if (tx.jenis === 'PENERIMAAN') return false;
-      const isSiplah =
-        tx.metodeBayar === 'BANK' ||
-        tx.kategoriBiaya === 'Siplah' ||
-        tx.kategoriBiaya === 'SIPLAH' ||
-        /siplah|daring/i.test(`${tx.noBukti || ''} ${tx.uraian || ''} ${tx.kategoriBiaya || ''}`);
-      return !isSiplah;
-    })
-    .sort((a, b) => {
-      const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
-      const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
-      return isoA.localeCompare(isoB);
-    });
-
-  const totalCashNeed = cashExpenses.reduce((s, c) => s + (c.pengeluaran || 0), 0);
-
-  if (totalCashNeed > 0) {
-    let runningCash = 0;
-    let totalWithdrawn = 0;
-    let withdrawalCount = 0;
-
-    cashExpenses.forEach((exp, idx) => {
-      const expNom = exp.pengeluaran || 0;
-
-      if (runningCash < expNom) {
-        const expIso = exp.tanggalObj || parseTxDateToIso(exp.tanggal);
-
-        let targetWindowSum = 0;
-        for (let j = idx; j < cashExpenses.length; j++) {
-          const nextIso = cashExpenses[j].tanggalObj || parseTxDateToIso(cashExpenses[j].tanggal);
-          const diffDays = Math.round(
-            (new Date(nextIso).getTime() - new Date(expIso).getTime()) / (1000 * 3600 * 24)
-          );
-          if (diffDays <= 28) {
-            targetWindowSum += cashExpenses[j].pengeluaran || 0;
-          } else {
-            break;
-          }
-        }
-
-        const neededRaw = Math.max(expNom - runningCash, targetWindowSum - runningCash);
-        let withdrawAmount = Math.ceil(neededRaw / 1000000) * 1000000;
-
-        const maxAllowed = totalCashNeed - totalWithdrawn;
-        withdrawAmount = Math.min(withdrawAmount, maxAllowed > 0 ? maxAllowed : withdrawAmount);
-
-        if (withdrawAmount <= 0 && totalWithdrawn < totalCashNeed) {
-          withdrawAmount = totalCashNeed - totalWithdrawn;
-        }
-
-        if (withdrawAmount > 0) {
-          withdrawalCount++;
-          const padIdx = String(withdrawalCount).padStart(2, '0');
-
-          records.push({
-            id: `bkb-withdraw-${exp.id || withdrawalCount}`,
-            tanggal: exp.tanggal,
-            tanggalObj: expIso,
-            bulan: exp.bulan,
-            uraian: `Penarikan Tunai dari Bank (Tahap ${withdrawalCount}) untuk Kas Tunai Operasional BKT`,
-            noBukti: `BKT-${padIdx}`,
-            penerimaan: 0,
-            pengeluaran: withdrawAmount,
-            kategori: 'TARIK_TUNAI',
-          });
-
-          totalWithdrawn += withdrawAmount;
-          runningCash += withdrawAmount;
-        }
-      }
-
-      runningCash -= expNom;
-    });
-
-    if (totalWithdrawn < totalCashNeed) {
-      const remainingDeficit = totalCashNeed - totalWithdrawn;
-      withdrawalCount++;
-      const lastExp = cashExpenses[cashExpenses.length - 1];
-      records.push({
-        id: `bkb-withdraw-final-${Date.now()}`,
-        tanggal: lastExp?.tanggal || records[0]?.tanggal || `01/07/${yearStr}`,
-        tanggalObj: lastExp?.tanggalObj || records[0]?.tanggalObj || `${yearStr}-07-01`,
-        bulan: lastExp?.bulan || records[0]?.bulan || `Juli ${yearStr}`,
-        uraian: `Penarikan Tunai dari Bank (Tahap ${withdrawalCount}) Pelunasan Belanja Tunai`,
-        noBukti: `BKT-${String(withdrawalCount).padStart(2, '0')}`,
+        id: `bkb-siplah-${kw.id}`,
+        tanggal: kw.tanggal,
+        tanggalObj: parseTxDateToIso(kw.tanggal),
+        bulan: kw.bulan,
+        uraian: kw.uraian.toLowerCase().includes('pembayaran')
+          ? kw.uraian
+          : `Pembayaran Non-Tunai Belanja SIPLah - ${kw.namaToko || 'Mitra SipLah'}`,
+        noBukti: kw.noBukti,
         penerimaan: 0,
-        pengeluaran: remainingDeficit,
-        kategori: 'TARIK_TUNAI',
+        pengeluaran: kw.nominal,
+        kategori: 'SIPLAH',
+        kwitansiIdRef: kw.id,
       });
     }
-  } else {
-    const t1Nom = school?.termin1Nilai || Math.round((school?.totalAnggaran || 0) * 0.7);
-    if (t1Nom > 0) {
-      const firstRec = records[0];
-      records.push({
-        id: 'bkb-withdraw-default-1',
-        tanggal: firstRec?.tanggal || `01/07/${yearStr}`,
-        tanggalObj: firstRec?.tanggalObj || `${yearStr}-07-01`,
-        bulan: firstRec?.bulan || `Juli ${yearStr}`,
-        uraian: 'Penarikan Tunai dari Bank (Tahap 1) untuk Kas Tunai Operasional BKT',
-        noBukti: 'BKT-01',
-        penerimaan: 0,
-        pengeluaran: Math.round(t1Nom * 0.7),
-        kategori: 'TARIK_TUNAI',
-      });
-    }
-  }
+  });
 
-  return calculateRunningBkb(
-    records.sort((a, b) => {
-      const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
-      const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
-      if (isoA !== isoB) return isoA.localeCompare(isoB);
-      if ((a.penerimaan || 0) > 0 && (b.penerimaan || 0) === 0) return -1;
-      if ((b.penerimaan || 0) > 0 && (a.penerimaan || 0) === 0) return 1;
-      return 0;
-    })
-  );
+  // 3. Cash Withdrawals (TARIK_TUNAI)
+  withdrawals.forEach((wth) => {
+    records.push({
+      id: `bkb-wth-${wth.id}`,
+      tanggal: wth.tanggal,
+      tanggalObj: wth.tanggalObj,
+      bulan: wth.bulan,
+      uraian: wth.uraian,
+      noBukti: wth.noBukti, // BKT-01, BKT-02, ...
+      penerimaan: 0,
+      pengeluaran: wth.amount,
+      kategori: 'TARIK_TUNAI',
+    });
+  });
+
+  records.sort((a, b) => {
+    const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
+    const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
+    if (isoA !== isoB) return isoA.localeCompare(isoB);
+    if ((a.penerimaan || 0) > 0 && (b.penerimaan || 0) === 0) return -1;
+    if ((b.penerimaan || 0) > 0 && (a.penerimaan || 0) === 0) return 1;
+    return 0;
+  });
+
+  return calculateRunningBkb(records);
 }
 
 /**
@@ -284,306 +189,119 @@ export function calculateRunningBkb(bkbList: BkbTransaction[]): BkbTransaction[]
 }
 
 /**
- * Menghitung BKT (Buku Kas Tunai) terintegrasi penuh:
- * 1. Uang Masuk (Debet): Berasal dari Kredit / Penarikan tunai yang ada di BKB (Buku Pembantu Kas Bank),
- *    karena asumsinya adalah uang fisik yang sudah ditarik dari bank ke kas bendahara.
- * 2. Uang Keluar (Kredit): Berasal dari belanja riil di BKU yang dibayarkan secara tunai (bukan transfer bank).
- * 3. Saldo Berjalan: Dihitung secara kronologis kumulatif (Pemasukan Penarikan Bank - Pengeluaran Belanja Tunai).
+ * Menghitung BKT (Buku Kas Tunai) terintegrasi penuh dari planCashFlow.
  */
 export function calculateIntegratedBkt(
   bkuList: BkuTransaction[],
-  bkbList: BkbTransaction[] = []
+  bkbList: BkbTransaction[] = [],
+  arg3?: KwitansiDocument[] | SchoolMasterData | any,
+  arg4?: SchoolMasterData | ProjectProgressWeek[] | any,
+  arg5?: ProjectProgressWeek[] | any
 ): BktTransaction[] {
-  const bktItems: BktTransaction[] = [];
+  let kwitansiList: KwitansiDocument[] = [];
+  let school: SchoolMasterData | undefined = undefined;
+  let progressWeeks: ProjectProgressWeek[] = [];
 
-  // 1. Ambil seluruh transaksi Penarikan Tunai dari BKB (Kredit / Pengeluaran di Bank)
-  const hasBkbWithdrawals = bkbList.some((b) => (b.pengeluaran || 0) > 0);
-
-  if (hasBkbWithdrawals) {
-    bkbList.forEach((bkbTx, idx) => {
-      if ((bkbTx.pengeluaran || 0) > 0) {
-        // Lewati biaya administrasi bank & belanja non-tunai SIPLah (karena SIPLah langsung transfer dari bank ke toko, bukan tarik tunai ke bendahara)
-        const isNonCashBankDebit =
-          bkbTx.kategori === 'BIAYA_ADMIN' ||
-          bkbTx.kategori === 'SIPLAH' ||
-          bkbTx.kategori === 'BELANJA_NON_TUNAI' ||
-          /siplah|non-tunai|non tunai|daring/i.test(`${bkbTx.kategori || ''} ${bkbTx.uraian || ''} ${bkbTx.noBukti || ''}`);
-
-        if (isNonCashBankDebit) return;
-
-        bktItems.push({
-          id: `bkt-inflow-${bkbTx.id || idx}`,
-          tanggal: bkbTx.tanggal,
-          tanggalObj: bkbTx.tanggalObj || parseTxDateToIso(bkbTx.tanggal),
-          bulan: bkbTx.bulan,
-          uraian: bkbTx.uraian.toLowerCase().includes('penarikan') || bkbTx.uraian.toLowerCase().includes('tarik')
-            ? bkbTx.uraian
-            : `Penarikan Tunai dari Rekening Bank (${bkbTx.uraian})`,
-          noBukti: bkbTx.noBukti || `BKT-${String(idx + 1).padStart(2, '0')}`,
-          pemasukan: bkbTx.pengeluaran,
-          pengeluaran: 0,
-          saldo: 0,
-          kategoriBiaya: 'Penerimaan',
-          metodeBayar: 'TUNAI',
-        });
-      }
-    });
-  } else {
-    // Fallback darurat jika BKB belum diisi penarikan tunai sama sekali:
-    // Gunakan transaksi penerimaan bantuan BKU yang diubah menjadi penarikan operasional tunai
-    bkuList.forEach((item, idx) => {
-      if (item.jenis === 'PENERIMAAN') {
-        bktItems.push({
-          id: `bkt-inflow-${item.id || idx}`,
-          tanggal: item.tanggal,
-          tanggalObj: item.tanggalObj || parseTxDateToIso(item.tanggal),
-          bulan: item.bulan,
-          uraian: `Penarikan Tunai dari Bank untuk Kas Operasional (${item.uraian})`,
-          noBukti: item.noBukti ? `BKT-${item.noBukti}` : 'BKT-01',
-          pemasukan: item.penerimaan,
-          pengeluaran: 0,
-          saldo: 0,
-          kategoriBiaya: 'Penerimaan',
-          metodeBayar: 'TUNAI',
-        });
-      }
-    });
+  if (arg3 && typeof arg3 === 'object' && !Array.isArray(arg3) && ('totalAnggaran' in arg3 || 'namaSekolah' in arg3)) {
+    school = arg3 as SchoolMasterData;
+    progressWeeks = Array.isArray(arg4) ? arg4 : [];
+    kwitansiList = [];
+  } else if (Array.isArray(arg3)) {
+    kwitansiList = arg3;
+    school = arg4 as SchoolMasterData;
+    progressWeeks = arg5 || [];
   }
 
-  // 2. Ambil seluruh transaksi Pengeluaran Belanja Tunai dari BKU
-  bkuList.forEach((item) => {
-    // Lewati transaksi penerimaan BKU karena dana bantuan masuk ke Bank (BKB), bukan kas fisik langsung
-    if (item.jenis === 'PENERIMAAN') {
-      return;
-    }
+  let kws = kwitansiList;
+  if (!kws || !Array.isArray(kws) || kws.length === 0) {
+    kws = (bkuList || [])
+      .filter((tx) => tx.jenis === 'PENGELUARAN' && (tx.pengeluaran || 0) > 0)
+      .map((tx) => ({
+        id: tx.kwitansiIdRef || tx.id,
+        noBukti: tx.noBukti || '-',
+        tipe: 'MATERIAL' as const,
+        tanggal: tx.tanggal,
+        tanggalFormatted: tx.tanggal,
+        bulan: tx.bulan,
+        uraian: tx.uraian,
+        penerimaNama: 'Penyedia',
+        penerimaPekerjaan: 'Penyedia',
+        penerimaAlamat: '',
+        nominal: tx.pengeluaran || 0,
+        metodeBayar: tx.metodeBayar || (/siplah/i.test(`${tx.noBukti} ${tx.uraian}`) ? 'BANK' : 'TUNAI'),
+        kategoriBiayaPajak: tx.kategoriBiaya,
+      }));
+  }
 
-    // Lewati jika transaksi ditandai transfer bank langsung non-tunai atau belanja SIPLah Daring
-    const isNonCashOrSiplah =
-      item.metodeBayar === 'BANK' ||
-      item.kategoriBiaya === 'Siplah' ||
-      item.kategoriBiaya === 'SIPLAH' ||
-      /siplah|daring/i.test(`${item.noBukti || ''} ${item.uraian || ''} ${item.kategoriBiaya || ''}`);
+  const planResult = planCashFlow(kws, school as any, progressWeeks);
+  const plannedKws = planResult.plannedKwitansiList;
+  const withdrawals = planResult.withdrawals;
 
-    if (isNonCashOrSiplah) {
-      return;
-    }
+  const bktItems: BktTransaction[] = [];
 
+  // 1. Pemasukan Kas Tunai dari Penarikan Bank (withdrawals)
+  withdrawals.forEach((wth) => {
     bktItems.push({
-      id: `bkt-${item.id}`,
-      tanggal: item.tanggal, // BKU source provides the updated tanggal
-      tanggalObj: item.tanggalObj || parseTxDateToIso(item.tanggal), // BKU source provides updated tanggalObj
-      bulan: item.bulan,
-      uraian: item.uraian,
-      noBukti: item.noBukti,
-      pemasukan: 0,
-      pengeluaran: item.pengeluaran,
+      id: `bkt-inflow-${wth.id}`,
+      tanggal: wth.tanggal,
+      tanggalObj: wth.tanggalObj,
+      bulan: wth.bulan,
+      uraian: wth.uraian,
+      noBukti: wth.noBukti, // BKT-01, BKT-02, ...
+      pemasukan: wth.amount,
+      pengeluaran: 0,
       saldo: 0,
-      kategoriBiaya: item.kategoriBiaya,
-      kwitansiIdRef: item.kwitansiIdRef,
+      kategoriBiaya: 'Penerimaan',
       metodeBayar: 'TUNAI',
-      isLocked: item.isLocked,
-      isManualDate: item.isManualDate,
-      isManual: item.isManual,
     });
   });
 
-  // 3. Ekstraksi daftar seluruh penarikan bank (inflows) yang terurut berdasarkan tanggal
-  const bankWithdrawals = bktItems
-    .filter((t) => (t.pemasukan || 0) > 0)
-    .map((t) => ({
-      iso: t.tanggalObj || parseTxDateToIso(t.tanggal),
-      tanggal: t.tanggal,
-      bulan: t.bulan,
-      nominal: t.pemasukan,
-    }))
-    .sort((a, b) => a.iso.localeCompare(b.iso));
+  // 2. Pengeluaran Belanja Tunai dari Kwitansi Tunai
+  plannedKws.forEach((kw) => {
+    const isBank =
+      kw.metodeBayar === 'BANK' ||
+      kw.kategoriBiayaPajak === 'Siplah' ||
+      /siplah|daring/i.test(`${kw.noBukti || ''} ${kw.uraian || ''}`);
 
-  // 4. Urutkan transaksi awal secara kronologis (pemasukan didahulukan jika pada tanggal yang sama)
-  const initialSorted = [...bktItems].sort((a, b) => {
+    if (!isBank) {
+      bktItems.push({
+        id: `bkt-kw-${kw.id}`,
+        tanggal: kw.tanggal,
+        tanggalObj: parseTxDateToIso(kw.tanggal),
+        bulan: kw.bulan,
+        uraian: kw.uraian,
+        noBukti: kw.noBukti,
+        pemasukan: 0,
+        pengeluaran: kw.nominal,
+        saldo: 0,
+        kategoriBiaya: kw.kategoriBiayaPajak,
+        kwitansiIdRef: kw.id,
+        metodeBayar: 'TUNAI',
+      });
+    }
+  });
+
+  // 3. Chronological sort (Pemasukan before Pengeluaran on same date)
+  bktItems.sort((a, b) => {
     const isoA = a.tanggalObj || parseTxDateToIso(a.tanggal);
     const isoB = b.tanggalObj || parseTxDateToIso(b.tanggal);
-    if (isoA !== isoB) {
-      return isoA.localeCompare(isoB);
-    }
+    if (isoA !== isoB) return isoA.localeCompare(isoB);
     if ((a.pemasukan || 0) > 0 && (b.pemasukan || 0) === 0) return -1;
     if ((b.pemasukan || 0) > 0 && (a.pemasukan || 0) === 0) return 1;
     return 0;
   });
 
-  // 5. Intelligent Anti-Minus Cash-Cap Quantity Splitter
-  // Menjamin saldo kas BKT TIDAK PERNAH MINUS (< 0).
-  // Jika pengeluaran melebihi sisa kas tunai sebelum ada penarikan bank berikutnya:
-  // - Tahap 1: Dibayarkan sebesar kas yang tersedia (saldo menjadi Rp 0, tidak minus).
-  // - Tahap 2: Sisa pembayaran dialokasikan pada tanggal penarikan bank berikutnya saat dana kas baru masuk.
-  const queue: BktTransaction[] = [...initialSorted];
-  const finalBktItems: BktTransaction[] = [];
+  // 4. Compute running balance
   let runningCash = 0;
-  let safetyLoop = 0;
-  const maxIterations = queue.length * 5;
-
-  const insertChronologically = (q: BktTransaction[], item: BktTransaction) => {
-    const itemIso = item.tanggalObj || parseTxDateToIso(item.tanggal);
-    const idx = q.findIndex((existing) => {
-      const exIso = existing.tanggalObj || parseTxDateToIso(existing.tanggal);
-      if (exIso > itemIso) return true;
-      if (exIso === itemIso && (existing.pemasukan || 0) === 0 && (item.pemasukan || 0) > 0) return true;
-      return false;
-    });
-    if (idx === -1) {
-      q.push(item);
-    } else {
-      q.splice(idx, 0, item);
-    }
-  };
-
-  while (queue.length > 0 && safetyLoop < maxIterations) {
-    safetyLoop++;
-    const curr = queue.shift()!;
-
-    // A. Pemasukan Kas Tunai (Penarikan Bank)
-    if ((curr.pemasukan || 0) > 0) {
-      runningCash += curr.pemasukan;
-      finalBktItems.push({
-        ...curr,
-        saldo: runningCash,
-      });
-      continue;
-    }
-
-    // B. Pengeluaran Belanja Tunai
-    const expenseNominal = curr.pengeluaran || 0;
-    if (expenseNominal <= 0) {
-      finalBktItems.push({
-        ...curr,
-        saldo: runningCash,
-      });
-      continue;
-    }
-
-    // Jika saldo kas saat ini mencukupi, bayar penuh
-    if (expenseNominal <= runningCash) {
-      runningCash -= expenseNominal;
-      finalBktItems.push({
-        ...curr,
-        saldo: runningCash,
-      });
-      continue;
-    }
-
-    // KAS TIDAK MENCUKUPI (Potensi Minus):
-    // Cari tanggal penarikan bank berikutnya setelah tanggal transaksi ini
-    const currIso = curr.tanggalObj || parseTxDateToIso(curr.tanggal);
-    const nextWithdrawal = bankWithdrawals.find((w) => w.iso > currIso);
-
-    // Proteksi Pembayaran Pasti (Konsultan Perencana, Pengawas, Pengelola SPJ, Belanja SMKK, Belanja SipLah, Belanja Cetak, Upah):
-    // Pembayaran pasti ini TIDAK BOLEH dipecah/di-split sebagian (wajib utuh).
-    // Hanya pembelian bahan material yang diperbolehkan untuk di-split proporsional.
-    const isFixedOrNonMaterial = isFixedNonSplitPayment(curr) || !isMaterialOnlyPurchase(curr);
-
-    if (isFixedOrNonMaterial) {
-      // Jika ada penarikan kas bank berikutnya, mundurkan transaksi pembayaran pasti ini secara UTUH
-      if (nextWithdrawal) {
-        const deferredTx: BktTransaction = {
-          ...curr,
-          tanggal: nextWithdrawal.tanggal,
-          tanggalObj: nextWithdrawal.iso,
-          bulan: nextWithdrawal.bulan,
-        };
-        insertChronologically(queue, deferredTx);
-        continue;
-      }
-      // Jika tidak ada penarikan bank lagi, catat utuh tanpa split
-      runningCash -= expenseNominal;
-      finalBktItems.push({
-        ...curr,
-        saldo: runningCash,
-      });
-      continue;
-    }
-
-    // Kasus 1: Masih ada sisa kas tunai > 0 (HANYA UNTUK BELANJA BAHAN MATERIAL)
-    if (runningCash > 0) {
-      const part1Nominal = runningCash;
-      const part2Nominal = expenseNominal - part1Nominal;
-
-      // Catat Bagian 1 sesuai sisa kas yang tersedia (Saldo kas pas Rp 0, tidak minus)
-      runningCash = 0;
-      finalBktItems.push({
-        ...curr,
-        id: `${curr.id}-p1`,
-        uraian: cleanNaturalUraian(curr.uraian),
-        pengeluaran: part1Nominal,
-        saldo: 0,
-      });
-
-      // Jadwalkan Bagian 2 pada tanggal penarikan bank berikutnya
-      const part2Date = nextWithdrawal ? nextWithdrawal.tanggal : curr.tanggal;
-      const part2Iso = nextWithdrawal ? nextWithdrawal.iso : currIso;
-      const part2Bulan = nextWithdrawal ? nextWithdrawal.bulan : curr.bulan;
-
-      const part2Tx: BktTransaction = {
-        ...curr,
-        id: `${curr.id}-p2`,
-        tanggal: part2Date,
-        tanggalObj: part2Iso,
-        bulan: part2Bulan,
-        uraian: cleanNaturalUraian(curr.uraian),
-        noBukti: (curr.noBukti || '').replace(/-B$/, '').trim(),
-        pengeluaran: part2Nominal,
-        pemasukan: 0,
-        saldo: 0,
-      };
-
-      insertChronologically(queue, part2Tx);
-      continue;
-    }
-
-    // Kasus 2: Kas tunai saat ini sudah Rp 0:
-    // Tunda pembayaran transaksi ini ke tanggal penarikan bank berikutnya
-    if (nextWithdrawal) {
-      const deferredTx: BktTransaction = {
-        ...curr,
-        tanggal: nextWithdrawal.tanggal,
-        tanggalObj: nextWithdrawal.iso,
-        bulan: nextWithdrawal.bulan,
-      };
-      insertChronologically(queue, deferredTx);
-      continue;
-    }
-
-    // Fallback darurat jika tidak ada penarikan bank lagi
-    runningCash -= expenseNominal;
-    finalBktItems.push({
-      ...curr,
-      uraian: cleanNaturalUraian(curr.uraian),
-      noBukti: (curr.noBukti || '').replace(/-B$/, '').trim(),
-      saldo: runningCash,
-    });
-  }
-
-  // Final Reconciliation Cleanup:
-  let runBal = 0;
-  const recomputed = finalBktItems.map((tx) => {
-    runBal = runBal + (tx.pemasukan || 0) - (tx.pengeluaran || 0);
+  const finalBktItems = bktItems.map((tx) => {
+    runningCash = runningCash + (tx.pemasukan || 0) - (tx.pengeluaran || 0);
     return {
       ...tx,
-      saldo: runBal,
+      saldo: runningCash,
     };
   });
 
-  if (recomputed.length > 0) {
-    const lastIdx = recomputed.length - 1;
-    if (Math.abs(recomputed[lastIdx].saldo || 0) <= 1000) {
-      recomputed[lastIdx].saldo = 0;
-    }
-  }
-
-  const targetYear =
-    recomputed.find((b) => b.noBukti)?.noBukti?.match(/\b(20\d\d)\b/)?.[1] ||
-    recomputed.find((b) => b.tanggalObj || b.tanggal)?.tanggalObj?.slice(0, 4) ||
-    '2026';
-
-  return renumberMaterialTransactionsChronologically(recomputed, targetYear);
+  return finalBktItems;
 }
 
 /**
@@ -1006,6 +724,11 @@ export function harmonizeBkbRecordsWithSiplah(
   const result: BkbTransaction[] = [];
   const bkbArray = Array.isArray(bkbRecords) ? bkbRecords : [];
 
+  const bkuArray = Array.isArray(bkuList) ? bkuList : [];
+  if (bkuArray.length === 0) {
+    return bkbArray;
+  }
+
   // 1. Keep non-SIPLAH BKB transactions (PENERIMAAN_TERMIN, TARIK_TUNAI, BIAYA_ADMIN, BELANJA_NON_TUNAI)
   bkbArray.forEach((bkb) => {
     if (bkb.kategori !== 'SIPLAH') {
@@ -1014,7 +737,6 @@ export function harmonizeBkbRecordsWithSiplah(
   });
 
   // 2. Find all SIPLAH BKU transactions
-  const bkuArray = Array.isArray(bkuList) ? bkuList : [];
   const siplahBkuTxs = bkuArray.filter((tx) => {
     if (tx.jenis === 'PENERIMAAN') return false;
     return (
@@ -1074,8 +796,32 @@ export function harmonizeBkbRecordsWithSiplah(
  * Automatically upgrades older backup JSON states to adopt the new BKT/BKB calculation structure
  * and ensures all necessary lists (bkbRecords, kwitansiList, taxRecords, etc.) are present and valid.
  */
-export function migrateAndTransformAppState(restored: any): any {
-  if (!restored || typeof restored !== 'object') return restored;
+function convertNumbersDeep(obj: any): any {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'number') return obj;
+  if (typeof obj === 'string') {
+    if (/^-?\d+(\.\d+)?$/.test(obj.trim())) {
+      const num = Number(obj);
+      if (!isNaN(num)) return num;
+    }
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(convertNumbersDeep);
+  }
+  if (typeof obj === 'object') {
+    const res: any = {};
+    for (const key of Object.keys(obj)) {
+      res[key] = convertNumbersDeep(obj[key]);
+    }
+    return res;
+  }
+  return obj;
+}
+
+export function migrateAndTransformAppState(restoredInput: any): any {
+  if (!restoredInput || typeof restoredInput !== 'object') return restoredInput;
+  const restored = convertNumbersDeep(restoredInput);
 
   const school = restored.school || {};
   const progressWeeks = Array.isArray(restored.progressWeeks) ? restored.progressWeeks : [];

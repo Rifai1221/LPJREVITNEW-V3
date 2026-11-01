@@ -25,6 +25,7 @@ import {
   isFixedNonSplitPayment,
   extractWeekNumberFromKwitansi,
   getDateInWeek,
+  alignAndShiftTransactionsForCashflow,
 } from './splitTransactionService';
 import {
   summarizeManualKwitansiSpending,
@@ -39,6 +40,7 @@ import {
   consolidateAndStandardizeReceiptItems,
   getReconstitutedKusenPintuUnitItems,
   renumberKwitansiChronologically,
+  toCommercialPrice,
 } from './kwitansiGenerator';
 import {
   resolveStoreFromItemTags,
@@ -535,32 +537,19 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
         });
       });
     } else {
-      const matchedRpd = rpdItems.filter(
-        (it) =>
-          !/papan nama|smkk|k3|helm|rompi/i.test(it.uraian) &&
-          (it.uraian.toLowerCase().includes(div.uraian.toLowerCase()) ||
-          div.uraian.toLowerCase().includes(it.uraian.toLowerCase()) ||
-          it.kategori === 'BAHAN_BARU' ||
-          it.kategori === 'BAHAN_REHAB')
-      );
-
-      const rpdCandidates = matchedRpd.slice(0, 3);
-      if (rpdCandidates.length > 0) {
-        const rawTokoItems = rpdCandidates.map((it) => {
-          const volProp = Math.max(0.1, Math.round(progressRatio * it.volume100 * 100) / 100);
-          return {
-            namaBarang: it.uraian,
-            volume: volProp,
-            satuan: it.satuan,
-            hargaSatuan: it.hargaSatuan,
-            jumlah: Math.round(volProp * it.hargaSatuan),
-          };
-        });
-
+      const divBudget = Math.round((progressRatio * ((div as any).bobot || div.bobotTotal || 1) * (school?.totalAnggaran || 0)) / 100);
+      if (divBudget > 0) {
+        const decomposed = decomposeRealisticBahanAndUpah(div.uraian, divBudget, 0, realSchoolData, workers as any);
         const isPerabot = div.kode === 'XII' || /perabot|mebeler|meja|kursi/i.test(div.uraian);
-        rawTokoItems.forEach((ti) => {
+        decomposed.bahanItems.forEach((ti) => {
+          const v = Math.max(1, Math.round(ti.volume));
+          const p = toCommercialPrice(ti.hargaSatuan);
           weeklyAllBahanItems.push({
-            ...ti,
+            namaBarang: ti.namaBarang,
+            volume: v,
+            satuan: ti.satuan,
+            hargaSatuan: p,
+            jumlah: v * p,
             isPerabot,
             divisionName: div.uraian,
           });
@@ -1123,6 +1112,7 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
     totalUpah: totCalculatedUpah,
     bobotMingguIni: weekObj.bobotRealisasi || 0,
     bobotKumulatif: weekObj.bobotRealisasi || 0,
+    mode: 'HARIAN',
   };
 
   if (wageIdx >= 0) {
@@ -1141,7 +1131,7 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
     tanggal: dateEndStr,
     tanggalFormatted: formattedDateEnd,
     bulan: bulan,
-    uraian: `Pembayaran Lunas Biaya Upah Borongan Pekerja Fisik Minggu Ke-${targetWeek} (${formattedDateStart} s.d ${formattedDateEnd}), Sesuai Prestasi Kemajuan Fisik Revitalisasi ${school.namaSekolah}, Tahun ${yearStr}, Daftar Terlampir.`,
+    uraian: `Pembayaran Lunas Biaya Upah Harian Pekerja Fisik Minggu Ke-${targetWeek} (${formattedDateStart} s.d ${formattedDateEnd}), Sesuai Daftar Hadir Kehadiran Harian Revitalisasi ${school.namaSekolah}, Tahun ${yearStr}, Daftar Terlampir.`,
     penerimaNama: defaultMandorNama,
     penerimaPekerjaan: defaultMandorJabatan,
     penerimaAlamat: school.kabKota,
@@ -1308,10 +1298,16 @@ export function generateWeeklyTransactionsFromProgressAndRealData({
   }
 
   const finalizedKwitansi = newKwitansiList.map((kw) => {
-    if (kw.items && kw.items.length > 0 && kw.tipe !== 'UPAH') {
+    if (kw.items && kw.items.length > 0) {
+      if (kw.tipe === 'UPAH') {
+        return {
+          ...kw,
+          items: consolidateAndStandardizeReceiptItems(kw.items, kw.nominal),
+        };
+      }
       return {
         ...kw,
-        items: normalizeMaterialItems(kw.items),
+        items: normalizeMaterialItems(kw.items, kw.nominal),
       };
     }
     return kw;
@@ -2207,23 +2203,21 @@ export function generateRealisticMultiWeekTransactions({
           }
         });
       } else {
-        const matchedRpd = rpdItems.filter(
-          (it) =>
-            !/papan nama|smkk|k3/i.test(it.uraian) &&
-            (it.uraian.toLowerCase().includes(divData.uraian.toLowerCase()) ||
-            divData.uraian.toLowerCase().includes(it.uraian.toLowerCase()) ||
-            it.kategori === 'BAHAN_BARU')
-        );
-        matchedRpd.slice(0, 3).forEach((it) => {
-          const volProp = Math.max(0.1, Math.round(progressRatio * it.volume100 * 100) / 100);
-          batchBahanItems.push({
-            namaBarang: it.uraian,
-            volume: volProp,
-            satuan: it.satuan,
-            hargaSatuan: it.hargaSatuan,
-            jumlah: Math.round(volProp * it.hargaSatuan),
+        const divBudget = Math.round((progressRatio * ((divData as any).bobot || 1) * (school?.totalAnggaran || 0)) / 100);
+        if (divBudget > 0) {
+          const decomposed = decomposeRealisticBahanAndUpah(divData.uraian, divBudget, 0, realSchoolData, workers as any);
+          decomposed.bahanItems.forEach((it) => {
+            const v = Math.max(1, Math.round(it.volume));
+            const p = toCommercialPrice(it.hargaSatuan);
+            batchBahanItems.push({
+              namaBarang: it.namaBarang,
+              volume: v,
+              satuan: it.satuan,
+              hargaSatuan: p,
+              jumlah: v * p,
+            });
           });
-        });
+        }
       }
     });
 
@@ -2484,28 +2478,7 @@ export function balanceFinalMaterialKwitansiToBudget(
     const deduct = Math.min(kw.nominal, remainingDiff);
     const newNominal = Math.max(0, kw.nominal - deduct);
 
-    const items = [...(kw.items || [])];
-    if (items.length > 0) {
-      const sortedItemIndices = items
-        .map((item, idx) => ({ idx, jumlah: item.jumlah || 0 }))
-        .sort((a, b) => b.jumlah - a.jumlah);
-
-      let itemDeductRemaining = deduct;
-      for (const itemMeta of sortedItemIndices) {
-        if (itemDeductRemaining <= 0) break;
-        const curItem = items[itemMeta.idx];
-        const curDeduct = Math.min(curItem.jumlah || 0, itemDeductRemaining);
-        const newJml = Math.max(0, (curItem.jumlah || 0) - curDeduct);
-        const newVol = curItem.hargaSatuan > 0 ? Math.round((newJml / curItem.hargaSatuan) * 100) / 100 : curItem.volume;
-        items[itemMeta.idx] = {
-          ...curItem,
-          jumlah: newJml,
-          volume: newVol > 0 ? newVol : 1,
-        };
-        itemDeductRemaining -= curDeduct;
-      }
-    }
-
+    const standardizedItems = consolidateAndStandardizeReceiptItems(kw.items || [], newNominal);
     const isPpn = Boolean(kw.isPpn);
     const isPph22 = Boolean(kw.isPph22);
     const ppnAmount = isPpn ? Math.round((newNominal * 11) / 111) : 0;
@@ -2514,7 +2487,7 @@ export function balanceFinalMaterialKwitansiToBudget(
     resultList[kwIdx] = {
       ...kw,
       nominal: newNominal,
-      items,
+      items: standardizedItems,
       ppnAmount,
       pph22Amount,
     };
@@ -2785,16 +2758,9 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
       if (items.length === 0) {
         return { ...kw, nominal: targetKwNominal };
       }
-      const itemWeights = items.map((it) => Math.max(1, it.jumlah || 0));
-      const newItemNominals = distributeRupiah(targetKwNominal, itemWeights);
-      const scaledItems = items.map((it, iIdx) => {
-        const itemJml = newItemNominals[iIdx];
-        const hSat = it.hargaSatuan && it.hargaSatuan > 0 ? it.hargaSatuan : 1;
-        const newVol = Math.max(0.01, Math.round((itemJml / hSat) * 100) / 100);
-        return { ...it, volume: newVol, jumlah: itemJml };
-      });
-      const newNom = scaledItems.reduce((s, i) => s + i.jumlah, 0);
-      return { ...kw, items: scaledItems, nominal: newNom };
+      const standardized = consolidateAndStandardizeReceiptItems(items, targetKwNominal);
+      const newNom = standardized.reduce((s, i) => s + i.jumlah, 0);
+      return { ...kw, items: standardized, nominal: newNom };
     });
   } else {
     scaledActiveMatKw = activeWeeklyMatKw;
@@ -2818,6 +2784,15 @@ export function calibrateAllTransactionsToCurrentProgress(params: {
     );
     balancedKwitansi = balRes.balancedKwitansi;
   }
+
+  // Sesuai Invarian 3: Selaraskan transaksi dengan arus kas Termin 1 & 2
+  const shiftRes = alignAndShiftTransactionsForCashflow({
+    kwitansiList: balancedKwitansi,
+    school,
+    progressWeeks,
+    termin2DisbursementDate: (school as any)?.termin2Tanggal || (school as any)?.tanggalTermin2,
+  });
+  balancedKwitansi = shiftRes.shiftedKwitansiList;
 
   const totalExpenditure = balancedKwitansi.reduce((s, k) => s + (k.nominal || 0), 0);
 

@@ -3,6 +3,7 @@ import {
   WeeklyWageReport,
   ProjectProgressWeek,
 } from '../../types';
+import { parseTxDateToIso, resolveWeekDates } from '../../utils/monthHelper';
 
 /**
  * Menghitung Cadangan Upah Terkunci (Labor Reserve) untuk minggu berjalan.
@@ -17,33 +18,235 @@ export function calculateLockedLaborReserve(
 }
 
 /**
- * Memecah kwitansi material jika melebihi kas yang tersedia, 
- * dengan tetap memprioritaskan cadangan upah tukang.
+ * Memastikan kwitansi material TIDAK dipecah menjadi dua baris/kwitansi (Invarian 3).
+ * Bila kas tidak cukup, pembayaran digeser utuh ke minggu berikutnya (bukan di-split).
  */
 export function splitMaterialPurchases(
   kw: KwitansiDocument,
   availableCash: number,
   laborReserve: number
 ): KwitansiDocument[] {
-  const netAvailableForMaterial = Math.max(0, availableCash - laborReserve);
-  
-  // Jika cukup, tidak perlu pecah
-  if (kw.nominal <= netAvailableForMaterial || kw.tipe !== 'MATERIAL') {
-    return [kw];
+  // Sesuai Invarian 3: Transaksi TIDAK BOLEH di-split ke -part1/-part2.
+  // Seluruh nominal kwitansi dipertahankan utuh.
+  return [kw];
+}
+
+export interface CashflowShiftDetail {
+  id: string;
+  noBukti?: string;
+  uraian: string;
+  originalDate: string;
+  originalWeek: number;
+  newDate: string;
+  newWeek: number;
+  nominal: number;
+}
+
+export interface CashflowShiftResult {
+  shiftedKwitansiList: KwitansiDocument[];
+  hasShiftedTransactions: boolean;
+  shiftedCount: number;
+  exceedsUsagePeriodWarning: boolean;
+  usagePeriodLimit?: string;
+  shiftedTransactionDetails: CashflowShiftDetail[];
+}
+
+/**
+ * Invarian 3: Menyelaraskan kwitansi dengan arus kas (cashflow) bank Termin 1 & Termin 2.
+ * Jika pengeluaran pada tanggal tertentu melebihi dana Termin 1 yang tersedia di bank,
+ * kwitansi tersebut DIGESER UTUH ke minggu saat Termin 2 cair (tanpa memotong/memecah nominal).
+ * Tanggal pada kwitansi diperbarui dan menjadi satu-satunya sumber kebenaran bagi BKU, BKT, dan BKB.
+ */
+export function alignAndShiftTransactionsForCashflow(params: {
+  kwitansiList: KwitansiDocument[];
+  school?: any;
+  progressWeeks?: ProjectProgressWeek[];
+  termin2DisbursementDate?: string;
+  termin2WeekNumber?: number;
+}): CashflowShiftResult {
+  const { kwitansiList, school, progressWeeks = [], termin2DisbursementDate, termin2WeekNumber } = params;
+  if (!kwitansiList || kwitansiList.length === 0) {
+    return {
+      shiftedKwitansiList: [],
+      hasShiftedTransactions: false,
+      shiftedCount: 0,
+      exceedsUsagePeriodWarning: false,
+      shiftedTransactionDetails: [],
+    };
   }
 
-  // Pecah proporsional
-  const ratio = netAvailableForMaterial / kw.nominal;
-  const kw1Nominal = Math.floor(kw.nominal * ratio);
-  const kw2Nominal = kw.nominal - kw1Nominal;
+  const yearStr = school?.tahunAnggaran?.trim() || '2026';
+  const totalAnggaran = school?.totalAnggaran || 0;
+  const t1Persen = school?.termin1Persen ?? 70;
+  const termin1Nilai = school?.termin1Nilai ?? Math.round((totalAnggaran * t1Persen) / 100);
 
-  const kw1Items = kw.items.map(item => ({...item, volume: item.volume * ratio, jumlah: item.jumlah * ratio}));
-  const kw2Items = kw.items.map(item => ({...item, volume: item.volume * (1 - ratio), jumlah: item.jumlah * (1 - ratio)}));
+  // Tentukan tanggal pencairan Termin 2 dalam format ISO (YYYY-MM-DD)
+  let t2Iso = termin2DisbursementDate ? parseTxDateToIso(termin2DisbursementDate) : '';
+  let t2WeekNum = termin2WeekNumber;
 
-  return [
-    { ...kw, id: `${kw.id}-part1`, nominal: kw1Nominal, items: kw1Items },
-    { ...kw, id: `${kw.id}-part2`, nominal: kw2Nominal, items: kw2Items, tanggal: 'DITUNDA_SAMPAI_KAS_ADA' }
-  ];
+  if (!t2Iso && school?.termin2Tanggal) {
+    t2Iso = parseTxDateToIso(school.termin2Tanggal);
+  }
+
+  if (!t2WeekNum && progressWeeks.length > 0) {
+    if (t2Iso) {
+      const foundW = progressWeeks.find((w) => {
+        const resolved = resolveWeekDates(w, yearStr);
+        return t2Iso! >= resolved.startDate && t2Iso! <= resolved.endDate;
+      });
+      if (foundW) t2WeekNum = foundW.mingguKe;
+    }
+    if (!t2WeekNum) {
+      // Cari minggu di mana progres kumulatif mendekati atau melewati persentase Termin 1 (misal 70%)
+      const thresholdBobot = Math.min(70, t1Persen);
+      const foundProgressWeek = progressWeeks.find(
+        (w) => (w.cumulativeProgress ?? (w as any).progressKumulatif ?? 0) >= thresholdBobot
+      );
+      if (foundProgressWeek) {
+        t2WeekNum = foundProgressWeek.mingguKe;
+      } else {
+        // Fallback wajar: minggu ke-8 atau pertengahan jadwal
+        t2WeekNum = Math.min(progressWeeks.length, Math.max(2, Math.floor(progressWeeks.length * 0.55)));
+      }
+    }
+  }
+
+  if (!t2Iso && t2WeekNum && progressWeeks.length > 0) {
+    const t2W = progressWeeks.find((w) => w.mingguKe === t2WeekNum) || progressWeeks[Math.min(t2WeekNum - 1, progressWeeks.length - 1)];
+    if (t2W) {
+      const resolvedT2W = resolveWeekDates(t2W, yearStr);
+      const resW = getDateInWeek(resolvedT2W.startDate, 1); // Selasa minggu Termin 2
+      t2Iso = resW.dateIso;
+    }
+  }
+
+  if (!t2Iso) {
+    t2Iso = `${yearStr}-09-01`;
+  }
+  if (!t2WeekNum) {
+    t2WeekNum = 8;
+  }
+
+  // Tentukan batas akhir periode penggunaan dana
+  let usageEndIso = '';
+  if (school?.periodePenggunaan) {
+    const matchDates = school.periodePenggunaan.match(/(\d{1,2}\s+[A-Za-z]+\s+\d{4}|\d{4}-\d{2}-\d{2})/g);
+    if (matchDates && matchDates.length >= 2) {
+      usageEndIso = parseTxDateToIso(matchDates[1]);
+    } else if (matchDates && matchDates.length === 1) {
+      usageEndIso = parseTxDateToIso(matchDates[0]);
+    }
+  }
+  if (!usageEndIso && progressWeeks.length > 0) {
+    const lastW = progressWeeks[progressWeeks.length - 1];
+    const resolvedLast = resolveWeekDates(lastW, yearStr);
+    usageEndIso = resolvedLast.endDate || resolvedLast.startDate;
+  }
+
+  const shiftDetails: CashflowShiftDetail[] = [];
+  let runningT1Expenditure = 0;
+  let exceedsUsagePeriodWarning = false;
+
+  // Urutkan kwitansi berdasarkan minggu & tanggal asli
+  const sortedKw = [...kwitansiList].sort((a, b) => {
+    const wA = extractWeekNumberFromKwitansi(a, progressWeeks, yearStr) ?? 1;
+    const wB = extractWeekNumberFromKwitansi(b, progressWeeks, yearStr) ?? 1;
+    if (wA !== wB) return wA - wB;
+    const isoA = parseTxDateToIso(a.tanggal);
+    const isoB = parseTxDateToIso(b.tanggal);
+    return isoA.localeCompare(isoB);
+  });
+
+  const shiftedKwitansiList: KwitansiDocument[] = [];
+
+  for (const kw of sortedKw) {
+    const kwNominal = Math.round(kw.nominal || 0);
+    const origIso = parseTxDateToIso(kw.tanggal);
+    const origWeek = extractWeekNumberFromKwitansi(kw, progressWeeks, yearStr) ?? 1;
+
+    const isBeforeT2 = origIso < t2Iso;
+
+    if (isBeforeT2) {
+      if (runningT1Expenditure + kwNominal <= termin1Nilai) {
+        // Cukup dari Termin 1, tidak perlu digeser
+        runningT1Expenditure += kwNominal;
+        shiftedKwitansiList.push(kw);
+        continue;
+      }
+
+      // Dana Termin 1 TIDAK CUKUP.
+      // Sesuai Invarian 3: Transaksi DIGESER UTUH ke minggu Termin 2 cair
+      let targetWeekNum = t2WeekNum;
+      let targetWeekObj = progressWeeks.find((w) => w.mingguKe === targetWeekNum);
+      if (!targetWeekObj && progressWeeks.length > 0) {
+        targetWeekObj = progressWeeks[Math.min(targetWeekNum - 1, progressWeeks.length - 1)];
+      }
+
+      let newDateRes;
+      if (targetWeekObj) {
+        // Letakkan di hari pencairan atau setelahnya pada minggu Termin 2 cair
+        const resolvedTarget = resolveWeekDates(targetWeekObj, yearStr);
+        newDateRes = getDateInWeek(resolvedTarget.startDate, 2);
+      } else {
+        const [tY, tM, tD] = t2Iso.split('-');
+        newDateRes = {
+          dateIso: t2Iso,
+          dateSlash: `${tD}/${tM}/${tY}`,
+          dateFormatted: t2Iso,
+          bulan: `September ${yearStr}`,
+        };
+      }
+
+      // Pastikan tanggal pergeseran tidak lebih awal dari tanggal pencairan Termin 2
+      if (newDateRes.dateIso < t2Iso) {
+        const [tY, tM, tD] = t2Iso.split('-');
+        newDateRes = {
+          dateIso: t2Iso,
+          dateSlash: `${tD}/${tM}/${tY}`,
+          dateFormatted: t2Iso,
+          bulan: newDateRes.bulan,
+        };
+      }
+
+      // Cek apakah tanggal baru melewati periode penggunaan dana
+      if (usageEndIso && newDateRes.dateIso > usageEndIso) {
+        exceedsUsagePeriodWarning = true;
+      }
+
+      const updatedKw: KwitansiDocument = {
+        ...kw,
+        mingguKeRef: targetWeekNum,
+        tanggal: newDateRes.dateSlash,
+        tanggalFormatted: newDateRes.dateFormatted,
+        bulan: newDateRes.bulan,
+      };
+
+      shiftDetails.push({
+        id: kw.id,
+        noBukti: kw.noBukti,
+        uraian: kw.uraian,
+        originalDate: kw.tanggal,
+        originalWeek: origWeek,
+        newDate: newDateRes.dateSlash,
+        newWeek: targetWeekNum,
+        nominal: kwNominal,
+      });
+
+      shiftedKwitansiList.push(updatedKw);
+    } else {
+      // Transaksi sudah berada di atau setelah Termin 2 cair
+      shiftedKwitansiList.push(kw);
+    }
+  }
+
+  return {
+    shiftedKwitansiList,
+    hasShiftedTransactions: shiftDetails.length > 0,
+    shiftedCount: shiftDetails.length,
+    exceedsUsagePeriodWarning,
+    usagePeriodLimit: usageEndIso,
+    shiftedTransactionDetails: shiftDetails,
+  };
 }
 
 /**

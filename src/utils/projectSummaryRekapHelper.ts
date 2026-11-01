@@ -14,7 +14,13 @@ import { isAhspLaborComponent } from './kwitansiTagHelper';
 import { sanitizeYear } from './monthHelper';
 import { toRupiah, distributeRupiah } from './money';
 import { getItemMaterialLaborSplit } from './ahspHelper';
-import { getReconstitutedKusenPintuUnitItems } from '../services/generator/kwitansiGenerator';
+import {
+  getReconstitutedKusenPintuUnitItems,
+  consolidateAndStandardizeReceiptItems,
+  toCommercialPrice,
+} from '../services/generator/kwitansiGenerator';
+import { alignAndShiftTransactionsForCashflow } from '../services/generator/splitTransactionService';
+import { planCashFlow } from '../services/cashPlanner';
 
 export type RekapCategoryKey =
   | 'PAPAN_NAMA'
@@ -142,22 +148,31 @@ export function classifyKwitansiCategory(kw: KwitansiDocument): RekapCategoryKey
     return 'PENGELOLA_SPJ';
   }
 
-  // 8. Furnitur / Pintu & Jendela / Mebeler Pabrikasi (non-SipLah) - Must not contain building materials
+  // 8. Kwitansi Material Bangunan (KW-MAT / MATERIAL)
+  if (
+    bukti.includes('KW-MAT') ||
+    bukti.includes('/KW-MAT') ||
+    kw.tipe === 'MATERIAL'
+  ) {
+    return 'BAHAN_MATERIAL';
+  }
+
+  // 9. Furnitur / Pintu & Jendela / Mebeler Pabrikasi (non-SipLah) - Must not contain building materials
   const hasMaterialItems = kw.items?.some((it) => /semen|pasir|bata|batu|keramik|paku|besi|kaso/i.test(it.namaBarang || '')) || /semen|pasir|bata|batu|keramik|paku|besi/i.test(uraian);
   if (
-    !hasMaterialItems && (
-      bukti.startsWith('FUR') ||
-      bukti.includes('/FUR/') ||
-      kw.tipe === 'PINTU_JENDELA' ||
+    bukti.startsWith('FUR') ||
+    bukti.includes('/FUR/') ||
+    kw.tipe === 'PINTU_JENDELA' ||
+    (!hasMaterialItems && (
       kw.tipe === 'PERABOT' ||
       (/pintu|jendela|kusen|aluminium/i.test(combined) && !bukti.includes('SIPLAH')) ||
       (kw.items?.some((it) => it.isBarangPabrikasi || it.tag === 'FUR') && !bukti.includes('SIPLAH'))
-    )
+    ))
   ) {
     return 'FURNITUR_PINTU_JENDELA';
   }
 
-  // 9. Bahan Material Bangunan (Default)
+  // 10. Bahan Material Bangunan (Default)
   return 'BAHAN_MATERIAL';
 }
 
@@ -171,6 +186,20 @@ export function isKwitansiAllowedByProgressBobot(
   progressWeeks: ProjectProgressWeek[] = []
 ): boolean {
   if (!progressWeeks || progressWeeks.length === 0) return true;
+
+  const hasAnyDivisionBreakdown = progressWeeks.some(
+    (w) => Array.isArray(w.divisions) && w.divisions.length > 0
+  );
+  if (!hasAnyDivisionBreakdown) {
+    return true;
+  }
+
+  const isFinalProgress = progressWeeks.some(
+    (w) => (w.cumulativeProgress ?? (w as any).progressKumulatif ?? 0) >= 99.9
+  );
+  if (isFinalProgress) {
+    return true;
+  }
 
   const cat = classifyKwitansiCategory(kw);
   const uraian = (kw.uraian || '').toLowerCase();
@@ -710,26 +739,30 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
     paguMap[c.key] = c.paguNominal;
   });
 
-  // Jika total pagu 0 tapi totalAnggaran ada, buat proporsi standar
+  // Jika total pagu tidak sama dengan totalAnggaran, selaraskan BAHAN_MATERIAL ke sisa anggaran
   const sumPagu = Object.values(paguMap).reduce((a, b) => a + b, 0);
-  if (sumPagu === 0 && totalAnggaran > 0) {
-    paguMap.PAPAN_NAMA = 1099800;
-    paguMap.SMKK = 8981448;
-    paguMap.KONSULTAN_PERENCANA = Math.round(totalAnggaran * 0.025);
-    paguMap.PENGAWAS = Math.round(totalAnggaran * 0.025);
-    paguMap.PENGELOLA_SPJ = Math.round(totalAnggaran * 0.025);
-    paguMap.SIPLAH = 0;
-    paguMap.FURNITUR_PINTU_JENDELA = Math.round(totalAnggaran * 0.12);
-    paguMap.UPAH_KERJA = Math.round(totalAnggaran * 0.32);
-    paguMap.BAHAN_MATERIAL =
-      totalAnggaran -
-      (paguMap.PAPAN_NAMA +
-        paguMap.SMKK +
-        paguMap.KONSULTAN_PERENCANA +
-        paguMap.PENGAWAS +
-        paguMap.PENGELOLA_SPJ +
-        paguMap.FURNITUR_PINTU_JENDELA +
-        paguMap.UPAH_KERJA);
+  if (totalAnggaran > 0) {
+    if (sumPagu === 0) {
+      paguMap.PAPAN_NAMA = 1099800;
+      paguMap.SMKK = 8981448;
+      paguMap.KONSULTAN_PERENCANA = Math.round(totalAnggaran * 0.025);
+      paguMap.PENGAWAS = Math.round(totalAnggaran * 0.025);
+      paguMap.PENGELOLA_SPJ = Math.round(totalAnggaran * 0.025);
+      paguMap.SIPLAH = 0;
+      paguMap.FURNITUR_PINTU_JENDELA = Math.round(totalAnggaran * 0.12);
+      paguMap.UPAH_KERJA = Math.round(totalAnggaran * 0.32);
+      paguMap.BAHAN_MATERIAL =
+        totalAnggaran -
+        (paguMap.PAPAN_NAMA +
+          paguMap.SMKK +
+          paguMap.KONSULTAN_PERENCANA +
+          paguMap.PENGAWAS +
+          paguMap.PENGELOLA_SPJ +
+          paguMap.FURNITUR_PINTU_JENDELA +
+          paguMap.UPAH_KERJA);
+    } else if (sumPagu !== totalAnggaran) {
+      paguMap.BAHAN_MATERIAL += (totalAnggaran - sumPagu);
+    }
   }
 
   // 2. Vendor toko rekanan
@@ -872,10 +905,22 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
 
     const existing = getKwByCategory(catKey);
     if (existing.length === 0) {
+      const rawItems = (createData.items && createData.items.length > 0)
+        ? createData.items
+        : [{
+            namaBarang: createData.uraian || 'Kegiatan',
+            volume: 1,
+            satuan: 'ls',
+            hargaSatuan: targetNominal,
+            jumlah: targetNominal,
+            tag: catKey,
+          }];
+      const standardizedItems = consolidateAndStandardizeReceiptItems(rawItems, targetNominal);
       const newKw: KwitansiDocument = {
         id: `kw-sync-${catKey.toLowerCase()}-${Date.now()}`,
         nominal: targetNominal,
         ...createData,
+        items: standardizedItems,
       };
       nextKwitansiList.push(newKw);
       messages.push(`Dibuat kwitansi baru untuk ${newKw.uraian.slice(0, 45)}... (Rp ${targetNominal.toLocaleString('id-ID')})`);
@@ -890,14 +935,21 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
           const targetKwId = existing[0].id;
           nextKwitansiList = nextKwitansiList.map((k) => {
             if (k.id === targetKwId) {
+              const rawItems = (k.items && k.items.length > 0)
+                ? k.items
+                : [{
+                    namaBarang: k.uraian || 'Kegiatan',
+                    volume: 1,
+                    satuan: 'ls',
+                    hargaSatuan: targetNominal,
+                    jumlah: targetNominal,
+                    tag: catKey,
+                  }];
+              const updatedItems = consolidateAndStandardizeReceiptItems(rawItems, targetNominal);
               return {
                 ...k,
                 nominal: targetNominal,
-                items: k.items && k.items.length === 1 ? [{
-                  ...k.items[0],
-                  hargaSatuan: targetNominal,
-                  jumlah: targetNominal,
-                }] : k.items,
+                items: updatedItems,
                 pph23Amount: k.isPph23 ? Math.round(targetNominal * 0.02) : k.pph23Amount,
               };
             }
@@ -916,26 +968,22 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
             // Termin akhir mampu menampung selisih
             nextKwitansiList = nextKwitansiList.map((k) => {
               if (k.id === targetLastKw.id) {
-                const updatedItems = (k.items || []).map((it, idx, arr) => {
-                  if (idx === arr.length - 1) {
-                    const otherItemsSum = arr.slice(0, -1).reduce((s, x) => s + (x.jumlah || 0), 0);
-                    const itemJml = Math.max(0, newLastNominal - otherItemsSum);
-                    return { ...it, hargaSatuan: itemJml, jumlah: itemJml };
-                  }
-                  return it;
-                });
+                const rawItems = (k.items && k.items.length > 0)
+                  ? k.items
+                  : [{
+                      namaBarang: k.uraian || 'Kegiatan',
+                      volume: 1,
+                      satuan: 'ls',
+                      hargaSatuan: newLastNominal,
+                      jumlah: newLastNominal,
+                      tag: catKey,
+                    }];
+                const updatedItems = consolidateAndStandardizeReceiptItems(rawItems, newLastNominal);
 
                 return {
                   ...k,
                   nominal: newLastNominal,
-                  items: updatedItems.length > 0 ? updatedItems : [{
-                    namaBarang: k.uraian,
-                    volume: 1,
-                    satuan: 'ls',
-                    hargaSatuan: newLastNominal,
-                    jumlah: newLastNominal,
-                    tag: k.items?.[0]?.tag || catKey,
-                  }],
+                  items: updatedItems,
                   pph23Amount: k.isPph23 ? Math.round(newLastNominal * 0.02) : k.pph23Amount,
                 };
               }
@@ -962,21 +1010,21 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
             nextKwitansiList = nextKwitansiList.map((k) => {
               if (updatedNominals.has(k.id)) {
                 const newNom = updatedNominals.get(k.id)!;
+                const rawItems = (k.items && k.items.length > 0)
+                  ? k.items
+                  : [{
+                      namaBarang: k.uraian || 'Kegiatan',
+                      volume: 1,
+                      satuan: 'ls',
+                      hargaSatuan: newNom,
+                      jumlah: newNom,
+                      tag: catKey,
+                    }];
+                const updatedItems = consolidateAndStandardizeReceiptItems(rawItems, newNom);
                 return {
                   ...k,
                   nominal: newNom,
-                  items: k.items && k.items.length === 1 ? [{
-                    ...k.items[0],
-                    hargaSatuan: newNom,
-                    jumlah: newNom,
-                  }] : [{
-                    namaBarang: k.uraian,
-                    volume: 1,
-                    satuan: 'ls',
-                    hargaSatuan: newNom,
-                    jumlah: newNom,
-                    tag: k.items?.[0]?.tag || catKey,
-                  }],
+                  items: updatedItems,
                   pph23Amount: k.isPph23 ? Math.round(newNom * 0.02) : k.pph23Amount,
                 };
               }
@@ -1320,18 +1368,21 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
       const targetNewNominal = Math.max(0, (lastSiplah.nominal || 0) + diffSiplah);
       nextKwitansiList = nextKwitansiList.map((k) => {
         if (k.id === targetId) {
-          const updatedItems = (k.items || []).map((it, idx, arr) => {
-            if (idx === arr.length - 1) {
-              const otherSum = arr.slice(0, -1).reduce((s, x) => s + (x.jumlah || 0), 0);
-              const lastJml = Math.max(0, targetNewNominal - otherSum);
-              return { ...it, jumlah: lastJml, hargaSatuan: lastJml };
-            }
-            return it;
-          });
+          const rawItems = (k.items && k.items.length > 0)
+            ? k.items
+            : [{
+                namaBarang: k.uraian || 'Pengadaan SipLah',
+                volume: 1,
+                satuan: 'ls',
+                hargaSatuan: targetNewNominal,
+                jumlah: targetNewNominal,
+                tag: 'SIPLAH',
+              }];
+          const updatedItems = consolidateAndStandardizeReceiptItems(rawItems, targetNewNominal);
           return {
             ...k,
             nominal: targetNewNominal,
-            items: updatedItems.length > 0 ? updatedItems : k.items,
+            items: updatedItems,
           };
         }
         return k;
@@ -1438,9 +1489,9 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
     .reduce((s, k) => s + (k.nominal || 0), 0);
 
   const targetMaterialFinal = Math.max(0, totalAnggaran - nonMaterialSum);
-  const materialKws = nextKwitansiList.filter((k) => classifyKwitansiCategory(k) === 'BAHAN_MATERIAL');
+  const currentMaterialKws = nextKwitansiList.filter((k) => classifyKwitansiCategory(k) === 'BAHAN_MATERIAL');
 
-  if (materialKws.length === 0 && targetMaterialFinal > 0) {
+  if (currentMaterialKws.length === 0 && targetMaterialFinal > 0) {
     // Buat kwitansi material komprehensif
     const matKw: KwitansiDocument = {
       id: `kw-sync-mat-${Date.now()}`,
@@ -1455,12 +1506,12 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
       penerimaPekerjaan: materialStore.pekerjaan || 'Pemilik Toko Bahan Bangunan',
       penerimaAlamat: materialStore.alamat || school?.kabKota || '',
       namaToko: materialStore.namaToko,
-      items: [
-        { namaBarang: 'Semen Portland (PC 40 kg)', volume: Math.round(targetMaterialFinal * 0.35 / 72000), satuan: 'Zak', hargaSatuan: 72000, jumlah: Math.round(targetMaterialFinal * 0.35), tag: 'MAT' },
-        { namaBarang: 'Besi Beton Ulir & Polos SNI', volume: Math.round(targetMaterialFinal * 0.30 / 150000), satuan: 'Btg', hargaSatuan: 150000, jumlah: Math.round(targetMaterialFinal * 0.30), tag: 'MAT' },
-        { namaBarang: 'Pasir Pasang & Batu Belah', volume: Math.round(targetMaterialFinal * 0.15 / 250000), satuan: 'm³', hargaSatuan: 250000, jumlah: Math.round(targetMaterialFinal * 0.15), tag: 'MAT' },
-        { namaBarang: 'Keramik, Cat & Bahan Finishing Konstruksi', volume: 1, satuan: 'paket', hargaSatuan: targetMaterialFinal - (Math.round(targetMaterialFinal * 0.35) + Math.round(targetMaterialFinal * 0.30) + Math.round(targetMaterialFinal * 0.15)), jumlah: targetMaterialFinal - (Math.round(targetMaterialFinal * 0.35) + Math.round(targetMaterialFinal * 0.30) + Math.round(targetMaterialFinal * 0.15)), tag: 'MAT' },
-      ],
+      items: consolidateAndStandardizeReceiptItems([
+        { namaBarang: 'Semen Portland (PC 40 kg)', volume: Math.max(1, Math.round(targetMaterialFinal * 0.35 / 72000)), satuan: 'Zak', hargaSatuan: 72000, jumlah: Math.max(1, Math.round(targetMaterialFinal * 0.35 / 72000)) * 72000, tag: 'MAT' },
+        { namaBarang: 'Besi Beton Ulir & Polos SNI', volume: Math.max(1, Math.round(targetMaterialFinal * 0.30 / 150000)), satuan: 'Btg', hargaSatuan: 150000, jumlah: Math.max(1, Math.round(targetMaterialFinal * 0.30 / 150000)) * 150000, tag: 'MAT' },
+        { namaBarang: 'Pasir Pasang & Batu Belah', volume: Math.max(1, Math.round(targetMaterialFinal * 0.15 / 250000)), satuan: 'm³', hargaSatuan: 250000, jumlah: Math.max(1, Math.round(targetMaterialFinal * 0.15 / 250000)) * 250000, tag: 'MAT' },
+        { namaBarang: 'Keramik, Cat & Bahan Finishing Konstruksi', volume: 1, satuan: 'paket', hargaSatuan: 100000, jumlah: 100000, tag: 'MAT' },
+      ], targetMaterialFinal),
       nominal: targetMaterialFinal,
       isPpn: targetMaterialFinal >= 2000000,
       isPph22: targetMaterialFinal >= 2000000,
@@ -1473,52 +1524,92 @@ export function syncAndReconcileAll9CategoriesToBudget(params: {
     };
     nextKwitansiList.push(matKw);
     messages.push(`Diterbitkan kwitansi material bangunan sebesar Rp ${targetMaterialFinal.toLocaleString('id-ID')} penyeimbang kas nihil.`);
-  } else if (materialKws.length > 0 && targetMaterialFinal > 0) {
-    const currentMatTotal = materialKws.reduce((s, k) => s + (k.nominal || 0), 0);
+  } else if (currentMaterialKws.length > 0 && targetMaterialFinal > 0) {
+    const currentMatTotal = currentMaterialKws.reduce((s, k) => s + (k.nominal || 0), 0);
     const diffMat = targetMaterialFinal - currentMatTotal;
-    if (Math.abs(diffMat) > 0.001) {
-      const lastMatId = materialKws[materialKws.length - 1].id;
+    if (Math.abs(diffMat) > 0.001 && currentMatTotal > 0) {
+      const scale = targetMaterialFinal / currentMatTotal;
+      let runningTotal = 0;
+      const lastMatId = currentMaterialKws[currentMaterialKws.length - 1].id;
+
       nextKwitansiList = nextKwitansiList.map((k) => {
-        if (k.id === lastMatId) {
-          const adjustedNominal = Math.max(1000, (k.nominal || 0) + diffMat);
+        if (classifyKwitansiCategory(k) === 'BAHAN_MATERIAL') {
+          const isLastMat = k.id === lastMatId;
+          let newNominal: number;
+          if (isLastMat) {
+            newNominal = Math.max(1000, targetMaterialFinal - runningTotal);
+          } else {
+            newNominal = Math.max(1000, Math.round((k.nominal || 0) * scale));
+            runningTotal += newNominal;
+          }
+
           let updatedItems = (k.items && k.items.length > 0)
             ? k.items.map((it) => ({ ...it }))
             : [{
                 namaBarang: k.uraian || 'Bahan Material Bangunan',
                 volume: 1,
                 satuan: 'ls',
-                hargaSatuan: adjustedNominal,
-                jumlah: adjustedNominal,
+                hargaSatuan: newNominal,
+                jumlah: newNominal,
                 tag: 'MAT',
               }];
 
-          if (updatedItems.length === 1) {
-            updatedItems[0].jumlah = adjustedNominal;
-            updatedItems[0].hargaSatuan = updatedItems[0].volume > 0 ? Math.round((adjustedNominal / updatedItems[0].volume) * 100) / 100 : adjustedNominal;
-          } else {
-            const scale = k.nominal > 0 ? adjustedNominal / k.nominal : 1;
-            updatedItems = updatedItems.map((it) => ({
-              ...it,
-              jumlah: Math.round(it.jumlah * scale),
-            }));
-            const otherSum = updatedItems.slice(0, -1).reduce((s, x) => s + (x.jumlah || 0), 0);
-            const lastJml = Math.max(0, adjustedNominal - otherSum);
-            const lastIdx = updatedItems.length - 1;
-            updatedItems[lastIdx].jumlah = lastJml;
-            updatedItems[lastIdx].hargaSatuan = updatedItems[lastIdx].volume > 0 ? Math.round((lastJml / updatedItems[lastIdx].volume) * 100) / 100 : lastJml;
-          }
+          updatedItems = consolidateAndStandardizeReceiptItems(updatedItems, newNominal);
 
           return {
             ...k,
-            nominal: adjustedNominal,
+            nominal: newNominal,
             items: updatedItems,
           };
         }
         return k;
       });
-      messages.push(`Kwitansi material terakhir disesuaikan sebesar Rp ${Math.abs(diffMat).toLocaleString('id-ID')} agar total pengeluaran tepat sama dengan Pagu Anggaran (Rp 0 Selisih).`);
+      messages.push(`Diselaraskan seluruh kwitansi material secara proporsional agar total pengeluaran tepat sama dengan Pagu Anggaran (Rp 0 Selisih).`);
     }
   }
+
+  // Final Safety Check: Ensure total nominal across all kwitansi equals totalAnggaran (100% budget)
+  const currentTotal = nextKwitansiList.reduce((s, k) => s + (k.nominal || 0), 0);
+  const residualDiff = totalAnggaran - currentTotal;
+  if (Math.abs(residualDiff) > 0.001) {
+    const matTarget = [...nextKwitansiList].reverse().find(
+      (k) => classifyKwitansiCategory(k) === 'BAHAN_MATERIAL'
+    ) || nextKwitansiList[nextKwitansiList.length - 1];
+
+    if (matTarget) {
+      const targetId = matTarget.id;
+      const targetBukti = matTarget.noBukti;
+      nextKwitansiList = nextKwitansiList.map((k) => {
+        const matches = (targetId && k.id === targetId) || (targetBukti && k.noBukti === targetBukti);
+        if (matches) {
+          const newNominal = Math.max(1000, (k.nominal || 0) + residualDiff);
+          let updatedItems = (k.items && k.items.length > 0)
+            ? k.items.map((it) => ({ ...it }))
+            : [{
+                namaBarang: k.uraian || 'Bahan Material Bangunan',
+                volume: 1,
+                satuan: 'ls',
+                hargaSatuan: newNominal,
+                jumlah: newNominal,
+                tag: 'MAT',
+              }];
+
+          updatedItems = consolidateAndStandardizeReceiptItems(updatedItems, newNominal);
+
+          return {
+            ...k,
+            nominal: newNominal,
+            items: updatedItems,
+          };
+        }
+        return k;
+      });
+    }
+  }
+
+  // Sesuai Invarian 3: Selaraskan transaksi dengan arus kas Termin 1 & 2 via planCashFlow
+  const planRes = planCashFlow(nextKwitansiList, school, progressWeeks, wageReports);
+  nextKwitansiList = planRes.plannedKwitansiList;
 
   const finalTotal = nextKwitansiList.reduce((s, k) => s + (k.nominal || 0), 0);
 
