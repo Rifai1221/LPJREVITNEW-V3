@@ -23,6 +23,7 @@ import {
 } from './kwitansiGenerator';
 import { distributeRupiah } from '../../utils/money';
 import { calculateIntegratedBkt } from '../cashLedgerIntegrationService';
+import { generateUnifiedCashLedger } from '../cashEngine';
 
 export interface DecomposedItem {
   namaBarang: string;
@@ -518,11 +519,11 @@ export function calculateBkuFromTransactions(
   let termin2Bulan = `September ${yearStr}`;
 
   if (progressWeeks && progressWeeks.length > 0) {
-    const week8 = progressWeeks.find((w) => w.mingguKe === 8) || progressWeeks[Math.min(7, progressWeeks.length - 1)];
-    const resolved8 = resolveWeekDates(week8, yearStr);
-    termin2DateIso = resolved8.startDate;
-    termin2DateSlash = resolved8.startDateSlash;
-    termin2Bulan = resolved8.bulan;
+    const week6 = progressWeeks.find((w) => w.mingguKe === 6) || progressWeeks[Math.min(5, progressWeeks.length - 1)];
+    const resolved6 = resolveWeekDates(week6, yearStr);
+    termin2DateIso = resolved6.startDate;
+    termin2DateSlash = resolved6.startDateSlash;
+    termin2Bulan = resolved6.bulan;
   }
 
   const manualInit1 = manualTransactions.find((m) => m.id === 'bku-init-1');
@@ -1041,56 +1042,36 @@ export function calculateBkuFromTransactions(
 
   processedBkuList = renumberMaterialTransactionsChronologically(processedBkuList, yearStr);
 
-  const totalBkuPenerimaan = processedBkuList.filter((tx) => tx.jenis === 'PENERIMAAN').reduce((s, tx) => s + (tx.penerimaan || 0), 0);
-  const totalBkuPengeluaran = processedBkuList.filter((tx) => tx.jenis === 'PENGELUARAN').reduce((s, tx) => s + (tx.pengeluaran || 0), 0);
-  const bkuDiff = totalBkuPengeluaran - totalBkuPenerimaan;
-
-  if (totalBkuPenerimaan > 0 && bkuDiff > 0 && (effLimit >= 14 || calculateCumulativeRealizedProgress(progressWeeks, effLimit) >= 99.9)) {
-    for (let i = processedBkuList.length - 1; i >= 0; i--) {
-      const tx = processedBkuList[i];
-      if (tx.jenis === 'PENGELUARAN' && !tx.isLocked && !isFixedNonSplitPayment(tx) && isMaterialOnlyPurchase(tx)) {
-        const deduct = Math.min(tx.pengeluaran, bkuDiff);
-        processedBkuList[i] = {
-          ...tx,
-          pengeluaran: tx.pengeluaran - deduct,
-        };
-        break;
-      }
-    }
-  }
-
-  let currentSaldo = 0;
-  const seenBkuTxIds = new Set<string>();
-  const finalUniqueResult: BkuTransaction[] = [];
-
-  processedBkuList.forEach((tx) => {
-    if (tx.jenis === 'PENERIMAAN') {
-      currentSaldo += tx.penerimaan;
-    } else {
-      currentSaldo -= tx.pengeluaran;
-    }
-
-    let finalId = tx.id || generateSecureId('bku-tx');
-    if (seenBkuTxIds.has(finalId)) {
-      finalId = `${finalId}-${seenBkuTxIds.size}`;
-    }
-    seenBkuTxIds.add(finalId);
-
-    finalUniqueResult.push({
-      ...tx,
-      uraian: cleanNaturalUraian(tx.uraian || ''),
-      noBukti: (tx.noBukti || '').replace(/-B$/, '').trim(),
-      id: finalId,
-      saldo: currentSaldo,
-    });
+  const ledgerResult = generateUnifiedCashLedger({
+    kwitansiList,
+    school,
+    manualBkuTransactions: manualTransactions,
+    deletedBkuIds: deletedIds,
+    wageReports,
+    progressWeeks,
+    bkuWeekLimit,
+    stores,
+    bkbRecords: bkbList,
   });
 
-  return finalUniqueResult;
+  return ledgerResult.bkuList;
 }
 
 export function calculateBktFromBku(
   bkuList: BkuTransaction[],
-  bkbList: BkbTransaction[] = []
+  bkbList: BkbTransaction[] = [],
+  school?: SchoolMasterData,
+  kwitansiList: KwitansiDocument[] = []
 ): BktTransaction[] {
-  return calculateIntegratedBkt(bkuList, bkbList);
+  if (!school) {
+    return calculateIntegratedBkt(bkuList, bkbList);
+  }
+  const ledgerResult = generateUnifiedCashLedger({
+    kwitansiList,
+    school,
+    manualBkuTransactions: bkuList,
+    stores: [],
+    bkbRecords: bkbList,
+  });
+  return ledgerResult.bktList;
 }

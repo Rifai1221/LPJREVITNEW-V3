@@ -377,6 +377,7 @@ export async function loadSchoolTenantAppState(tenant: SchoolTenant, callerUid?:
   const tenantId = tenant.id;
   const uid = callerUid || auth.currentUser?.uid || 'guest';
   const defaultState = createSchoolStateForTenant(tenant, 'full');
+  defaultState.tenantId = tenantId;
   const idbKey = getTenantCacheKey(tenantId, uid);
 
   let cloudReadError = false;
@@ -390,11 +391,13 @@ export async function loadSchoolTenantAppState(tenant: SchoolTenant, callerUid?:
         const mergedState = sanitizeAndFilterDemoState({
           ...defaultState,
           ...domainResult.state,
+          tenantId,
           school: {
             ...defaultState.school,
             ...(domainResult.state.school || {}),
           },
         });
+        mergedState.tenantId = tenantId;
 
         setStoredTenantRev(tenantId, domainResult.maxRev, uid);
         setCloudAutosaveBlocked(tenantId, false);
@@ -420,12 +423,14 @@ export async function loadSchoolTenantAppState(tenant: SchoolTenant, callerUid?:
           const rawMergedState: AppStateData = {
             ...defaultState,
             ...cloudData,
+            tenantId,
             school: {
               ...defaultState.school,
               ...(cloudData.school || {}),
             },
           };
           const mergedState = sanitizeAndFilterDemoState(rawMergedState);
+          mergedState.tenantId = tenantId;
           const rev = Number(cloudData.rev) || 1;
           setStoredTenantRev(tenantId, rev, uid);
           setCloudAutosaveBlocked(tenantId, false);
@@ -448,7 +453,7 @@ export async function loadSchoolTenantAppState(tenant: SchoolTenant, callerUid?:
     } catch (err: any) {
       cloudReadError = true;
       const errMsg = err?.message || String(err);
-      if (errMsg.includes('not-found') || errMsg.includes('does not exist')) {
+      if (errMsg.includes('not-found') || errMsg.includes('not_found') || errMsg.includes('does not exist')) {
         markFirestoreDatabaseMissingGlobally();
       }
       if (errMsg.includes('resource-exhausted') || errMsg.includes('Quota limit exceeded') || errMsg.includes('Quota exceeded')) {
@@ -465,11 +470,13 @@ export async function loadSchoolTenantAppState(tenant: SchoolTenant, callerUid?:
       const mergedCache = sanitizeAndFilterDemoState({
         ...defaultState,
         ...idbCached,
+        tenantId,
         school: {
           ...defaultState.school,
           ...(idbCached.school || {}),
         },
       });
+      mergedCache.tenantId = tenantId;
 
       const isBlocked = cloudReadError && !docConfirmedMissing;
       setCloudAutosaveBlocked(tenantId, isBlocked);
@@ -495,11 +502,13 @@ export async function loadSchoolTenantAppState(tenant: SchoolTenant, callerUid?:
         const mergedCache = sanitizeAndFilterDemoState({
           ...defaultState,
           ...parsed,
+          tenantId,
           school: {
             ...defaultState.school,
             ...(parsed.school || {}),
           },
         });
+        mergedCache.tenantId = tenantId;
 
         const isBlocked = cloudReadError && !docConfirmedMissing;
         setCloudAutosaveBlocked(tenantId, isBlocked);
@@ -519,6 +528,7 @@ export async function loadSchoolTenantAppState(tenant: SchoolTenant, callerUid?:
   }
 
   // Try 4: Fresh preset
+  defaultState.tenantId = tenantId;
   await setIndexedDbCache(idbKey, defaultState);
   try {
     localStorage.setItem(idbKey, JSON.stringify(defaultState));
@@ -573,7 +583,13 @@ export async function saveSchoolTenantAppState(
     throw new Error('TENANT_ID_REQUIRED: tenantId wajib disertakan saat menyimpan state.');
   }
 
-  // Storage Guard Assertion (Requirement 4)
+  // Storage Guard Assertion (Requirement 4 & TAHAP 6)
+  if (stateData.tenantId && stateData.tenantId !== tenantId) {
+    const errorMsg = `MISMATCH_ASSERTION: stateData.tenantId (${stateData.tenantId}) tidak cocok dengan target tenantId (${tenantId})! Penyimpanan ditolak demi keamanan data.`;
+    logger.error('SchoolTenantService', errorMsg);
+    throw new Error(errorMsg);
+  }
+
   if (stateData.school) {
     const schoolObj = stateData.school as any;
     const stateId = schoolObj.id || schoolObj.tenantId;
@@ -750,9 +766,9 @@ export async function saveSchoolTenantAppState(
       rev: nextRev,
     };
   } catch (err: any) {
-    const errMsg = err?.message || String(err);
+    const errMsg = `${err?.code || ''} ${err?.message || ''} ${String(err)}`.toLowerCase();
 
-    if (errMsg === 'CONCURRENCY_CONFLICT' || err?.message?.includes('CONCURRENCY_CONFLICT')) {
+    if (errMsg === 'concurrency_conflict' || errMsg.includes('concurrency_conflict')) {
       const serverResult = await readDomainDocuments(tenantId);
       logger.warn('SchoolTenantService', `Concurrency conflict detected for ${tenantId}. Expected rev ${currentExpectedRev}`);
       return {
@@ -764,7 +780,7 @@ export async function saveSchoolTenantAppState(
       };
     }
 
-    if (errMsg.includes('not-found') || errMsg.includes('does not exist')) {
+    if (errMsg.includes('not-found') || errMsg.includes('not_found') || errMsg.includes('does not exist')) {
       markFirestoreDatabaseMissingGlobally();
       return {
         local: localCachedOk,

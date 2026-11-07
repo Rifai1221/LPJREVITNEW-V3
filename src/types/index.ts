@@ -373,6 +373,7 @@ export interface ProjectProgressWeek {
 export interface RabSubItem {
   id: string;
   kode?: string;
+  kodeAhsp?: string;
   uraian: string;
   volume: number;
   satuan: string;
@@ -406,7 +407,7 @@ export interface RabDivision {
 
 export interface AhspKomponen {
   id: string;
-  kategori: 'BAHAN' | 'UPAH' | 'ALAT' | 'PINTU_JENDELA' | 'CETAK' | 'SMKK' | 'SIPLAH';
+  kategori: 'BAHAN' | 'UPAH' | 'ALAT' | 'PINTU_JENDELA' | 'CETAK' | 'SMKK' | 'SIPLAH' | 'LAINNYA';
   uraian: string;
   koefisien: number;
   satuan: string;
@@ -441,6 +442,7 @@ export interface RealSchoolData {
 }
 
 export interface AppStateData {
+  tenantId?: string;
   school: SchoolMasterData;
   rpdItems: RpdItem[];
   workers: WorkerItem[];

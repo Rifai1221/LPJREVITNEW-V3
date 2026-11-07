@@ -1402,17 +1402,22 @@ export function generateMonthlyManagementTransactions({
   const finalMonthName = indonesianMonths[finalMonthNum - 1] || 'Oktober';
   const finalMonthKey = `${finalMonthName} ${finalYear}`;
 
-  const divP = realSchoolData?.divisions?.find((d) => /perencana/i.test(d.uraian));
-  const divW = realSchoolData?.divisions?.find((d) => /pengawas/i.test(d.uraian));
-  const divA = realSchoolData?.divisions?.find((d) => /pengelolaan|administrasi/i.test(d.uraian));
+  const allRabItems = (realSchoolData?.divisions || []).flatMap((d) => d.items || []);
+  const itemsP = allRabItems.filter((it) => it.kategoriBiaya === 'PERENCANA' || /perencana/i.test(it.uraian));
+  const itemsW = allRabItems.filter((it) => it.kategoriBiaya === 'PENGAWAS' || /pengawas/i.test(it.uraian));
+  const itemsA = allRabItems.filter((it) => it.kategoriBiaya === 'PENGELOLA' || /pengelola|administrasi/i.test(it.uraian));
 
-  const bobotP = divP?.bobotPersen || (divP && divP.subTotal > 0 ? (divP.subTotal / paguTotal) * 100 : 1.85);
-  const bobotW = divW?.bobotPersen || (divW && divW.subTotal > 0 ? (divW.subTotal / paguTotal) * 100 : 2.19);
-  const bobotA = divA?.bobotPersen || (divA && divA.subTotal > 0 ? (divA.subTotal / paguTotal) * 100 : 2.41);
+  const budgetP = itemsP.length > 0
+    ? itemsP.reduce((s, it) => s + Math.round(it.volume * it.hargaSatuan), 0)
+    : (realSchoolData?.divisions?.find((d) => /perencana/i.test(d.uraian))?.subTotal || 0);
 
-  const budgetP = divP?.subTotal || Math.round((paguTotal * bobotP) / 100);
-  const budgetW = divW?.subTotal || Math.round((paguTotal * bobotW) / 100);
-  const budgetA = divA?.subTotal || Math.round((paguTotal * bobotA) / 100);
+  const budgetW = itemsW.length > 0
+    ? itemsW.reduce((s, it) => s + Math.round(it.volume * it.hargaSatuan), 0)
+    : (realSchoolData?.divisions?.find((d) => /pengawas/i.test(d.uraian))?.subTotal || 0);
+
+  const budgetA = itemsA.length > 0
+    ? itemsA.reduce((s, it) => s + Math.round(it.volume * it.hargaSatuan), 0)
+    : (realSchoolData?.divisions?.find((d) => /pengelolaan|administrasi/i.test(d.uraian))?.subTotal || 0);
 
   const monthWeeksMap = new Map<string, ProjectProgressWeek[]>();
   weeksToUse.forEach((w) => {
@@ -1455,6 +1460,8 @@ export function generateMonthlyManagementTransactions({
     (s) => s.kategori === 'PENGELOLA_SPJ' || /pengelola.*spj|pengelola spj/i.test(`${s.namaToko} ${s.pekerjaan || ''}`)
   );
 
+  const totalActiveMonths = activeMonthKeys.length;
+
   activeMonthKeys.forEach((mKey, mIdx) => {
     const mWeeks = monthWeeksMap.get(mKey) || [];
     const isFinalMonth = mKey === finalMonthKey || mIdx === activeMonthKeys.length - 1;
@@ -1483,53 +1490,25 @@ export function generateMonthlyManagementTransactions({
       bulan = mKey;
     }
 
-    let mProgP = 0;
-    let mProgW = 0;
-    let mProgA = 0;
-
-    mWeeks.forEach((w) => {
-      const dP = w.divisions?.find((d) => d.id === 'div-m1' || /perencana/i.test(d.uraian));
-      const dW = w.divisions?.find((d) => d.id === 'div-m2' || /pengawas/i.test(d.uraian));
-      const dA = w.divisions?.find((d) => d.id === 'div-m3' || /pengelolaan|administrasi/i.test(d.uraian));
-
-      mProgP += (dP?.prestasiMingguIni || 0);
-      mProgW += (dW?.prestasiMingguIni || 0);
-      mProgA += (dA?.prestasiMingguIni || 0);
-    });
-
-    const mFisikSum = mWeeks.reduce((acc, w) => acc + (w.bobotRealisasi || 0), 0);
-    if (mProgP === 0 && mFisikSum > 0 && paidSoFarP < budgetP) {
-      mProgP = Math.round(((mFisikSum / 100) * bobotP) * 1000) / 1000;
-    }
-    if (mProgW === 0 && mFisikSum > 0 && paidSoFarW < budgetW) {
-      mProgW = Math.round(((mFisikSum / 100) * bobotW) * 1000) / 1000;
-    }
-    if (mProgA === 0 && mFisikSum > 0 && paidSoFarA < budgetA) {
-      mProgA = Math.round(((mFisikSum / 100) * bobotA) * 1000) / 1000;
-    }
-
     let nomP = 0;
     if (isFinalMonth) {
       nomP = Math.max(0, budgetP - paidSoFarP);
-    } else if (mProgP > 0 && bobotP > 0) {
-      nomP = Math.round((budgetP * mProgP) / bobotP);
-      nomP = Math.min(nomP, Math.max(0, budgetP - paidSoFarP));
+    } else if (budgetP > 0) {
+      nomP = Math.floor(budgetP / totalActiveMonths);
     }
 
     let nomW = 0;
     if (isFinalMonth) {
       nomW = Math.max(0, budgetW - paidSoFarW);
-    } else if (mProgW > 0 && bobotW > 0) {
-      nomW = Math.round((budgetW * mProgW) / bobotW);
-      nomW = Math.min(nomW, Math.max(0, budgetW - paidSoFarW));
+    } else if (budgetW > 0) {
+      nomW = Math.floor(budgetW / totalActiveMonths);
     }
 
     let nomA = 0;
     if (isFinalMonth) {
       nomA = Math.max(0, budgetA - paidSoFarA);
-    } else if (mProgA > 0 && bobotA > 0) {
-      nomA = Math.round((budgetA * mProgA) / bobotA);
-      nomA = Math.min(nomA, Math.max(0, budgetA - paidSoFarA));
+    } else if (budgetA > 0) {
+      nomA = Math.floor(budgetA / totalActiveMonths);
     }
 
     paidSoFarP += nomP;

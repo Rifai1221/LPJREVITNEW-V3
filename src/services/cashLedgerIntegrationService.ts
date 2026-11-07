@@ -121,11 +121,11 @@ export function syncBkbFromBku(
       let t2Bulan = `September ${yearStr}`;
 
       if (progressWeeks && progressWeeks.length > 0) {
-        const w8 = progressWeeks.find((w) => w.mingguKe === 8) || progressWeeks[Math.min(7, progressWeeks.length - 1)];
-        const res8 = resolveWeekDates(w8, yearStr);
-        t2Iso = res8.startDate;
-        t2Slash = res8.startDateSlash;
-        t2Bulan = res8.bulan;
+        const w6 = progressWeeks.find((w) => w.mingguKe === 6) || progressWeeks[Math.min(5, progressWeeks.length - 1)];
+        const res6 = resolveWeekDates(w6, yearStr);
+        t2Iso = res6.startDate;
+        t2Slash = res6.startDateSlash;
+        t2Bulan = res6.bulan;
       }
 
       records.push({
@@ -189,14 +189,12 @@ export function syncBkbFromBku(
           }
         }
 
-        const neededRaw = Math.max(expNom - runningCash, targetWindowSum - runningCash);
+        const minNeededToPreventDeficit = Math.max(0, expNom - runningCash);
+        const neededRaw = Math.max(minNeededToPreventDeficit, targetWindowSum - runningCash);
         let withdrawAmount = Math.ceil(neededRaw / 1000000) * 1000000;
 
-        const maxAllowed = totalCashNeed - totalWithdrawn;
-        withdrawAmount = Math.min(withdrawAmount, maxAllowed > 0 ? maxAllowed : withdrawAmount);
-
-        if (withdrawAmount <= 0 && totalWithdrawn < totalCashNeed) {
-          withdrawAmount = totalCashNeed - totalWithdrawn;
+        if (withdrawAmount < minNeededToPreventDeficit) {
+          withdrawAmount = Math.ceil(minNeededToPreventDeficit / 1000000) * 1000000;
         }
 
         if (withdrawAmount > 0) {

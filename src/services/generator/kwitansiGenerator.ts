@@ -39,7 +39,7 @@ export function isPreservedUnitItem(nama: string, satuan?: string, isBarangPabri
   if (/\[pabrikasi\]|\[barang jadi\]|pabrikasi/i.test(n)) return true;
 
   const isOpeningOrAssembly =
-    /pintu|kusen|kosen|jendela|ventilasi|boven|jalusi|rolling door|folding gate|\bpj\d*|\bj\d*|\bv\d*|meubilair|perabot|kursi|meja|rak\s|loker|karpet|papan kreasi/i.test(n);
+    /pintu|kusen|kosen|jendela|ventilasi|boven|jalusi|rolling door|folding gate|\bpj\d+\b|\bj\d+\b|\bv\d+\b|meubilair|perabot|kursi|meja|rak\s|loker|karpet|papan kreasi/i.test(n);
 
   if (isOpeningOrAssembly) {
     const isUnitOrSet = /^(unit|set|bh|buah|paket|ls)$/i.test(s);

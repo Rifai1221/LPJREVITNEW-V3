@@ -101,11 +101,12 @@ describe('Pintu & Jendela (Fur/xx) and Manufactured Item Reconciliation', () => 
     assert.strictEqual(j1.satuan, 'unit');
     assert.strictEqual(j1.isBarangPabrikasi, true);
 
+    const expectedDivVSubtotal = Math.round(defaultRealSchoolData.divisions.find((d) => d.kode.toUpperCase() === 'V')?.subTotal || 46162983);
     const total = pj1.jumlah + j1.jumlah;
-    assert.strictEqual(total, 46163040);
+    assert.strictEqual(total, expectedDivVSubtotal);
 
     // With targetNom
-    const targetNom = 46163040;
+    const targetNom = expectedDivVSubtotal;
     const targetedItems = getReconstitutedKusenPintuUnitItems<any>([], targetNom, defaultRealSchoolData);
     const sumTarget = targetedItems.reduce((s, it) => s + it.jumlah, 0);
     assert.strictEqual(sumTarget, targetNom);
@@ -118,7 +119,7 @@ describe('Pintu & Jendela (Fur/xx) and Manufactured Item Reconciliation', () => 
         noBukti: 'Fur/07/2026',
         tipe: 'PINTU_JENDELA',
         namaToko: 'CV. ALUMATAMA JAYA',
-        nominal: 46163040,
+        nominal: 46162983,
         tanggal: '15/09/2026',
       },
       {
@@ -126,7 +127,7 @@ describe('Pintu & Jendela (Fur/xx) and Manufactured Item Reconciliation', () => 
         noBukti: 'Fur/01/2026',
         tipe: 'PINTU_JENDELA',
         namaToko: 'CV. ALUMATAMA JAYA',
-        nominal: 46163040,
+        nominal: 46162983,
         tanggal: '10/09/2026',
       },
     ];
@@ -158,8 +159,9 @@ describe('Pintu & Jendela (Fur/xx) and Manufactured Item Reconciliation', () => 
     );
     assert.ok(furKws.length >= 1, 'Should have at least 1 Fur kwitansi');
 
+    const expectedDivVSubtotal = Math.round(defaultRealSchoolData.divisions.find((d) => d.kode.toUpperCase() === 'V')?.subTotal || 46162983);
     const totalFurNominal = furKws.reduce((s, k) => s + (k.nominal || 0), 0);
-    assert.strictEqual(totalFurNominal, 46163040, 'Total Fur nominal should match Division V RAB pagu exactly');
+    assert.strictEqual(totalFurNominal, expectedDivVSubtotal, 'Total Fur nominal should match Division V RAB pagu exactly');
 
     // Check items in the Fur kwitansi
     const items = furKws.flatMap((k) => k.items || []);

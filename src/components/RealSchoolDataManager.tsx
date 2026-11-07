@@ -35,6 +35,7 @@ import { SchoolMasterData, StoreVendor, KwitansiDocument } from '../types';
 import { RabAhspDocumentPreviewModal } from './RabAhspDocumentPreviewModal';
 import { KwitansiTagManager } from './KwitansiTagManager';
 import { getItemTags } from '../utils/kwitansiTagHelper';
+import { resolveAhsp } from '../utils/ahspHelper';
 
 interface RealSchoolDataManagerProps {
   realData: RealSchoolData;
@@ -2224,23 +2225,37 @@ export const RealSchoolDataManager: React.FC<RealSchoolDataManagerProps> = ({
                                 {it.kode || idx + 1}
                               </td>
                               <td className="py-2 px-3 border-r border-slate-200">
-                                <div className="flex items-center gap-1.5 group/item">
-                                  <input
-                                    type="text"
-                                    value={it.uraian}
-                                    onChange={(e) => handleItemChange(div.id, it.id, 'uraian', e.target.value)}
-                                    className="w-full bg-transparent hover:bg-white focus:bg-white border border-transparent focus:border-blue-400 rounded px-1.5 py-0.5 font-medium text-slate-800"
-                                  />
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOpenRabAhspPreview(div, it)}
-                                    className="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 shadow-2xs flex items-center gap-1 transition cursor-pointer"
-                                    title="Lihat Pratinjau AHSP & Tercetak di Bon/SPB"
-                                  >
-                                    <Eye className="w-3 h-3 text-blue-600" />
-                                    <span>AHSP & Bon</span>
-                                  </button>
-                                </div>
+                                {(() => {
+                                  const ahspMatch = resolveAhsp(it, realData.ahspList);
+                                  const hasAhspMismatch = ahspMatch && Math.abs(it.hargaSatuan - ahspMatch.totalHargaSatuan) > 1;
+                                  return (
+                                    <div className="flex items-center gap-1.5 group/item">
+                                      <input
+                                        type="text"
+                                        value={it.uraian}
+                                        onChange={(e) => handleItemChange(div.id, it.id, 'uraian', e.target.value)}
+                                        className="w-full bg-transparent hover:bg-white focus:bg-white border border-transparent focus:border-blue-400 rounded px-1.5 py-0.5 font-medium text-slate-800"
+                                      />
+                                      {hasAhspMismatch && (
+                                        <span
+                                          className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 shadow-2xs flex items-center gap-1"
+                                          title={`Harga Satuan RAB (${formatRupiah(it.hargaSatuan)}) berbeda dengan Total AHSP (${formatRupiah(ahspMatch.totalHargaSatuan)})`}
+                                        >
+                                          <span>⚠️ Selisih AHSP</span>
+                                        </span>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenRabAhspPreview(div, it)}
+                                        className="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 shadow-2xs flex items-center gap-1 transition cursor-pointer"
+                                        title="Lihat Pratinjau AHSP & Tercetak di Bon/SPB"
+                                      >
+                                        <Eye className="w-3 h-3 text-blue-600" />
+                                        <span>AHSP & Bon</span>
+                                      </button>
+                                    </div>
+                                  );
+                                })()}
                               </td>
                               <td className="py-2 px-2 border-r border-slate-200 text-center">
                                 <select

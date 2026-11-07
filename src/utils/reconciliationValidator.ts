@@ -312,34 +312,20 @@ export function validateFinancialReconciliation(
       });
       const hasDuplicateKwitansi = Array.from(exactGroupCountMap.values()).some((cnt) => cnt > 1);
 
-      // Check small rounding difference (< 0.5% pagu)
-      const maxRoundingThreshold = Math.ceil(pagu * 0.005);
-      const isSmallRoundingDiff = Math.abs(diff) <= maxRoundingThreshold;
+      // Check tolerance <= Rp 5
+      const isWithinTolerance = Math.abs(diff) <= 5;
 
-      if (isSmallRoundingDiff) {
+      if (!isWithinTolerance) {
         alerts.push({
-          id: `alert_cat_rounding_${cat}`,
+          id: `alert_cat_mismatch_${cat}`,
           category: 'BUDGET_OVERSPEND',
-          severity: 'INFO',
-          title: `Selisih Pembulatan Kategori ${cat}`,
-          description: `Terdapat selisih pembulatan kategori ${cat} sebesar Rp ${Math.abs(diff).toLocaleString('id-ID')} (< 0,5% pagu Rp ${pagu.toLocaleString('id-ID')}). Realisasi: Rp ${real.toLocaleString('id-ID')}.`,
-          expectedValue: pagu,
-          actualValue: real,
-          difference: diff,
-          targetTab: 'kwitansi',
-          details: detailStrs,
-        });
-      } else if (real > pagu) {
-        alerts.push({
-          id: `alert_cat_overspend_${cat}`,
-          category: 'BUDGET_OVERSPEND',
-          severity: 'WARNING',
+          severity: 'ERROR',
           title: hasDuplicateKwitansi
             ? `Kemungkinan Kwitansi Ganda Kategori ${cat}`
-            : `Realisasi Kategori ${cat} Melampaui Pagu`,
+            : `Selisih Realisasi Kategori ${cat}`,
           description: hasDuplicateKwitansi
             ? `Total realisasi kwitansi ${cat} (Rp ${real.toLocaleString('id-ID')}) melebihi pagu (Rp ${pagu.toLocaleString('id-ID')}) karena terdapat lebih dari satu kwitansi dengan toko, kategori, dan nominal yang sama.`
-            : `Realisasi kwitansi kategori ${cat} (Rp ${real.toLocaleString('id-ID')}) melebihi pagu RAB (Rp ${pagu.toLocaleString('id-ID')}) sebesar Rp ${diff.toLocaleString('id-ID')}.`,
+            : `Realisasi kwitansi kategori ${cat} (Rp ${real.toLocaleString('id-ID')}) berbeda dengan pagu RAB (Rp ${pagu.toLocaleString('id-ID')}) sebesar Rp ${Math.abs(diff).toLocaleString('id-ID')} (toleransi maks Rp 5).`,
           expectedValue: pagu,
           actualValue: real,
           difference: diff,

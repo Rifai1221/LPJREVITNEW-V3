@@ -241,9 +241,154 @@ export async function downloadRealDataExcelTemplate(currentData?: RealSchoolData
 }
 
 /**
+ * Normalizes string for AHSP matching
+ */
+export function normalizeForMatch(str: string): string {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    .replace(/^[\s\-\*\.\d\)]+/, '')
+    .replace(/^pas\.\s*|^pemasangan\s*|^pasang\s*|^pekerjaan\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function computeStringSimilarity(s1: string, s2: string): number {
+  const n1 = normalizeForMatch(s1);
+  const n2 = normalizeForMatch(s2);
+  if (!n1 || !n2) return 0;
+  if (n1 === n2) return 1.0;
+  if (n1.includes(n2) || n2.includes(n1)) return 0.9;
+
+  const words1 = new Set(n1.split(' ').filter((w) => w.length > 2));
+  const words2 = new Set(n2.split(' ').filter((w) => w.length > 2));
+  if (words1.size === 0 || words2.size === 0) return 0;
+
+  let intersection = 0;
+  words1.forEach((w) => {
+    if (words2.has(w)) intersection++;
+  });
+  const union = new Set([...words1, ...words2]).size;
+  return union > 0 ? intersection / union : 0;
+}
+
+export interface ExcelImportValidationReport {
+  totalRab: number;
+  paguAnggaran: number;
+  rabVsPaguDiff: number;
+  unitPriceMismatches: Array<{
+    rabItemUraian: string;
+    rabDivKode: string;
+    rabHargaSatuan: number;
+    ahspHargaSatuan: number;
+    diff: number;
+  }>;
+  unlinkedRabItems: Array<{
+    divKode: string;
+    itemUraian: string;
+    itemId: string;
+  }>;
+  unusedAhspItems: Array<{
+    kodePekerjaan: string;
+    namaPekerjaan: string;
+    id: string;
+  }>;
+  linkedCount: number;
+  unlinkedCount: number;
+}
+
+/**
+ * Auto-links RAB items to AHSP items by:
+ * (a) Sequential AHSP code per division or item code match
+ * (b) Exact normalized name match
+ * (c) Fuzzy match with high threshold (>= 0.75)
+ */
+export function autoLinkRabToAhsp(
+  divisions: RabDivision[],
+  ahspList: AhspItem[]
+): { linkedCount: number; unlinkedCount: number } {
+  if (!divisions || !ahspList || ahspList.length === 0) {
+    return { linkedCount: 0, unlinkedCount: 0 };
+  }
+
+  let linkedCount = 0;
+  let unlinkedCount = 0;
+
+  const ahspByKode = new Map<string, AhspItem>();
+  const ahspByName = new Map<string, AhspItem>();
+
+  ahspList.forEach((a) => {
+    if (a.kodePekerjaan) {
+      ahspByKode.set(a.kodePekerjaan.toUpperCase().trim(), a);
+    }
+    const normName = normalizeForMatch(a.namaPekerjaan);
+    if (normName) {
+      ahspByName.set(normName, a);
+    }
+  });
+
+  divisions.forEach((div) => {
+    div.items.forEach((item, itemIdx) => {
+      let matched: AhspItem | undefined = undefined;
+
+      // (a) Code match: exact item.kode, item.kodeAhsp, or div.kode + '.' + (itemIdx + 1)
+      if (item.ahspIdRef) {
+        matched = ahspList.find((a) => a.id === item.ahspIdRef || a.kodePekerjaan === item.ahspIdRef);
+      }
+      if (!matched && item.kodeAhsp) {
+        matched = ahspByKode.get(item.kodeAhsp.toUpperCase().trim());
+      }
+      if (!matched && item.kode) {
+        matched = ahspByKode.get(item.kode.toUpperCase().trim());
+      }
+      if (!matched) {
+        const seqKode1 = `${div.kode}.${itemIdx + 1}`.toUpperCase();
+        const seqKode2 = `${div.kode}.${item.kode || itemIdx + 1}`.toUpperCase();
+        matched = ahspByKode.get(seqKode1) || ahspByKode.get(seqKode2);
+      }
+
+      // (b) Exact normalized name match
+      if (!matched) {
+        const normItemName = normalizeForMatch(item.uraian);
+        matched = ahspByName.get(normItemName);
+      }
+
+      // (c) High threshold fuzzy match
+      if (!matched) {
+        let bestScore = 0;
+        let bestAhsp: AhspItem | undefined = undefined;
+        ahspList.forEach((a) => {
+          const score = computeStringSimilarity(item.uraian, a.namaPekerjaan);
+          if (score > bestScore && score >= 0.75) {
+            bestScore = score;
+            bestAhsp = a;
+          }
+        });
+        if (bestAhsp) {
+          matched = bestAhsp;
+        }
+      }
+
+      if (matched) {
+        item.ahspIdRef = matched.id;
+        item.kodeAhsp = matched.kodePekerjaan;
+        linkedCount++;
+      } else {
+        unlinkedCount++;
+      }
+    });
+  });
+
+  return { linkedCount, unlinkedCount };
+}
+
+/**
  * Parse uploaded Excel file and update RealSchoolData state
  */
-export async function parseRealDataExcelFile(file: File): Promise<{
+export async function parseRealDataExcelFile(
+  file: File,
+  existingData?: RealSchoolData
+): Promise<{
   success: boolean;
   data?: Partial<RealSchoolData>;
   message: string;
@@ -251,7 +396,10 @@ export async function parseRealDataExcelFile(file: File): Promise<{
     divisionsCount: number;
     rabItemsCount: number;
     ahspCount: number;
+    linkedCount: number;
+    unlinkedCount: number;
   };
+  validationReport?: ExcelImportValidationReport;
 }> {
   try {
     const XLSX = await getXLSX();
@@ -266,6 +414,26 @@ export async function parseRealDataExcelFile(file: File): Promise<{
     let divisionsCount = 0;
     let rabItemsCount = 0;
     let ahspCount = 0;
+    let paguFoundFromExcel: number | undefined = undefined;
+
+    // Existing IDs lookup for MERGE preservation
+    const existingRabIdMap = new Map<string, string>();
+    if (existingData?.divisions) {
+      existingData.divisions.forEach((d) => {
+        d.items.forEach((it) => {
+          const key = `${d.kode}::${it.uraian.toLowerCase().trim()}`;
+          existingRabIdMap.set(key, it.id);
+        });
+      });
+    }
+
+    const existingAhspIdMap = new Map<string, string>();
+    if (existingData?.ahspList) {
+      existingData.ahspList.forEach((a) => {
+        const key = a.kodePekerjaan ? a.kodePekerjaan.toUpperCase().trim() : a.namaPekerjaan.toLowerCase().trim();
+        existingAhspIdMap.set(key, a.id);
+      });
+    }
 
     // 1. Check Sheet Identitas
     const identitasSheetName = wb.SheetNames.find(
@@ -285,6 +453,10 @@ export async function parseRealDataExcelFile(file: File): Promise<{
           if (dataRow[5]) updatedData.provinsi = String(dataRow[5]).trim();
           if (dataRow[6]) updatedData.tahunAnggaran = String(dataRow[6]).trim();
           if (dataRow[7]) updatedData.luasBangunanM2 = parseFloat(dataRow[7]) || 120;
+          if (dataRow[8] !== undefined) {
+            const parsedPagu = parseFloat(dataRow[8]);
+            if (!isNaN(parsedPagu) && parsedPagu > 0) paguFoundFromExcel = parsedPagu;
+          }
         }
       }
     }
@@ -295,16 +467,29 @@ export async function parseRealDataExcelFile(file: File): Promise<{
         s.toLowerCase().includes('rab') ||
         s.toLowerCase().includes('rekap') ||
         s.toLowerCase().includes('rincian')
-    ) || wb.SheetNames[0]; // fallback to 1st sheet if matching RAB name not found
+    ) || wb.SheetNames[0];
 
     if (rabSheetName && wb.Sheets[rabSheetName]) {
       const sheet = wb.Sheets[rabSheetName];
       const rows = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1 });
 
       if (rows && rows.length > 1) {
-        const divisionsMap: Map<string, RabDivision> = new Map();
+        const divisionsMap = new Map<string, RabDivision>();
+
+        // Pre-populate standard divisions (I..XIII) so empty ones (like IX) are preserved
+        const standardDivCodes = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII', 'XIII'];
+        standardDivCodes.forEach((code) => {
+          divisionsMap.set(code, {
+            id: `div-${code.toLowerCase()}`,
+            kode: code,
+            uraian: `PEKERJAAN DIVISI ${code}`,
+            subTotal: 0,
+            bobotPersen: 0,
+            items: [],
+          });
+        });
+
         let currentDivKode = 'I';
-        let currentDivUraian = 'DIVISI UMUM';
 
         for (let i = 1; i < rows.length; i++) {
           const row = rows[i];
@@ -312,42 +497,48 @@ export async function parseRealDataExcelFile(file: File): Promise<{
 
           const col0 = row[0] !== undefined ? String(row[0]).trim() : '';
           const col1 = row[1] !== undefined ? String(row[1]).trim() : '';
-          const col2 = row[2] !== undefined ? parseFloat(row[2]) || 0 : 0;
+          const rawCol2 = row[2];
+          const col2 = rawCol2 !== undefined && rawCol2 !== '' ? parseFloat(rawCol2) : NaN;
           const col3 = row[3] !== undefined ? String(row[3]).trim() : 'm²';
-          const col4 = row[4] !== undefined ? parseFloat(row[4]) || 0 : 0;
-          const col5 = row[5] !== undefined ? String(row[5]).toUpperCase().trim() : 'BAHAN';
+          const rawCol4 = row[4];
+          const col4 = rawCol4 !== undefined && rawCol4 !== '' ? parseFloat(rawCol4) : NaN;
+          const col5 = row[5] !== undefined ? String(row[5]).toUpperCase().trim() : '';
 
           if (!col0 && !col1) continue;
 
-          // Check if this row is a Division Header (e.g. col0 is Roman/Div code and col2/col4 are empty)
-          const isDivisionHeader = col0 && col1 && (!col2 || col2 === 0) && (!col4 || col4 === 0);
+          // Check if this row is a Division Header:
+          // Division code exists AND numeric columns are NaN/empty AND (description is ALL CAPS or first row)
+          const isRomanOrDivCode = /^(DIVISI\s*)?([I|V|X]+|\d+)\b/i.test(col0) || /^(DIVISI\s*)?([I|V|X]+|\d+)\b/i.test(col1);
+          const isNumericEmpty = isNaN(col2) && isNaN(col4);
+          const isDivisionHeader = isRomanOrDivCode && isNumericEmpty;
 
           if (isDivisionHeader) {
-            currentDivKode = col0.toUpperCase();
-            currentDivUraian = col1.toUpperCase();
+            const extractedCode = col0 ? col0.replace(/^DIVISI\s*/i, '').toUpperCase() : currentDivKode;
+            currentDivKode = extractedCode;
+            const divUraian = col1 ? col1.toUpperCase() : `PEKERJAAN DIVISI ${currentDivKode}`;
 
-            if (!divisionsMap.has(currentDivKode)) {
-              divisionsMap.set(currentDivKode, {
-                id: `div-imp-${Date.now()}-${currentDivKode}`,
-                kode: currentDivKode,
-                uraian: currentDivUraian,
-                subTotal: 0,
-                bobotPersen: 0,
-                items: [],
-              });
-            }
+            divisionsMap.set(currentDivKode, {
+              id: `div-${currentDivKode.toLowerCase()}`,
+              kode: currentDivKode,
+              uraian: divUraian,
+              subTotal: 0,
+              bobotPersen: 0,
+              items: divisionsMap.get(currentDivKode)?.items || [],
+            });
           } else {
             // It's a sub-item row
-            const targetDivKode = col0 ? col0.toUpperCase() : currentDivKode;
+            const targetDivKode = col0 && /^(DIVISI\s*)?([I|V|X]+|\d+)$/i.test(col0)
+              ? col0.replace(/^DIVISI\s*/i, '').toUpperCase()
+              : currentDivKode;
             const itemUraian = col1 || col0;
 
-            if (!itemUraian) continue;
+            if (!itemUraian || (isNaN(col2) && isNaN(col4) && !col5)) continue;
 
             if (!divisionsMap.has(targetDivKode)) {
               divisionsMap.set(targetDivKode, {
-                id: `div-imp-${Date.now()}-${targetDivKode}`,
+                id: `div-${targetDivKode.toLowerCase()}`,
                 kode: targetDivKode,
-                uraian: col0 ? `PEKERJAAN DIVISI ${targetDivKode}` : currentDivUraian,
+                uraian: `PEKERJAAN DIVISI ${targetDivKode}`,
                 subTotal: 0,
                 bobotPersen: 0,
                 items: [],
@@ -355,15 +546,25 @@ export async function parseRealDataExcelFile(file: File): Promise<{
             }
 
             const targetDiv = divisionsMap.get(targetDivKode)!;
-            const volume = Math.max(0, col2);
-            const hargaSatuan = Math.max(0, col4);
-            const jumlah = Math.round(volume * hargaSatuan * 100) / 100;
+            const volume = isNaN(col2) ? 1 : Math.max(0, col2);
+            const hargaSatuan = isNaN(col4) ? 0 : Math.max(0, col4);
+            const jumlah = Math.round(volume * hargaSatuan);
 
-            let katBiaya: 'BAHAN' | 'UPAH' | 'ALAT' | 'SMKK' | 'UPAH_BAHAN' | 'LAINNYA' = 'BAHAN';
-            if ((col5.includes('UPAH') && col5.includes('BAHAN')) || col5.includes('UPAH&BAHAN') || col5.includes('UPAH & BAHAN')) katBiaya = 'UPAH_BAHAN';
-            else if (col5.includes('UPAH') || col5.includes('GAJI')) katBiaya = 'UPAH';
+            // Comprehensive cost category mapping
+            let katBiaya: RabSubItem['kategoriBiaya'] = 'BAHAN';
+            const uLower = itemUraian.toLowerCase();
+            const tagStr = (col5 + ' ' + uLower).toUpperCase();
+
+            if (tagStr.includes('PERENCANA')) katBiaya = 'PERENCANA';
+            else if (tagStr.includes('PENGAWAS')) katBiaya = 'PENGAWAS';
+            else if (tagStr.includes('PENGELOLA') || tagStr.includes('SPJ') || tagStr.includes('ADMINISTRASI')) katBiaya = 'PENGELOLA';
+            else if (tagStr.includes('SIPLAH')) katBiaya = 'SIPLAH';
+            else if (tagStr.includes('PINTU') || tagStr.includes('JENDELA') || tagStr.includes('MEBELER') || tagStr.includes('PERABOT') || tagStr.includes('FUR')) katBiaya = 'PINTU_JENDELA';
+            else if (tagStr.includes('CETAK') || tagStr.includes('PAPAN NAMA') || tagStr.includes('PRASASTI')) katBiaya = 'CETAK';
+            else if (tagStr.includes('SMKK') || tagStr.includes('K3') || tagStr.includes('HELM') || tagStr.includes('ROMPI') || tagStr.includes('P3K')) katBiaya = 'SMKK';
+            else if ((col5.includes('UPAH') && col5.includes('BAHAN')) || col5.includes('UPAH&BAHAN') || col5.includes('UPAH & BAHAN')) katBiaya = 'UPAH_BAHAN';
+            else if (col5.includes('UPAH') || col5.includes('GAJI') || col5.includes('HONOR') || uLower.includes('pembersihan') || uLower.includes('galian') || uLower.includes('urugan')) katBiaya = 'UPAH';
             else if (col5.includes('ALAT') || col5.includes('SEWA')) katBiaya = 'ALAT';
-            else if (col5.includes('SMKK') || col5.includes('K3') || col5.includes('PERSIAPAN')) katBiaya = 'SMKK';
             else if (col5.includes('LAIN')) katBiaya = 'LAINNYA';
 
             const isPabrikasi =
@@ -371,8 +572,14 @@ export async function parseRealDataExcelFile(file: File): Promise<{
               col5.includes('PABRIK') ||
               isPreservedUnitItem(itemUraian, col3);
 
+            // Deterministic ID derivation with MERGE preservation
+            const mergeKey = `${targetDivKode}::${itemUraian.toLowerCase().trim()}`;
+            const existingId = existingRabIdMap.get(mergeKey);
+            const itemId = existingId || `item-${targetDivKode.toLowerCase()}-${targetDiv.items.length + 1}`;
+
             const newItem: RabSubItem = {
-              id: generateSecureId('item-imp'),
+              id: itemId,
+              kode: String(targetDiv.items.length + 1),
               uraian: itemUraian,
               volume,
               satuan: col3 || 'm²',
@@ -391,8 +598,31 @@ export async function parseRealDataExcelFile(file: File): Promise<{
         const parsedDivisions = Array.from(divisionsMap.values());
         divisionsCount = parsedDivisions.length;
 
-        // Calculate total RAB and weights
-        const totalRab = parsedDivisions.reduce((s, d) => s + d.subTotal, 0);
+        // Calculate total RAB
+        let totalRab = parsedDivisions.reduce((s, d) => s + d.items.reduce((s2, it) => s2 + it.jumlah, 0), 0);
+        const targetPagu = paguFoundFromExcel || totalRab;
+
+        // Rounding adjustment: absorb small integer remainder into largest RAB item
+        if (targetPagu > 0 && totalRab > 0 && Math.abs(totalRab - targetPagu) <= 1000) {
+          const diffToAbsorb = targetPagu - totalRab;
+          let largestItem: RabSubItem | null = null;
+          parsedDivisions.forEach((d) => {
+            d.items.forEach((it) => {
+              if (!largestItem || it.jumlah > largestItem.jumlah) {
+                largestItem = it;
+              }
+            });
+          });
+          if (largestItem) {
+            (largestItem as RabSubItem).jumlah += diffToAbsorb;
+          }
+          // Recalculate division subTotals
+          parsedDivisions.forEach((d) => {
+            d.subTotal = d.items.reduce((s, it) => s + it.jumlah, 0);
+          });
+          totalRab = targetPagu;
+        }
+
         const rebalancedDivisions = parsedDivisions.map((d) => ({
           ...d,
           bobotPersen: totalRab > 0 ? parseFloat(((d.subTotal / totalRab) * 100).toFixed(2)) : 0,
@@ -400,6 +630,7 @@ export async function parseRealDataExcelFile(file: File): Promise<{
 
         updatedData.divisions = rebalancedDivisions;
         updatedData.totalNilaiRab = totalRab;
+        updatedData.paguAnggaran = targetPagu;
       }
     }
 
@@ -413,7 +644,7 @@ export async function parseRealDataExcelFile(file: File): Promise<{
       const rows = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1 });
 
       if (rows && rows.length > 1) {
-        const ahspMap: Map<string, AhspItem> = new Map();
+        const ahspMap = new Map<string, AhspItem>();
 
         for (let i = 1; i < rows.length; i++) {
           const row = rows[i];
@@ -432,8 +663,12 @@ export async function parseRealDataExcelFile(file: File): Promise<{
 
           const ahspKey = kodeAhsp || namaAhsp;
           if (!ahspMap.has(ahspKey)) {
+            const mergeKey = kodeAhsp ? kodeAhsp.toUpperCase().trim() : namaAhsp.toLowerCase().trim();
+            const existingId = existingAhspIdMap.get(mergeKey);
+            const ahspId = existingId || `ahsp-${kodeAhsp.toLowerCase().replace(/[^a-z0-9]/g, '-') || generateSecureId('ahsp')}`;
+
             ahspMap.set(ahspKey, {
-              id: generateSecureId('ahsp-imp'),
+              id: ahspId,
               kodePekerjaan: kodeAhsp || 'AHSP-IMP',
               namaPekerjaan: namaAhsp || 'Pekerjaan Analisa',
               satuan: satuanAhsp,
@@ -445,14 +680,19 @@ export async function parseRealDataExcelFile(file: File): Promise<{
           const ahspObj = ahspMap.get(ahspKey)!;
 
           if (uraianKomp) {
-            let kKat: 'BAHAN' | 'UPAH' | 'ALAT' = 'BAHAN';
-            if (katKomponen.includes('UPAH') || katKomponen.includes('PEKERJA')) kKat = 'UPAH';
-            else if (katKomponen.includes('ALAT')) kKat = 'ALAT';
+            let kKat: AhspKomponen['kategori'] = 'BAHAN';
+            if (katKomponen.includes('UPAH') || katKomponen.includes('PEKERJA') || katKomponen.includes('TUKANG')) kKat = 'UPAH';
+            else if (katKomponen.includes('ALAT') || katKomponen.includes('SEWA')) kKat = 'ALAT';
+            else if (katKomponen.includes('SMKK') || katKomponen.includes('K3')) kKat = 'SMKK';
+            else if (katKomponen.includes('SIPLAH')) kKat = 'SIPLAH';
+            else if (katKomponen.includes('CETAK')) kKat = 'CETAK';
+            else if (katKomponen.includes('PINTU') || katKomponen.includes('JENDELA')) kKat = 'PINTU_JENDELA';
+            else if (katKomponen.includes('LAIN')) kKat = 'LAINNYA';
 
-            const totalKompHarga = Math.round(koef * hargaKomp);
+            const totalKompHarga = Math.round(koef * hargaKomp * 100) / 100;
 
             const komponenObj: AhspKomponen = {
-              id: generateSecureId('komp-imp'),
+              id: generateSecureId('komp'),
               kategori: kKat,
               uraian: uraianKomp,
               koefisien: koef,
@@ -462,7 +702,7 @@ export async function parseRealDataExcelFile(file: File): Promise<{
             };
 
             ahspObj.komponen.push(komponenObj);
-            ahspObj.totalHargaSatuan += totalKompHarga;
+            ahspObj.totalHargaSatuan = Math.round((ahspObj.totalHargaSatuan + totalKompHarga) * 100) / 100;
           }
         }
 
@@ -472,6 +712,66 @@ export async function parseRealDataExcelFile(file: File): Promise<{
       }
     }
 
+    // 4. Auto-linking RAB items to AHSP items
+    let linkedCount = 0;
+    let unlinkedCount = 0;
+    if (updatedData.divisions && updatedData.ahspList) {
+      const linkRes = autoLinkRabToAhsp(updatedData.divisions, updatedData.ahspList);
+      linkedCount = linkRes.linkedCount;
+      unlinkedCount = linkRes.unlinkedCount;
+    }
+
+    // 5. Build pre-apply Validation Report
+    const unitPriceMismatches: ExcelImportValidationReport['unitPriceMismatches'] = [];
+    const unlinkedRabItems: ExcelImportValidationReport['unlinkedRabItems'] = [];
+    const linkedAhspIds = new Set<string>();
+
+    (updatedData.divisions || []).forEach((div) => {
+      div.items.forEach((item) => {
+        if (!item.ahspIdRef) {
+          unlinkedRabItems.push({
+            divKode: div.kode,
+            itemUraian: item.uraian,
+            itemId: item.id,
+          });
+        } else {
+          linkedAhspIds.add(item.ahspIdRef);
+          const ahsp = (updatedData.ahspList || []).find((a) => a.id === item.ahspIdRef);
+          if (ahsp) {
+            const diff = Math.abs(item.hargaSatuan - ahsp.totalHargaSatuan);
+            if (diff > 1.0) {
+              unitPriceMismatches.push({
+                rabItemUraian: item.uraian,
+                rabDivKode: div.kode,
+                rabHargaSatuan: item.hargaSatuan,
+                ahspHargaSatuan: ahsp.totalHargaSatuan,
+                diff,
+              });
+            }
+          }
+        }
+      });
+    });
+
+    const unusedAhspItems = (updatedData.ahspList || [])
+      .filter((a) => !linkedAhspIds.has(a.id))
+      .map((a) => ({
+        kodePekerjaan: a.kodePekerjaan,
+        namaPekerjaan: a.namaPekerjaan,
+        id: a.id,
+      }));
+
+    const validationReport: ExcelImportValidationReport = {
+      totalRab: updatedData.totalNilaiRab || 0,
+      paguAnggaran: updatedData.paguAnggaran || updatedData.totalNilaiRab || 0,
+      rabVsPaguDiff: (updatedData.totalNilaiRab || 0) - (updatedData.paguAnggaran || updatedData.totalNilaiRab || 0),
+      unitPriceMismatches,
+      unlinkedRabItems,
+      unusedAhspItems,
+      linkedCount,
+      unlinkedCount,
+    };
+
     return {
       success: true,
       data: updatedData,
@@ -480,7 +780,10 @@ export async function parseRealDataExcelFile(file: File): Promise<{
         divisionsCount,
         rabItemsCount,
         ahspCount,
+        linkedCount,
+        unlinkedCount,
       },
+      validationReport,
     };
   } catch (err: any) {
     console.error('Error reading Excel file:', err);

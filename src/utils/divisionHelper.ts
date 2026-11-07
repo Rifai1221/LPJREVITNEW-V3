@@ -18,33 +18,47 @@ import { getItemMaterialLaborSplit } from './ahspHelper';
  * Reallocates removed or added component nominals proportionally across remaining BAHAN components
  * so that the AHSP Total Harga Satuan remains 100% constant.
  */
+/**
+ * Smart AHSP Budget Rebalancing Engine:
+ * Reallocates removed or added component nominals proportionally across remaining components.
+ * Priority:
+ * 1. Reallocate across remaining components in the SAME category as deletedCompCategory.
+ * 2. If no remaining components exist in that category, reallocate across all remaining components and return a warning.
+ * Adjusts component koefisien (NOT hargaSatuan) so market unit price remains fixed.
+ */
 export function rebalanceAhspComponents(
   components: AhspKomponen[],
   targetTotal: number,
-  mode: 'BAHAN_PRIMARY' | 'ALL_PROPORTIONAL' = 'BAHAN_PRIMARY'
-): AhspKomponen[] {
-  if (!components || components.length === 0 || targetTotal <= 0) return components;
+  deletedCompCategory?: string
+): AhspKomponen[] & { warning?: string } {
+  if (!components || components.length === 0 || targetTotal <= 0) {
+    return (components || []) as AhspKomponen[] & { warning?: string };
+  }
 
-  const currentSum = components.reduce(
-    (s, c) => s + (typeof c.totalHarga === 'number' ? c.totalHarga : Math.round((c.koefisien || 1) * (c.hargaSatuan || 0) * 100) / 100),
-    0
-  );
+  const currentSum = components.reduce((s, c) => s + (c.totalHarga || (c.koefisien * c.hargaSatuan)), 0);
   const diff = Math.round((targetTotal - currentSum) * 100) / 100;
 
   if (Math.abs(diff) < 0.01) {
-    return components;
+    return components as AhspKomponen[] & { warning?: string };
   }
 
-  // Identify target components (Skema A: BAHAN primary)
-  let targets = mode === 'BAHAN_PRIMARY'
-    ? components.filter((c) => c.kategori === 'BAHAN')
+  let warning: string | undefined = undefined;
+
+  // Identify target components in same category first
+  let targets = deletedCompCategory
+    ? components.filter((c) => c.kategori === deletedCompCategory)
     : components;
+
+  if (targets.length === 0 && deletedCompCategory) {
+    targets = components;
+    warning = `Tidak ada komponen lain pada kategori ${deletedCompCategory}. Nominal dialokasikan ke komponen kategori lain.`;
+  }
 
   if (targets.length === 0) {
     targets = components;
   }
 
-  const targetSum = targets.reduce((s, c) => s + (c.totalHarga || 0), 0);
+  const targetSum = targets.reduce((s, c) => s + (c.totalHarga || (c.koefisien * c.hargaSatuan)), 0);
   const targetIds = new Set(targets.map((t) => t.id));
 
   let allocatedDiff = 0;
@@ -54,21 +68,24 @@ export function rebalanceAhspComponents(
     const isLastTarget = targets[targets.length - 1].id === c.id;
     let propDiff = 0;
     if (targetSum > 0) {
-      propDiff = isLastTarget ? diff - allocatedDiff : (c.totalHarga / targetSum) * diff;
+      propDiff = isLastTarget ? diff - allocatedDiff : ((c.totalHarga || (c.koefisien * c.hargaSatuan)) / targetSum) * diff;
     } else {
       propDiff = diff / targets.length;
     }
     allocatedDiff += propDiff;
 
-    const newTotal = Math.max(10, Math.round(((c.totalHarga || 0) + propDiff) * 100) / 100);
-    let newHargaSatuan = c.hargaSatuan;
-    if (c.koefisien > 0) {
-      newHargaSatuan = Math.round((newTotal / c.koefisien) * 100) / 100;
+    const oldTotal = c.totalHarga || (c.koefisien * c.hargaSatuan);
+    const newTotal = Math.max(0, Math.round((oldTotal + propDiff) * 100) / 100);
+
+    // Update koefisien (NOT hargaSatuan) so market price remains fixed
+    let newKoef = c.koefisien;
+    if (c.hargaSatuan > 0) {
+      newKoef = Math.round((newTotal / c.hargaSatuan) * 10000) / 10000;
     }
 
     return {
       ...c,
-      hargaSatuan: newHargaSatuan > 0 ? newHargaSatuan : c.hargaSatuan,
+      koefisien: newKoef,
       totalHarga: newTotal,
     };
   });
@@ -79,16 +96,20 @@ export function rebalanceAhspComponents(
     const lastTargetIdx = result.findIndex((c) => targetIds.has(c.id));
     if (lastTargetIdx >= 0) {
       const c = result[lastTargetIdx];
-      const fixedTotal = Math.max(10, Math.round((c.totalHarga + finalDiff) * 100) / 100);
+      const fixedTotal = Math.max(0, Math.round((c.totalHarga + finalDiff) * 100) / 100);
       result[lastTargetIdx] = {
         ...c,
-        hargaSatuan: c.koefisien > 0 ? Math.round((fixedTotal / c.koefisien) * 100) / 100 : c.hargaSatuan,
+        koefisien: c.hargaSatuan > 0 ? Math.round((fixedTotal / c.hargaSatuan) * 10000) / 10000 : c.koefisien,
         totalHarga: fixedTotal,
       };
     }
   }
 
-  return result;
+  const retArray = result as AhspKomponen[] & { warning?: string };
+  if (warning) {
+    retArray.warning = warning;
+  }
+  return retArray;
 }
 
 /**

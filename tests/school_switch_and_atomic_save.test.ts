@@ -4,6 +4,7 @@ import { getDefaultState } from '../src/services/storageService';
 import { AppStateData } from '../src/types';
 import {
   saveSchoolTenantAppState,
+  loadSchoolTenantAppState,
   assertDocumentSize,
   getStoredTenantRev,
   setStoredTenantRev,
@@ -35,32 +36,114 @@ describe('School Switch Protocol & Atomic Save Unit Tests', () => {
     localStorage.clear();
   });
 
-  describe('Requirement 3a & 3b: Flush Old School State Before Switch', () => {
-    it('should flush dirty state to old tenantId before switching to new tenant', async () => {
-      const oldTenantId = 'sch_old_111';
-      const newTenantId = 'sch_new_222';
-
-      let isDirty = true;
-      let flushCalledWithTenant: string | null = null;
-      let newSchoolLoaded = false;
-
-      // Simulated safe switchSchool workflow
-      const mockSwitchSchool = async (targetId: string) => {
-        // Step 1: FLUSH if dirty
-        if (isDirty) {
-          flushCalledWithTenant = oldTenantId;
-          isDirty = false;
-        }
-
-        // Step 2: Load new tenant
-        newSchoolLoaded = true;
+  describe('Requirement 3a & 3b: Flush Old School State Before Switch (Real Code Execution)', () => {
+    it('should save state A, switch to B, modify B, return to A, and verify A is strictly unchanged', async () => {
+      const tenantAObj = {
+        id: 'sch_A_10105685',
+        npsn: '10105685',
+        namaSekolah: 'SD NEGERI A',
+        jenjang: 'SD' as const,
+        kabKota: 'Banda Aceh',
+        provinsi: 'Aceh',
+        email: 'sdna@sekolah.id',
+        createdAt: '2026-01-01',
+        lastLogin: '2026-01-01',
       };
 
-      await mockSwitchSchool(newTenantId);
+      const tenantBObj = {
+        id: 'sch_B_10101234',
+        npsn: '10101234',
+        namaSekolah: 'SD NEGERI B',
+        jenjang: 'SD' as const,
+        kabKota: 'Banda Aceh',
+        provinsi: 'Aceh',
+        email: 'sdnb@sekolah.id',
+        createdAt: '2026-01-01',
+        lastLogin: '2026-01-01',
+      };
 
-      assert.strictEqual(flushCalledWithTenant, oldTenantId, 'Flush must be called with old tenant ID');
-      assert.strictEqual(isDirty, false, 'isDirty flag must be cleared upon flush');
-      assert.strictEqual(newSchoolLoaded, true, 'New school should be loaded after flush completes');
+      // 1. Prepare and save State A
+      const stateA: AppStateData = {
+        ...getDefaultState(),
+        tenantId: tenantAObj.id,
+        school: {
+          ...getDefaultState().school,
+          namaSekolah: 'SD NEGERI A',
+          npsn: '10105685',
+        },
+        kwitansiList: [
+          {
+            id: 'kw-a-1',
+            noBukti: 'KW-A-01',
+            tipe: 'MATERIAL',
+            tanggal: '01/08/2026',
+            tanggalFormatted: '01 Agustus 2026',
+            bulan: 'Agustus 2026',
+            uraian: 'Pembelian Semen Sekolah A',
+            penerimaNama: 'TB A',
+            penerimaPekerjaan: 'Toko',
+            penerimaAlamat: 'Aceh',
+            items: [],
+            nominal: 5000000,
+            isPpn: false,
+            isPph22: false,
+            isPph23: false,
+            ppnAmount: 0,
+            pph22Amount: 0,
+            pph23Amount: 0,
+          },
+        ],
+      };
+      (stateA.school as any).id = tenantAObj.id;
+
+      const saveARes = await saveSchoolTenantAppState(tenantAObj.id, stateA, 1, 'user-1');
+      assert.strictEqual(saveARes.local, true, 'School A state save must succeed');
+
+      // 2. Switch to School B
+      const loadBRes = await loadSchoolTenantAppState(tenantBObj, 'user-1');
+      assert.strictEqual(loadBRes.state.tenantId, tenantBObj.id, 'Loaded state must match tenant B ID');
+
+      const stateBModified: AppStateData = {
+        ...loadBRes.state,
+        tenantId: tenantBObj.id,
+        school: {
+          ...loadBRes.state.school,
+          namaSekolah: 'SD NEGERI B MODIFIED',
+        },
+        kwitansiList: [
+          {
+            id: 'kw-b-99',
+            noBukti: 'KW-B-99',
+            tipe: 'MATERIAL',
+            tanggal: '05/08/2026',
+            tanggalFormatted: '05 Agustus 2026',
+            bulan: 'Agustus 2026',
+            uraian: 'Pembelian Cat Sekolah B',
+            penerimaNama: 'TB B',
+            penerimaPekerjaan: 'Toko',
+            penerimaAlamat: 'Aceh',
+            items: [],
+            nominal: 12000000,
+            isPpn: false,
+            isPph22: false,
+            isPph23: false,
+            ppnAmount: 0,
+            pph22Amount: 0,
+            pph23Amount: 0,
+          },
+        ],
+      };
+      (stateBModified.school as any).id = tenantBObj.id;
+
+      const saveBRes = await saveSchoolTenantAppState(tenantBObj.id, stateBModified, 1, 'user-1');
+      assert.strictEqual(saveBRes.local, true, 'School B state save must succeed');
+
+      // 3. Return to School A and verify A is strictly intact
+      const loadARes = await loadSchoolTenantAppState(tenantAObj, 'user-1');
+      assert.strictEqual(loadARes.state.tenantId, tenantAObj.id, 'Loaded tenantId must be tenant A');
+      assert.strictEqual(loadARes.state.school.namaSekolah, 'SD NEGERI A', 'School A name must remain unchanged');
+      assert.strictEqual(loadARes.state.kwitansiList.length, 1, 'School A must have exactly its own 1 receipt');
+      assert.strictEqual(loadARes.state.kwitansiList[0].noBukti, 'KW-A-01', 'School A receipt must be KW-A-01');
     });
   });
 

@@ -36,7 +36,7 @@ import { terbilangRupiah } from '../utils/terbilang';
 import { rebalanceAhspComponents } from '../utils/divisionHelper';
 import { decomposeRealisticBahanAndUpah, isPreservedUnitItem } from '../services/autoGeneratorService';
 import { KwitansiTagManager, AhspLaborProtectionBadge } from './KwitansiTagManager';
-import { DEFAULT_MATERIAL_LABOR_RATIO, getItemMaterialLaborSplit } from '../utils/ahspHelper';
+import { DEFAULT_MATERIAL_LABOR_RATIO, getItemMaterialLaborSplit, resolveAhsp } from '../utils/ahspHelper';
 
 interface RabAhspDocumentPreviewModalProps {
   isOpen: boolean;
@@ -68,6 +68,18 @@ export const RabAhspDocumentPreviewModal: React.FC<RabAhspDocumentPreviewModalPr
   const [isEditing, setIsEditing] = useState(false);
   const [editableComponents, setEditableComponents] = useState<AhspKomponen[]>([]);
   const [saveSuccessNotice, setSaveSuccessNotice] = useState(false);
+  const [warningMessage, setWarningMessage] = useState<string | null>(null);
+  const [mismatchModal, setMismatchModal] = useState<{
+    isOpen: boolean;
+    newTotalSatuan: number;
+    rabHargaSatuan: number;
+    updatedAhsp: AhspItem | null;
+  }>({
+    isOpen: false,
+    newTotalSatuan: 0,
+    rabHargaSatuan: 0,
+    updatedAhsp: null,
+  });
 
   // Determine standard fiscal year
   const yearStr = school?.tahunAnggaran?.trim() || realData?.tahunAnggaran || '2026';
@@ -132,41 +144,15 @@ export const RabAhspDocumentPreviewModal: React.FC<RabAhspDocumentPreviewModalPr
     matchedUpahKw?.tanggal ||
     `${school?.kabKota || 'Kota'}, T.A ${yearStr}`;
 
-  // Find automatic match if no specific ahspIdRef
+  // Strict AHSP match by ID / ahspIdRef / resolveAhsp (NO loose keyword matching)
   const matchedAhsp = useMemo(() => {
     if (!rabItem) return null;
     const list = realData.ahspList || [];
     if (selectedAhspId) {
-      return list.find((a) => a.id === selectedAhspId) || null;
-    }
-    if (rabItem.ahspIdRef) {
-      const explicit = list.find((a) => a.id === rabItem.ahspIdRef);
+      const explicit = list.find((a) => a.id === selectedAhspId || a.kodePekerjaan === selectedAhspId);
       if (explicit) return explicit;
     }
-
-    const lowerRab = rabItem.uraian.toLowerCase().trim();
-    // 1. Direct contains match
-    const directMatch = list.find((a) => {
-      const lowerAh = (a.namaPekerjaan || '').toLowerCase().trim();
-      return lowerAh === lowerRab || lowerAh.includes(lowerRab) || lowerRab.includes(lowerAh);
-    });
-    if (directMatch) return directMatch;
-
-    // 2. Keyword heuristic match
-    const keywords = lowerRab
-      .replace(/[^a-zA-Z0-9\s]/g, ' ')
-      .split(/\s+/)
-      .filter((w) => w.length > 3 && !/pekerjaan|pasang|pemasangan|pengadaan/i.test(w));
-
-    if (keywords.length > 0) {
-      const keywordMatch = list.find((a) => {
-        const lowerAh = (a.namaPekerjaan || '').toLowerCase();
-        return keywords.some((kw) => lowerAh.includes(kw));
-      });
-      if (keywordMatch) return keywordMatch;
-    }
-
-    return null;
+    return resolveAhsp(rabItem, list) || null;
   }, [rabItem, selectedAhspId, realData.ahspList]);
 
   // Sync state whenever modal opens or rabItem changes
@@ -417,23 +403,63 @@ export const RabAhspDocumentPreviewModal: React.FC<RabAhspDocumentPreviewModalPr
     }
   };
 
-  const handleSaveEditedAhsp = (e: React.FormEvent) => {
-    e.preventDefault();
+  const applySavedAhsp = (finalTotalSatuan: number, updateRab: boolean, finalComps?: AhspKomponen[]) => {
+    const compsToSave = finalComps || editableComponents;
     if (matchedAhsp && onUpdateAhsp) {
-      const newTotalSatuan = editableComponents.reduce((acc, it) => acc + (it.totalHarga || 0), 0);
       const updatedAhsp: AhspItem = {
         ...matchedAhsp,
-        totalHargaSatuan: newTotalSatuan,
-        komponen: editableComponents,
+        totalHargaSatuan: finalTotalSatuan,
+        komponen: compsToSave,
       };
       onUpdateAhsp(updatedAhsp);
     }
+    if (updateRab && onUpdateRabItem && division && rabItem) {
+      onUpdateRabItem(division.id, rabItem.id, {
+        hargaSatuan: finalTotalSatuan,
+        jumlah: Math.round(finalTotalSatuan * rabItem.volume),
+      });
+    }
+    setMismatchModal({ isOpen: false, newTotalSatuan: 0, rabHargaSatuan: 0, updatedAhsp: null });
     setSaveSuccessNotice(true);
     setTimeout(() => {
       setSaveSuccessNotice(false);
       setIsEditing(false);
       setActiveTab('AHSP');
     }, 1200);
+  };
+
+  const handleSaveEditedAhsp = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!matchedAhsp || !onUpdateAhsp) return;
+    const newTotalSatuan = editableComponents.reduce((acc, it) => acc + (it.totalHarga || (it.koefisien * it.hargaSatuan)), 0);
+    const diff = newTotalSatuan - (rabItem?.hargaSatuan || 0);
+
+    if (Math.abs(diff) > 0.5 && rabItem) {
+      setMismatchModal({
+        isOpen: true,
+        newTotalSatuan,
+        rabHargaSatuan: rabItem.hargaSatuan,
+        updatedAhsp: {
+          ...matchedAhsp,
+          totalHargaSatuan: newTotalSatuan,
+          komponen: editableComponents,
+        },
+      });
+      return;
+    }
+
+    applySavedAhsp(newTotalSatuan, false);
+  };
+
+  const handleOptionRebalance = () => {
+    if (!rabItem) return;
+    const rebalanced = rebalanceAhspComponents(editableComponents, rabItem.hargaSatuan, 'BAHAN_PRIMARY');
+    setEditableComponents(rebalanced);
+    applySavedAhsp(rabItem.hargaSatuan, false, rebalanced);
+  };
+
+  const handleOptionUpdateRab = () => {
+    applySavedAhsp(mismatchModal.newTotalSatuan, true);
   };
 
   const defaultStoreName = selectedVendor ? selectedVendor.namaToko : (stores && stores.length > 0 ? stores[0].namaToko : 'TB. REKANAN MATERIAL UTAMA');
@@ -1306,6 +1332,66 @@ export const RabAhspDocumentPreviewModal: React.FC<RabAhspDocumentPreviewModalPr
           </button>
         </div>
       </div>
+
+      {/* Mismatch Choice Modal */}
+      {mismatchModal.isOpen && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs animate-fade-in font-sans">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl border border-amber-200 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 bg-amber-100 text-amber-800 rounded-xl shrink-0">
+                <AlertCircle className="w-6 h-6" />
+              </div>
+              <div>
+                <h4 className="font-bold text-slate-900 text-base">Selisih Harga AHSP & RAB</h4>
+                <p className="text-xs text-slate-600 mt-1">
+                  Hasil penjumlahan komponen AHSP baru (<strong>{formatRupiah(mismatchModal.newTotalSatuan)}</strong>) berbeda dengan Harga Satuan RAB (<strong>{formatRupiah(mismatchModal.rabHargaSatuan)}</strong>).
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-xs text-slate-700 space-y-1 font-mono">
+              <div className="flex justify-between">
+                <span>Total Komponen AHSP Baru:</span>
+                <span className="font-bold text-blue-800">{formatRupiah(mismatchModal.newTotalSatuan)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Harga Satuan RAB Saat Ini:</span>
+                <span className="font-bold text-emerald-800">{formatRupiah(mismatchModal.rabHargaSatuan)}</span>
+              </div>
+              <div className="flex justify-between pt-1 border-t border-slate-200 font-bold">
+                <span>Selisih:</span>
+                <span className="text-rose-700">{formatRupiah(mismatchModal.newTotalSatuan - mismatchModal.rabHargaSatuan)}</span>
+              </div>
+            </div>
+
+            <div className="space-y-2 pt-2">
+              <button
+                type="button"
+                onClick={handleOptionRebalance}
+                className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs transition cursor-pointer flex items-center justify-between shadow-xs"
+              >
+                <span>a) Seimbangkan Otomatis ke Total RAB</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={handleOptionUpdateRab}
+                className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition cursor-pointer flex items-center justify-between shadow-xs"
+              >
+                <span>b) Perbarui Harga Satuan & Jumlah RAB</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setMismatchModal({ isOpen: false, newTotalSatuan: 0, rabHargaSatuan: 0, updatedAhsp: null })}
+                className="w-full py-2 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-xs transition cursor-pointer text-center"
+              >
+                Batal
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
